@@ -1,0 +1,34 @@
+# 本地开发环境（技术方案 §8.1）：服务端一律跑 Docker，开发环境即自建端形态
+# 用法：docker compose -f docker/docker-compose.dev.yml up
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: dev
+    volumes:
+      - ../packages:/app/packages
+      - ../apps/server:/app/apps/server
+      - server-data:/data
+    ports:
+      - "3000:3000"
+    environment:
+      MF_FORM: self-hosted
+      PORT: 3000
+      # LLM 三档切换只改这里：llm-mock -> http://llm-mock:8080/v1
+      #                    本机 Ollama -> http://host.docker.internal:11434/v1
+      #                    真实端点 -> 厂商 OpenAI 兼容 URL
+      LLM_BASE_URL: http://llm-mock:8080/v1
+      LLM_API_KEY: mock
+  llm-mock:
+    image: node:22-alpine
+    working_dir: /mock
+    volumes:
+      # 挂目录而非单文件：编辑器/sed 替换文件会更换 inode，单文件挂载会失效
+      - ./docker:/mock:ro
+    command: node /mock/llm-mock.mjs
+    ports:
+      - "18080:8080"
+
+volumes:
+  server-data:

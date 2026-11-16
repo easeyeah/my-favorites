@@ -1,0 +1,25 @@
+{
+  "name": "my-favorites",
+  "private": true,
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "seed": "pnpm --filter @mf/shared seed",
+    "prepare": "husky || true"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.29.0",
+    "@commitlint/cli": "^19.8.0",
+    "@commitlint/config-conventional": "^19.8.0",
+    "husky": "^9.1.0",
+    "turbo": "^2.5.0",
+    "typescript": "^5.8.0"
+  }
+}

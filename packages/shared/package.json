@@ -1,0 +1,20 @@
+{
+  "name": "@mf/shared",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "seed": "node scripts/seed.mjs"
+  },
+  "dependencies": {
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

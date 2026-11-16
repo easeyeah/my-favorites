@@ -1,0 +1,162 @@
+{
+  "$schema": "./registry.schema.json",
+  "comment": "供应商注册表（技术方案 §6.1）。纯数据维护：新增供应商=加一条，不改代码。base_url 标 TODO_VERIFY 的需以官方文档核实后填入。",
+  "providers": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "group": "国内",
+      "apiStyle": "openai-compatible",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "keyUrl": "https://platform.deepseek.com/api_keys",
+      "models": ["deepseek-chat", "deepseek-reasoner"],
+      "supportsModelsApi": false
+    },
+    {
+      "id": "bigmodel",
+      "name": "智谱 BigModel",
+      "group": "国内",
+      "apiStyle": "openai-compatible",
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "keyUrl": "https://open.bigmodel.cn/usercenter/apikeys",
+      "models": ["glm-4.7", "glm-4.7-air", "embedding-4"],
+      "supportsModelsApi": false
+    },
+    {
+      "id": "zai",
+      "name": "Z.ai",
+      "group": "国际",
+      "apiStyle": "openai-compatible",
+      "baseUrl": "https://api.z.ai/api/paas/v4",
+      "keyUrl": "https://z.ai/manage-apikey/apikey-list",
+      "models": ["glm-4.7"],
+      "supportsModelsApi": false
+    },
+    {
+      "id": "dashscope-cn",
+      "name": "阿里云百炼（中国）",
+      "group": "国内",
+      "apiStyle": "openai-compatible",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "keyUrl": "https://bailian.console.aliyun.com/?apiKey=1",
+      "models": ["qwen-max", "qwen-plus", "text-embedding-v4"],
+      "supportsModelsApi": true
+    },
+    {
+      "id": "dashscope-intl",
+      "name": "阿里云百炼（国际）",
+      "group": "国际",
+      "apiStyle": "openai-compatible",
+      "baseUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      "keyUrl": "https://bailian.console.alibabacloud.com/?apiKey=1",
+      "models": ["qwen-plus"],
+      "supportsModelsApi": true
+    },
+    {
+      "id": "moonshot-cn",
+      "name": "Kimi（Moonshot 国内）",
+      "group": "国内",
+      "apiStyle": "openai-compatible",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "keyUrl": "https://platform.moonshot.cn/console/api-keys",
+      "models": ["kimi-k2-0905-preview", "moonshot-v1-8k"],
+      "supportsModelsApi": true
+    },
+    {
+      "id": "moonshot-intl",
+      "name": "Kimi（Moonshot 国际）",
+      "group": "国际",
+      "apiStyle": "openai-compatible",
+      "baseUrl": "https://api.moonshot.ai/v1",
+      "keyUrl": "https://platform.moonshot.ai/console/api-keys",
+      "models": ["kimi-k2-0905-preview"],
+      "supportsModelsApi": true
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "group": "国内",
+      "apiStyle": "openai-compatible",
+      "baseUrl": null,
+      "baseUrlNote": "TODO_VERIFY：以官方文档核对后填入",
+      "keyUrl": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+      "models": ["MiniMax-M2"],
+      "supportsModelsApi": false
+    },
+    {
+      "id": "volcengine-ark",
+      "name": "火山方舟",
+      "group": "国内",
+      "apiStyle": "openai-compatible",
+      "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+      "keyUrl": "https://console.volcengine.com/ark/region:ark-cn-beijing/apiKey",
+      "models": ["doubao-seed-1-6"],
+      "supportsModelsApi": false
+    },
+    {
+      "id": "tencent-tokenhub",
+      "name": "腾讯 TokenHub",
+      "group": "国内",
+      "apiStyle": "openai-compatible",
+      "baseUrl": null,
+      "baseUrlNote": "TODO_VERIFY：以官方文档核对后填入",
+      "keyUrl": "https://tokenhub.cloud.tencent.com/",
+      "models": [],
+      "supportsModelsApi": false
+    },
+    {
+      "id": "xiaomi-mimo",
+      "name": "小米 MiMo",
+      "group": "国内",
+      "apiStyle": "openai-compatible",
+      "baseUrl": null,
+      "baseUrlNote": "TODO_VERIFY：以官方文档核对后填入",
+      "keyUrl": "https://xiaomimimo.com/",
+      "models": ["MiMo-M2"],
+      "supportsModelsApi": false
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "group": "国际",
+      "apiStyle": "openai-compatible",
+      "baseUrl": "https://api.openai.com/v1",
+      "keyUrl": "https://platform.openai.com/api-keys",
+      "models": ["gpt-5-mini", "text-embedding-3-small"],
+      "supportsModelsApi": true
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "group": "国际",
+      "apiStyle": "anthropic",
+      "baseUrl": "https://api.anthropic.com",
+      "keyUrl": "https://console.anthropic.com/settings/keys",
+      "models": ["claude-haiku-4-5"],
+      "supportsModelsApi": false
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama（本地）",
+      "group": "本地",
+      "apiStyle": "openai-compatible",
+      "baseUrl": "http://localhost:11434/v1",
+      "keyUrl": null,
+      "models": [],
+      "supportsModelsApi": true,
+      "needsKey": false
+    },
+    {
+      "id": "custom",
+      "name": "自定义供应商",
+      "group": "自定义",
+      "apiStyle": "openai-compatible",
+      "baseUrl": null,
+      "baseUrlNote": "用户自填任意 OpenAI 兼容端点",
+      "keyUrl": null,
+      "models": [],
+      "supportsModelsApi": true,
+      "template": true
+    }
+  ]
+}

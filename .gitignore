@@ -34,3 +34,14 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+apps/server/seed/
+
+# Extension build artifacts
+apps/extension/.output/
+apps/extension/.wxt/
+
+# Server bundle
+apps/server/dist/
+
+# Seed output
+apps/server/seed/

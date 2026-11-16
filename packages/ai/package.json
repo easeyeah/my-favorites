@@ -1,0 +1,15 @@
+{
+  "name": "@mf/ai",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mf/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}

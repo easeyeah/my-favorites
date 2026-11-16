@@ -36,12 +36,12 @@ docker compose -f docker/docker-compose.dev.yml up   # 服务端必须跑在 Doc
 pnpm --filter extension dev      # 扩展 WXT HMR（连接 http://localhost:3000）
 pnpm seed                        # 生成边界情况书签集
 pnpm test                        # 单元 + 集成
-pnpm build:images && 内存冒烟     # 生产镜像构建 + 内存断言（<300MB）
+docker build --target prod -t my-favorites:ci -f docker/Dockerfile .   # 生产镜像 + 冒烟（内存 <300MB / 镜像 <=250MB）
 ```
 
 ## 硬性红线（违反=PR 不通过）
 
-1. **NAS 内存红线**：自建容器内存 <300MB、镜像 <200MB、SQLite 单文件、必须支持 ARM64
+1. **NAS 资源红线**：自建容器运行内存 <300MB、镜像 ≤250MB（实测：node:22-alpine 运行时基线约 235MB，因此约束为"bundle 级增量，禁止整包 node_modules 进运行层"；server 以 esbuild bundle 交付）；SQLite 单文件；必须支持 ARM64
 2. **隐私不可绕过**：隐私域名校验在 `packages/shared` 分类引擎内部执行，任何抓取/AI 调用前强制校验，不是可选步骤
 3. **用户数据安全**：删除类操作永不自动执行（AI 只出建议清单）；所有整理/收件箱移动必须写入 `organize_version`（可回滚）
 4. **版权红线**：公开导航站永不展示快照内容，仅元数据+摘要
@@ -62,8 +62,9 @@ pnpm build:images && 内存冒烟     # 生产镜像构建 + 内存断言（<300
 
 - [x] 产品文档 v0.3、技术方案 v0.1（git 历史可查）
 - [x] git 仓库 + GitHub 远端（easeyeah/my-favorites）
-- [ ] M1 骨架（步骤见技术方案附录：monorepo 初始化 → docker 环境 → shared → server → extension → 整理会话 → 导航站 → 埋点）
-- [ ] License 文件（待定 MIT vs AGPL，见功能文档 D12 讨论）
+- [x] M1 骨架步骤 1+2：monorepo 初始化 + Docker 环境（shared/server/extension/web 四包可构建，URL 规范化 12 项单测通过）
+- [ ] M1 骨架步骤 3-8：ingest/bookmarks API → 收件箱监听 → 整理会话 → 导航站 → 埋点
+- [x] License：AGPL-3.0（官方全文已入库）
 
 ## 技术方案遗留核对项
 
