@@ -1,8 +1,8 @@
 # my-favorites 自建端镜像 —— 与云端同一套代码，按 env 区分形态（技术方案 §3/§8）
-# 红线：镜像 <=250MB（node:22-alpine 运行时基线，bundle 级增量），运行内存 <300MB，支持 linux/arm64（AGENTS.md）
+# 红线：镜像 <=250MB（node:24-alpine 运行时基线，bundle 级增量），运行内存 <300MB，支持 linux/arm64（AGENTS.md）
 
 # ---------- 基础：依赖与源码 ----------
-FROM node:22-alpine AS deps
+FROM node:24-alpine AS deps
 WORKDIR /app
 RUN corepack enable && pnpm config set store-dir /app/.pnpm-store
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
@@ -13,7 +13,7 @@ COPY packages/shared/package.json packages/shared/package.json
 COPY packages/ai/package.json packages/ai/package.json
 RUN pnpm fetch
 
-FROM node:22-alpine AS base
+FROM node:24-alpine AS base
 WORKDIR /app
 RUN corepack enable
 ENV NODE_ENV=production
@@ -39,7 +39,7 @@ COPY apps/server apps/server
 RUN pnpm install --frozen-lockfile --prefer-offline
 RUN pnpm --filter @mf/server build
 
-FROM node:22-alpine AS prod
+FROM node:24-alpine AS prod
 WORKDIR /app
 COPY --from=build /app/apps/server/dist/index.js ./dist/index.js
 

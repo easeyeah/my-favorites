@@ -45,3 +45,6 @@ apps/server/dist/
 
 # Seed output
 apps/server/seed/
+
+# Playwright
+apps/e2e/test-results/

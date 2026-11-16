@@ -2,9 +2,7 @@
   "name": "my-favorites",
   "private": true,
   "packageManager": "pnpm@12.18.0",
-  "engines": {
-    "node": ">=22"
-  },
+  "engines": { "node": ">=22" },
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",

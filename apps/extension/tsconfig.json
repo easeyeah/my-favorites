@@ -6,5 +6,5 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["wxt/browser", "chrome"]
   },
-  "include": ["entrypoints", ".wxt/types"]
+  "include": ["entrypoints", "src", ".wxt/types"]
 }
