@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+out/
+*.tsbuildinfo
+.turbo/
+
+# Dev & test
+coverage/
+.vitest/
+.playwright/
+
+# Local data (server dev volume lives in Docker named volume; these are stray artifacts)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+/data/
+
+# Secrets & env
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
