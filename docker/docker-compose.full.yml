@@ -1,0 +1,43 @@
+# 全离线自建（M3）：自建服务端 + 本机 Ollama，零云依赖
+# 用法：docker compose -f docker/docker-compose.full.yml up -d
+# 扩展/管理台设置 LLM_BASE_URL 即可全离线运行
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: prod
+    ports:
+      - "3000:3000"
+    environment:
+      MF_FORM: self-hosted
+      PORT: 3000
+      # 全离线：指向容器内 Ollama
+      LLM_BASE_URL: http://ollama:11434/v1
+      LLM_MODEL: qwen2.5:7b
+      LLM_EMBEDDING_MODEL: nomic-embed-text
+      # NAS 红线资源限制（可用 docker stats 验证 <300MB）
+      MEM_LIMIT: 300m
+      # 每周维护任务（死链/查重自动执行）
+      MF_MAINTENANCE_INTERVAL_HOURS: 168
+      # 数据落盘（SQLite + 快照）
+      DATA_DIR: /data
+    volumes:
+      - server-data:/data
+    depends_on:
+      - ollama
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    # GPU 用户可取消注释以下段落
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+volumes:
+  server-data:
+  ollama-models:

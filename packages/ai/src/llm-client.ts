@@ -26,6 +26,46 @@ export class LlmUnavailableError extends Error {
 export class LlmClient {
   constructor(private config: LlmConfig) {}
 
+  get baseUrl(): string {
+    return this.config.baseUrl;
+  }
+
+  get model(): string {
+    return this.config.model;
+  }
+
+  /** embeddings 端点（语义搜索/聚类；模型由 LLM_EMBEDDING_MODEL 或供应商配置决定） */
+  async embeddings(input: string, embeddingModel?: string, timeoutMs = 30_000): Promise<number[]> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/embeddings`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}),
+        },
+        body: JSON.stringify({ model: embeddingModel ?? "text-embedding-3-small", input }),
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new LlmUnavailableError(`HTTP ${res.status} embeddings`);
+      const body = (await res.json()) as { data?: Array<{ embedding?: number[] }> };
+      const vector = body.data?.[0]?.embedding;
+      if (!Array.isArray(vector) || vector.length === 0) {
+        throw new LlmUnavailableError("empty embedding");
+      }
+      return vector;
+    } catch (err) {
+      if (err instanceof LlmUnavailableError) throw err;
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new LlmUnavailableError("timeout");
+      }
+      throw new LlmUnavailableError(String(err));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async chat(messages: ChatMessage[], opts?: { json?: boolean; timeoutMs?: number }): Promise<string> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 30_000);

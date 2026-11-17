@@ -31,7 +31,7 @@ export interface OrganizeActionView {
 export class OrganizeService {
   constructor(
     private store: Store,
-    private llm: LlmClient | null,
+    private llmFor: (purpose: "organize" | "summarize" | "embedding") => LlmClient | null,
   ) {}
 
   async handleMessage(
@@ -123,14 +123,16 @@ export class OrganizeService {
       pending.push({ id: bm.id, title: bm.title, url: bm.url_canonical, folderId: bm.folder_id });
     }
 
-    // LLM 批量分类（无 LLM 时保留原位并在 summary 说明）
-    if (pending.length > 0 && this.llm) {
+    // F3.8 偏好记忆注入 + LLM 批量分类（无 LLM 时保留原位并在 summary 说明）
+    const llm = this.llmFor("organize");
+    const prefs = this.store.topCategories();
+    if (pending.length > 0 && llm) {
       const folderNames = this.store
         .listFolders()
         .filter((f) => !f.is_system_inbox)
         .map((f) => f.name);
       try {
-        const out = await this.llm.chatJson<{
+        const out = await llm.chatJson<{
           results: Array<{ index: number; category: string; confidence: number }>;
         }>([
           {
@@ -138,6 +140,7 @@ export class OrganizeService {
             content:
               "你是书签分类助手。现有目录：" +
               JSON.stringify(folderNames) +
+              (prefs.length > 0 ? `。用户常用目录（优先参考）：${JSON.stringify(prefs)}` : "") +
               '。为每条书签选择目录（可建议新目录）。只返回 JSON {"results":[{"index":0,"category":"...","confidence":0.0}]}。',
           },
           {

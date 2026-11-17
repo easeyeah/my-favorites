@@ -4,11 +4,12 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import net from "node:net";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
-export const PORT = 3000;
-export const BASE = `http://localhost:${PORT}`;
+export const PORT = 3007; // 3000 被 VSCode 扩展宿主占用（ZCode Helper）
+export const BASE = `http://127.0.0.1:${PORT}`;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const EXTENSION_PATH = path.resolve(__dirname, "../../extension/.output/chrome-mv3");
 
@@ -18,22 +19,52 @@ const dataDir = mkdtempSync(path.join(os.tmpdir(), "mf-e2e-"));
 /** 启动本地 server（在各 spec 的 beforeAll 中显式调用） */
 export async function startServer(): Promise<void> {
   if (server) return;
+  console.log("[fixture] startServer begin");
+  // fail-fast：端口被残留进程占用时，测试页面会打到旧服务器（曾导致脏数据误判）
+  // 端口占用检测用 TCP connect（不经 HTTP 层，避免代理/IPv6 干扰）
+  const occupied = await new Promise<boolean>((resolve) => {
+    const sock = net.connect(PORT, "127.0.0.1");
+    sock.on("connect", () => {
+      sock.destroy();
+      resolve(true);
+    });
+    sock.on("error", () => resolve(false));
+    setTimeout(() => {
+      sock.destroy();
+      resolve(false);
+    }, 1000);
+  });
+  if (occupied) throw new Error(`port ${PORT} already occupied by another server`);
+  console.log("[fixture] spawning server");
   server = spawn("node", [path.resolve(__dirname, "../../server/dist/index.js")], {
+    cwd: path.resolve(__dirname, "../.."),
     env: {
       ...process.env,
       DATA_DIR: dataDir,
       PORT: String(PORT),
+      NODE_ENV: "production",
       MF_SKIP_SERVE: undefined,
+      NO_PROXY: "*",
+      no_proxy: "*",
+      HTTP_PROXY: "",
+      HTTPS_PROXY: "",
+      http_proxy: "",
+      https_proxy: "",
     },
-    stdio: "pipe",
+    stdio: "ignore",
   });
   server.on("error", (e) => console.error("[e2e server] spawn error:", e));
-  server.stderr?.on("data", (d) => console.error("[e2e server]", String(d).slice(0, 500)));
+  server.on("exit", (code) => {
+    if (code !== null) console.error("[e2e server] exited early, code", code);
+  });
   // 等待就绪
   for (let i = 0; i < 40; i++) {
     try {
-      const res = await fetch(`${BASE}/healthz`);
-      if (res.ok) return;
+      const res = await fetch(`${BASE}/healthz`, { signal: AbortSignal.timeout(800) });
+      if (res.ok) {
+        console.log("[fixture] server ready");
+        return;
+      }
     } catch {
       // retry
     }

@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { browser } from "wxt/browser";
-import { api, getConfig, saveConfig } from "../../src/lib/api";
+import { api, getConfig, login, saveConfig } from "../../src/lib/api";
 
 function Options() {
   const [serverUrl, setServerUrl] = useState("http://localhost:3000");
   const [status, setStatus] = useState("");
   const [inboxId, setInboxId] = useState<string | null>(null);
   const [stats, setStats] = useState<{ total: number; folders: number } | null>(null);
+  const [password, setPassword] = useState("");
 
   useEffect(() => {
     void getConfig().then((c) => setServerUrl(c.serverUrl));
@@ -67,6 +68,38 @@ function Options() {
         {status && <p className="text-sm text-green-600">{status}</p>}
       </section>
       <section className="mt-8 text-sm">
+        <label className="block">服务端开启管理员密码？（F6.2 自建鉴权）</label>
+        <div className="mt-1 flex gap-2">
+          <input
+            className="flex-1 rounded-lg border px-3 py-2 text-sm"
+            type="password"
+            placeholder="管理员密码（未启用可留空）"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <button
+            className="rounded-lg bg-neutral-900 px-3 py-2 text-sm text-white"
+            onClick={() =>
+              void (async () => {
+                try {
+                  if (!password) {
+                    setStatus("已跳过登录（服务端未启用鉴权）");
+                    return;
+                  }
+                  await login(password);
+                  setStatus("✅ 登录成功，token 已保存");
+                } catch {
+                  setStatus("❌ 登录失败");
+                }
+                setTimeout(() => setStatus(""), 3000);
+              })()
+            }
+          >
+            登录
+          </button>
+        </div>
+      </section>
+      <section className="mt-8 text-sm">
         <div className="flex items-center justify-between">
           <span>服务端书签统计</span>
           <button className="text-xs underline" onClick={() => void loadStats()}>刷新</button>
@@ -76,6 +109,17 @@ function Options() {
             共 {stats.total} 条书签 / {stats.folders} 个目录
           </p>
         )}
+        <button
+          className="mt-3 rounded-lg border px-3 py-2 text-sm"
+          onClick={() =>
+            void browser.runtime.sendMessage({ type: "sync-mirror" }, (res: { added?: number; error?: string } | undefined) => {
+              setStatus(res?.added !== undefined ? `✅ 已同步 ${res.added} 条到浏览器「my-favorites 同步」` : `同步失败：${res?.error ?? "未知"}`);
+              setTimeout(() => setStatus(""), 4000);
+            })
+          }
+        >
+          🔄 同步书签到浏览器（F1.7）
+        </button>
       </section>
     </main>
   );

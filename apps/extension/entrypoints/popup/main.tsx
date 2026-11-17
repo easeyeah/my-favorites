@@ -38,6 +38,12 @@ function Popup() {
         </button>
         <button
           className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+          onClick={() => send("snapshot-current", "快照已保存", "已收藏过，快照已保存")}
+        >
+          📸 一键快照
+        </button>
+        <button
+          className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
           onClick={() => void browser.sidePanel.open({ windowId: browser.windows.WINDOW_ID_CURRENT })}
         >
           💬 聊天整理

@@ -6,6 +6,8 @@ import { openDb } from "./db";
 import { Store } from "./store";
 import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
+import { SemanticService } from "./semantic";
+import { MaintenanceService } from "./maintenance";
 import { buildApp, type AppDeps } from "./app";
 import type { LlmClient } from "@mf/ai/llm-client";
 
@@ -13,24 +15,47 @@ export interface TestEnv extends AppDeps {
   app: ReturnType<typeof buildApp>;
   cleanup: () => void;
   dataDir: string;
-  /** 直通 store 便于断言 */
   store: Store;
   pipeline: Pipeline;
   organize: OrganizeService;
+  semantic: SemanticService;
+  maintenance: MaintenanceService;
 }
 
-export function makeEnv(llm: LlmClient | null = null, syncAi = false): TestEnv {
+export function makeEnv(
+  llm: LlmClient | null = null,
+  syncAi = false,
+  opts: { adminPassword?: string; embedClient?: LlmClient | null } = {},
+): TestEnv {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "mf-test-"));
   const store = new Store(openDb(dataDir));
-  const pipeline = new Pipeline(store, llm, { syncAi });
-  const organize = new OrganizeService(store, llm);
-  const app = buildApp({ store, llm, dataDir, pipeline, organize });
+  const llmFor = () => llm;
+  const pipeline = new Pipeline(store, llmFor, { syncAi });
+  const organize = new OrganizeService(store, llmFor);
+  const semantic = new SemanticService(
+    store,
+    opts.embedClient ?? null,
+    opts.embedClient ? "mock-embedding" : null,
+  );
+  const maintenance = new MaintenanceService(store);
+  const app = buildApp({
+    store,
+    llmFor,
+    dataDir,
+    pipeline,
+    organize,
+    semantic,
+    maintenance,
+    adminPassword: opts.adminPassword,
+  });
   return {
     app,
     store,
-    llm,
+    llmFor,
     pipeline,
     organize,
+    semantic,
+    maintenance,
     dataDir,
     cleanup: () => rmSync(dataDir, { recursive: true, force: true }),
   };

@@ -27,7 +27,7 @@ export interface SuggestResult {
 export class Pipeline {
   constructor(
     private store: Store,
-    private llm: LlmClient | null,
+    private llmFor: (purpose: "organize" | "summarize" | "embedding") => LlmClient | null,
     private opts: { syncAi?: boolean } = {},
   ) {}
 
@@ -139,13 +139,14 @@ export class Pipeline {
   async maybeSummarize(bookmarkId: string): Promise<boolean> {
     const cache = this.store.getCache(bookmarkId);
     const l2 = (cache?.l2_text as string | null) ?? "";
-    if (!this.llm || !l2 || l2.length < 40) return false;
+    const llm = this.llmFor("summarize");
+    if (!llm || !l2 || l2.length < 40) return false;
     const bm = this.store.getBookmark(bookmarkId);
     if (!bm) return false;
 
     const run = async () => {
       try {
-        const out = await this.llm!.chatJson<{
+        const out = await llm.chatJson<{
           summary: string;
           tags: string[];
           keywords: string[];
@@ -233,8 +234,9 @@ export class Pipeline {
       pending.push({ id, title: bm.title, url: bm.url_canonical });
     }
 
+    const llm = this.llmFor("organize");
     // 无 LLM：pending 项明确标注原因留在收件箱（永不丢书签）
-    if (!this.llm) {
+    if (!llm) {
       for (const p of pending) left.push({ id: p.id, reason: "no_llm" });
       const versionId =
         versionActions.length > 0 ? this.store.saveVersion(null, versionActions) : null;
@@ -248,7 +250,8 @@ export class Pipeline {
         .filter((f) => !f.is_system_inbox)
         .map((f) => f.name);
       try {
-        const out = await this.llm.chatJson<{
+        const prefs = this.store.topCategories();
+        const out = await llm.chatJson<{
           results: Array<{ index: number; category: string; confidence: number }>;
         }>([
           {
@@ -256,6 +259,7 @@ export class Pipeline {
             content:
               '你是书签分类助手。现有目录：' +
               JSON.stringify(folderNames) +
+              (prefs.length > 0 ? `。用户常用目录（优先参考）：${JSON.stringify(prefs)}` : "") +
               '。为每条书签选择最合适的目录（可建议新目录名）。只返回 JSON：{"results":[{"index":0,"category":"...","confidence":0.0}]}，confidence∈[0,1]。',
           },
           {

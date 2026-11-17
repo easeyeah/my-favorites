@@ -106,7 +106,59 @@ export function migrate(db: Db): void {
       visibility TEXT NOT NULL DEFAULT 'unlisted',
       created_at TEXT NOT NULL
     );
+
+    -- M2/M3 扩充
+    CREATE TABLE IF NOT EXISTS tokens (
+      token TEXT PRIMARY KEY,
+      label TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      op TEXT NOT NULL,
+      payload TEXT,
+      device TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS maintenance_report (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      findings TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS prefs (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS provider_config (
+      id TEXT PRIMARY KEY,
+      provider_id TEXT NOT NULL,
+      base_url TEXT NOT NULL,
+      api_key TEXT,
+      purpose_models TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
+
+  // 增量列（SQLite 无 ADD COLUMN IF NOT EXISTS，用 pragma 判断）
+  const addColumn = (table: string, column: string, decl: string): void => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+    }
+  };
+  addColumn("nav_site", "template", "TEXT NOT NULL DEFAULT 'grid'");
+  addColumn("nav_site", "password_hash", "TEXT");
+  addColumn("bookmarks", "is_private", "INTEGER NOT NULL DEFAULT 0");
+  addColumn("content_cache", "embedding", "TEXT");
 
   // 内置隐私域名（用户可增不可删，AGENTS.md 红线 2）
   const builtin: string[] = [

@@ -4,7 +4,7 @@
  * （构建期 WXT 用 mock browser 导入本模块提取 manifest，顶层 API 调用会报 not implemented）。
  */
 import { browser } from "wxt/browser";
-import { api, getConfig, saveConfig, sendEvent } from "../src/lib/api";
+import { api, fetchWeeklyReport, getConfig, saveConfig, sendEvent } from "../src/lib/api";
 import type { BookmarkDto } from "../src/lib/api";
 
 const MENU_SAVE_ID = "mf-save";
@@ -56,6 +56,7 @@ async function saveFromTab(
     body: JSON.stringify({ url, title: capture?.title || tab.title || url }),
   });
   void sendEvent("bookmark_saved");
+  lastSavedBookmarkId = created.id;
 
   // 内容上行（服务端做隐私校验 + 20KB 截断；fire-and-forget）
   if (capture) {
@@ -89,6 +90,63 @@ async function ensureInboxFolder(): Promise<InboxInfo> {
   const created = await browser.bookmarks.create({ parentId: "1", title: INBOX_TITLE });
   await saveConfig({ inboxExtId: created.id });
   return { serverId: server.id, extId: created.id };
+}
+
+let lastSavedBookmarkId: string | null = null;
+
+/** F2.4 一键快照：pageCapture 原生 MHTML → 上传（先确保书签已收藏） */
+async function snapshotCurrentTab(tab: chrome.tabs.Tab | undefined): Promise<{ ok: boolean }> {
+  if (!tab?.id) return { ok: false };
+  const save = await saveFromTab(tab);
+  if (!save) return { ok: false };
+  // 收藏已存在（重复）时拿不到新建 id → 先按 URL 反查
+  let bookmarkId = lastSavedBookmarkId;
+  if (!bookmarkId) {
+    const tabUrl = tab.url;
+    const list = await api<BookmarkDto[]>("/bookmarks", {});
+    const found = tabUrl ? list.find((b) => b.url_canonical === tabUrl.replace(/^http:/, "https:")) : undefined;
+    bookmarkId = found?.id ?? null;
+  }
+  if (!bookmarkId) return { ok: false };
+  const mhtml = await new Promise<ArrayBuffer | null>((resolve) => {
+    // wxt/browser shim 未实现 pageCapture，直接用 chrome 命名空间
+    const pageCapture = (globalThis as unknown as { chrome: { pageCapture: { captureMHTML: (opts: { tabId: number }, cb: (data?: string) => void) => void } } }).chrome.pageCapture;
+    pageCapture.captureMHTML({ tabId: tab.id! }, (data?: string) => {
+      if (!data) return resolve(null);
+      resolve(new Blob([data]).arrayBuffer());
+    });
+  });
+  if (!mhtml) return { ok: false };
+  const { uploadSnapshot, sendEvent: ev } = await import("../src/lib/api");
+  await uploadSnapshot(bookmarkId, mhtml);
+  void ev("snapshot_created");
+  return { ok: true };
+}
+
+/** F1.7 多端同步镜像：把服务端书签镜像到浏览器「my-favorites 同步」文件夹 */
+async function syncMirror(): Promise<{ added: number }> {
+  const { syncCursor = 0 } = await getConfig();
+  const pull = await api<{
+    items: Array<{ entity: string; entity_id: string; op: string; payload: unknown }>;
+    cursor: number;
+  }>(`/sync/pull?cursor=${syncCursor}&device=extension`, {});
+  let added = 0;
+  // 找/建同步根目录
+  const barChildren = await browser.bookmarks.getChildren("1");
+  let root = barChildren.find((n) => !n.url && n.title === "my-favorites 同步");
+  if (!root) root = await browser.bookmarks.create({ parentId: "1", title: "my-favorites 同步" });
+  for (const item of pull.items) {
+    if (item.entity !== "bookmark") continue;
+    const payload = item.payload as { url?: string; title?: string } | null;
+    if (item.op === "delete" || !payload?.url) continue;
+    // 幂等：按 URL 查重
+    const existing = await browser.bookmarks.search({ url: payload.url }).catch(() => []);
+    if (existing.length > 0) continue;
+    await browser.bookmarks.create({ parentId: root.id, title: payload.title ?? payload.url, url: payload.url });
+    added++;
+  }
+  await saveConfig({ syncCursor: pull.cursor });
+  return { added };
 }
 
 // ---------- 收件箱监听（防抖聚合，长任务委托服务端） ----------
@@ -135,6 +193,22 @@ export default defineBackground((): void => {
     });
     void sendEvent("install");
   });
+
+  // F5.5 周报角标（留存钩子④）：每日首次启动 SW 时检查一次
+  void (async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const { reportReadDate } = await getConfig();
+    if (reportReadDate === today) return;
+    const report = await fetchWeeklyReport();
+    if (report && (report.findings.dead ?? 0) + (report.findings.suspect ?? 0) > 0) {
+      await saveConfig({ reportReadDate: today });
+      void browser.action.setBadgeText({
+        text: `周报:${report.findings.dead ?? 0}死${report.findings.suspect ?? 0}疑`,
+      });
+      setTimeout(() => void browser.action.setBadgeText({ text: "" }), 10_000);
+      void sendEvent("weekly_report_clicked", { via: "badge" });
+    }
+  })();
 
   // 右键收藏（activeTab 已由用户点击授予 → 可就地捕获）
   browser.contextMenus.onClicked.addListener((info, tab) => {
@@ -193,6 +267,15 @@ export default defineBackground((): void => {
           sendResponse({ saved: !created.duplicate });
         } else if (msg.type === "setup-inbox") {
           sendResponse(await ensureInboxFolder());
+        } else if (msg.type === "snapshot-current") {
+          const tab = (await browser.tabs.query({ active: true, currentWindow: true }))[0];
+          sendResponse(await snapshotCurrentTab(tab));
+        } else if (msg.type === "sync-mirror") {
+          try {
+            sendResponse(await syncMirror());
+          } catch (err) {
+            sendResponse({ error: String(err) });
+          }
         }
       })();
       return true; // async sendResponse

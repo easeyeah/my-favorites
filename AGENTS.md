@@ -62,8 +62,8 @@ docker build --target prod -t my-favorites:ci -f docker/Dockerfile .   # 生产�
 
 - [x] 产品文档 v0.3、技术方案 v0.1（git 历史可查）
 - [x] git 仓库 + GitHub 远端（easeyeah/my-favorites）
-- [x] M1 骨架步骤 1+2：monorepo 初始化 + Docker 环境（shared/server/extension/web 四包可构建，URL 规范化 12 项单测通过）
-- [ ] M1 骨架步骤 3-8：ingest/bookmarks API → 收件箱监听 → 整理会话 → 导航站 → 埋点
+- [x] M1–M3 全量功能开发完成（见 docs/开发报告-M1.md，功能完成度对照表）
+- [x] 测试：74 单元/集成 + 14 Playwright E2E 全过；Docker 冒烟通过
 - [x] License：AGPL-3.0（官方全文已入库）
 
 ## 技术方案遗留核对项
