@@ -48,3 +48,6 @@ apps/server/seed/
 
 # Playwright
 apps/e2e/test-results/
+
+# Server-hosted admin build artifact (copied from apps/web/dist at deploy time)
+apps/server/web-dist/
