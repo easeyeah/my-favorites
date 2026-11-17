@@ -5,6 +5,7 @@
  */
 import { browser } from "wxt/browser";
 import { api, fetchWeeklyReport, getConfig, saveConfig, sendEvent } from "../src/lib/api";
+import { flattenBookmarkTree, type BookmarkImportItem } from "../src/lib/import";
 import type { BookmarkDto } from "../src/lib/api";
 
 const MENU_SAVE_ID = "mf-save";
@@ -267,6 +268,24 @@ export default defineBackground((): void => {
           sendResponse({ saved: !created.duplicate });
         } else if (msg.type === "setup-inbox") {
           sendResponse(await ensureInboxFolder());
+        } else if (msg.type === "import-bookmarks") {
+          const tree = await browser.bookmarks.getTree();
+          const items = flattenBookmarkTree(
+            tree as unknown as Parameters<typeof flattenBookmarkTree>[0],
+          );
+          const idempotencyKey = `browser-tree-${Date.now()}`;
+          const result = await api<{
+            imported: number;
+            skipped_duplicate: number;
+            skipped_invalid?: number;
+            total: number;
+          }>("/bookmarks/ingest", {
+            method: "POST",
+            headers: { "content-type": "application/json", "Idempotency-Key": idempotencyKey },
+            body: JSON.stringify({ idempotencyKey, items: items as BookmarkImportItem[] }),
+          });
+          void sendEvent("import_completed", { imported: result.imported, total: result.total });
+          sendResponse(result);
         } else if (msg.type === "snapshot-current") {
           const tab = (await browser.tabs.query({ active: true, currentWindow: true }))[0];
           sendResponse(await snapshotCurrentTab(tab));

@@ -120,6 +120,24 @@ function Options() {
         >
           🔄 同步书签到浏览器（F1.7）
         </button>
+        <button
+          className="mt-3 rounded-lg border px-3 py-2 text-sm"
+          onClick={() =>
+            void browser.runtime.sendMessage(
+              { type: "import-bookmarks" },
+              (res: { imported?: number; total?: number; skipped_duplicate?: number; error?: string } | undefined) => {
+                if (!res?.imported) {
+                  setStatus(`❌ 导入失败：${res?.error ?? "未知"}`);
+                } else {
+                  setStatus(`✅ 已导入 ${res.imported}/${res.total} 条（重复 ${res.skipped_duplicate} 条跳过）`);
+                }
+                setTimeout(() => setStatus(""), 5000);
+              },
+            )
+          }
+        >
+          📥 一键导入浏览器全部书签（F1.1）
+        </button>
       </section>
     </main>
   );
