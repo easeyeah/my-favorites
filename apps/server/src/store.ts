@@ -634,6 +634,64 @@ export class Store {
     return row.s;
   }
 
+  /**
+   * 目录树 + 计数聚合（设计原则：计数由服务端 GROUP BY 聚合，
+   * 客户端不拉全量书签数数——上万书签也是一次轻查询）
+   */
+  folderTree(privateVisibleOnly: boolean): Array<{
+    id: string;
+    name: string;
+    parent_id: string | null;
+    is_system_inbox: number;
+    directCount: number;
+    totalCount: number;
+  }> {
+    const folders = this.listFolders();
+    const counts = new Map<string, number>();
+    const rows = this.db
+      .prepare("SELECT folder_id, COUNT(*) as c FROM bookmarks GROUP BY folder_id")
+      .all() as unknown as Array<{ folder_id: string; c: number }>;
+    for (const r of rows) counts.set(r.folder_id, r.c);
+    // 排除私密书签的计数（与列表可见性一致）
+    if (privateVisibleOnly) {
+      const visibleCounts = new Map<string, number>();
+      const visRows = this.db
+        .prepare("SELECT folder_id, COUNT(*) as c FROM bookmarks WHERE is_private = 0 GROUP BY folder_id")
+        .all() as unknown as Array<{ folder_id: string; c: number }>;
+      for (const r of visRows) visibleCounts.set(r.folder_id, r.c);
+      for (const f of folders) {
+        counts.set(f.id, visibleCounts.get(f.id) ?? 0);
+      }
+    }
+    // 子孙聚合：后序遍历（多轮收敛处理任意深度）
+    const byParent = new Map<string | null, typeof folders>();
+    for (const f of folders) {
+      const arr = byParent.get(f.parent_id) ?? [];
+      arr.push(f);
+      byParent.set(f.parent_id, arr);
+    }
+    const totalCache = new Map<string, number>();
+    const computeTotal = (id: string, seen = new Set<string>()): number => {
+      if (totalCache.has(id)) return totalCache.get(id)!;
+      if (seen.has(id)) return counts.get(id) ?? 0; // 防环
+      seen.add(id);
+      let total = counts.get(id) ?? 0;
+      for (const child of byParent.get(id) ?? []) {
+        total += computeTotal(child.id, seen);
+      }
+      totalCache.set(id, total);
+      return total;
+    };
+    return folders.map((f) => ({
+      id: f.id,
+      name: f.name,
+      parent_id: f.parent_id,
+      is_system_inbox: f.is_system_inbox,
+      directCount: counts.get(f.id) ?? 0,
+      totalCount: computeTotal(f.id),
+    }));
+  }
+
   // ---------- 导航站配置更新 ----------
   updateNavSite(slug: string, patch: { title?: string; template?: string; passwordHash?: string | null }): void {
     const current = this.getNavSite(slug);

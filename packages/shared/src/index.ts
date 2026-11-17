@@ -75,7 +75,7 @@ export const bookmarkIngestItem = z.object({
 });
 
 export const ingestRequest = z.object({
-  items: z.array(bookmarkIngestItem).min(1).max(100),
+  items: z.array(bookmarkIngestItem).min(1).max(2000),
   /** 幂等键：扩展 SW 中断重试不重复导入 */
   idempotencyKey: z.string().min(8).max(128),
 });

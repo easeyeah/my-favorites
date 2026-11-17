@@ -268,6 +268,23 @@ export function buildApp(deps: AppDeps): Hono {
 
   // ---------- F1.3 目录与书签 CRUD ----------
   api.get("/folders", (c) => c.json(store.listFolders()));
+
+  // 目录树 + 计数聚合（服务端 GROUP BY，客户端不拉全量数数）
+  api.get("/folders/tree", (c) =>
+    c.json(store.folderTree(!privateVisible(c))),
+  );
+
+  // 按 URL 精确查重（索引命中 O(1)，替代拉列表遍历）
+  api.get("/bookmarks/by-url", (c) => {
+    const raw = c.req.query("url");
+    if (!raw) return c.json({ error: "url_required" }, 400);
+    const canon = canonicalizeUrl(raw);
+    if (!canon) return c.json({ error: "invalid_url" }, 400);
+    const bm = store.findByCanonical(canon.canonical);
+    if (!bm) return c.json({ found: false });
+    if (bm.is_private && !privateVisible(c)) return c.json({ found: false });
+    return c.json({ found: true, bookmark: bm });
+  });
   api.post("/folders", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
       name?: string;

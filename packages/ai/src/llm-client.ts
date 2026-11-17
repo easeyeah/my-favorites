@@ -36,8 +36,7 @@ export class LlmClient {
 
   /** embeddings 端点（语义搜索/聚类；模型由 LLM_EMBEDDING_MODEL 或供应商配置决定） */
   async embeddings(input: string, embeddingModel?: string, timeoutMs = 30_000): Promise<number[]> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // AbortSignal.timeout：Node 原生类型源，规避 DOM/Node AbortSignal 双类型冲突
     try {
       const res = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/embeddings`, {
         method: "POST",
@@ -46,7 +45,7 @@ export class LlmClient {
           ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}),
         },
         body: JSON.stringify({ model: embeddingModel ?? "text-embedding-3-small", input }),
-        signal: controller.signal,
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (!res.ok) throw new LlmUnavailableError(`HTTP ${res.status} embeddings`);
       const body = (await res.json()) as { data?: Array<{ embedding?: number[] }> };
@@ -57,18 +56,14 @@ export class LlmClient {
       return vector;
     } catch (err) {
       if (err instanceof LlmUnavailableError) throw err;
-      if (err instanceof Error && err.name === "AbortError") {
+      if (err instanceof Error && err.name === "TimeoutError") {
         throw new LlmUnavailableError("timeout");
       }
       throw new LlmUnavailableError(String(err));
-    } finally {
-      clearTimeout(timer);
     }
   }
 
   async chat(messages: ChatMessage[], opts?: { json?: boolean; timeoutMs?: number }): Promise<string> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 30_000);
     try {
       const res = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
@@ -81,7 +76,7 @@ export class LlmClient {
           messages,
           ...(opts?.json ? { response_format: { type: "json_object" } } : {}),
         }),
-        signal: controller.signal,
+        signal: AbortSignal.timeout(opts?.timeoutMs ?? 30_000),
       });
       if (!res.ok) {
         throw new LlmUnavailableError(`HTTP ${res.status} from ${this.config.baseUrl}`);
@@ -94,12 +89,10 @@ export class LlmClient {
       return content;
     } catch (err) {
       if (err instanceof LlmUnavailableError) throw err;
-      if (err instanceof Error && err.name === "AbortError") {
+      if (err instanceof Error && err.name === "TimeoutError") {
         throw new LlmUnavailableError("timeout");
       }
       throw new LlmUnavailableError(String(err));
-    } finally {
-      clearTimeout(timer);
     }
   }
 

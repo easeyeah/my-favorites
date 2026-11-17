@@ -102,11 +102,17 @@ async function snapshotCurrentTab(tab: chrome.tabs.Tab | undefined): Promise<{ o
   if (!save) return { ok: false };
   // 收藏已存在（重复）时拿不到新建 id → 先按 URL 反查
   let bookmarkId = lastSavedBookmarkId;
-  if (!bookmarkId) {
-    const tabUrl = tab.url;
-    const list = await api<BookmarkDto[]>("/bookmarks", {});
-    const found = tabUrl ? list.find((b) => b.url_canonical === tabUrl.replace(/^http:/, "https:")) : undefined;
-    bookmarkId = found?.id ?? null;
+  if (!bookmarkId && tab.url) {
+    // 按URL 精确查重（服务端索引命中，不拉列表遍历）
+    try {
+      const lookup = await api<{ found: boolean; bookmark?: { id: string } }>(
+        `/bookmarks/by-url?url=${encodeURIComponent(tab.url)}`,
+        {},
+      );
+      bookmarkId = lookup.found ? (lookup.bookmark?.id ?? null) : null;
+    } catch {
+      bookmarkId = null;
+    }
   }
   if (!bookmarkId) return { ok: false };
   const mhtml = await new Promise<ArrayBuffer | null>((resolve) => {

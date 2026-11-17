@@ -81,6 +81,10 @@ interface Folder {
   parent_id: string | null;
   is_system_inbox: number;
 }
+interface FolderTreeNode extends Folder {
+  directCount: number;
+  totalCount: number;
+}
 interface ProposalAction {
   type: string;
   bookmarkTitle?: string;
@@ -184,36 +188,53 @@ function Overview({ cfg }: { cfg: AdminConfig }) {
 
 function Bookmarks({ cfg }: { cfg: AdminConfig }) {
   const [items, setItems] = useState<Bookmark[]>([]);
-  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folders, setFolders] = useState<FolderTreeNode[]>([]);
   const [selected, setSelected] = useState<string | "all">("all");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
-  const load = useCallback(() => {
-    // 服务端单页上限 1000 → 循环分页拉全量（几千条 ~1MB，管理台可接受）
-    (async () => {
-      const all: Bookmark[] = [];
-      const PAGE = 1000;
-      try {
-        for (let offset = 0; ; offset += PAGE) {
-          const batch = await api<Bookmark[]>(cfg, `/bookmarks?limit=${PAGE}&offset=${offset}`);
-          all.push(...batch);
-          if (batch.length < PAGE) break;
-        }
-        setItems(all);
-      } catch {
-        setItems([]);
-      }
-    })();
-    api<Folder[]>(cfg, "/folders").then(setFolders).catch(() => setFolders([]));
-    setSearching(false);
+  const [hasMore, setHasMore] = useState(false);
+  const PAGE = 100;
+
+  const loadTree = useCallback(() => {
+    // 目录树 + 计数：服务端聚合（GROUP BY），上万书签也是一次轻查询
+    api<FolderTreeNode[]>(cfg, "/folders/tree").then(setFolders).catch(() => setFolders([]));
   }, [cfg]);
-  useEffect(load, [load]);
+
+  /** 按需分页拉取当前视图（目录 or 全部）——不拉全量 */
+  const loadPage = useCallback(
+    async (view: string | "all", offset: number, append: boolean): Promise<void> => {
+      const query =
+        view === "all"
+          ? `limit=${PAGE}&offset=${offset}`
+          : `folderId=${encodeURIComponent(view)}&limit=${PAGE}&offset=${offset}`;
+      try {
+        const batch = await api<Bookmark[]>(cfg, `/bookmarks?${query}`);
+        setItems((prev) => (append ? [...prev, ...batch] : batch));
+        setHasMore(batch.length === PAGE);
+      } catch {
+        if (!append) setItems([]);
+        setHasMore(false);
+      }
+    },
+    [cfg],
+  );
+
+  const selectFolder = (id: string | "all") => {
+    setSelected(id);
+    setSearching(false);
+    void loadPage(id, 0, false);
+  };
+
+  // 初始：树 + 全部第一页
+  useEffect(() => {
+    loadTree();
+    void loadPage("all", 0, false);
+  }, [loadTree, loadPage]);
 
   const folderName = (id: string) => folders.find((f) => f.id === id)?.name ?? "未整理";
   const childrenOf = (parentId: string | null) =>
     folders.filter((f) => f.parent_id === parentId && !f.is_system_inbox);
-  const countIn = (folderId: string) => items.filter((b) => b.folder_id === folderId).length;
 
   const toggle = (id: string) => {
     setCollapsed((prev) => {
@@ -225,33 +246,28 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
   };
 
   const doSearch = async () => {
-    if (!q.trim()) return setSearching(false);
+    if (!q.trim()) {
+      selectFolder("all");
+      return;
+    }
     setSearching(true);
     const res = await api<{ results: Bookmark[] }>(cfg, `/search?q=${encodeURIComponent(q)}`);
-    setItems(res.results); // 复用 items 渲染结果；load() 恢复
+    setItems(res.results);
+    setHasMore(false);
   };
 
-  const visible = searching ? items : items.filter((b) => selected === "all" || b.folder_id === selected);
+  const visible = items;
 
-  const renderNode = (folder: Folder, depth: number): React.ReactNode => {
+  const renderNode = (folder: FolderTreeNode, depth: number): React.ReactNode => {
     const kids = childrenOf(folder.id);
     const isCollapsed = collapsed.has(folder.id);
-    const count = countIn(folder.id);
-    const descendantCount =
-      count +
-      kids.reduce((sum, k) => {
-        const kidCount = countIn(k.id) + childrenOf(k.id).reduce((s, kk) => s + countIn(kk.id), 0);
-        return sum + kidCount;
-      }, 0);
+    const descendantCount = folder.totalCount; // 服务端聚合（含子孙）
     return (
       <div key={folder.id}>
         <div
-          className={`flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-sm hover:bg-accent ${selected === folder.id ? "bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-950" : ""}`}
+          className={`flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-sm hover:bg-accent ${selected === folder.id && !searching ? "bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-950" : ""}`}
           style={{ paddingLeft: 8 + depth * 16 }}
-          onClick={() => {
-            setSelected(folder.id);
-            setSearching(false);
-          }}
+          onClick={() => selectFolder(folder.id)}
         >
           {kids.length > 0 ? (
             <button
@@ -275,17 +291,21 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
   };
 
   const roots = childrenOf(null);
+  const totalCount = folders
+    .filter((f) => !f.is_system_inbox && f.parent_id === null)
+    .reduce((sum, f) => sum + f.totalCount, 0);
 
   const remove = (b: Bookmark) => {
     if (!confirm(`删除「${b.title}」？`)) return;
     void api(cfg, `/bookmarks/${b.id}`, { method: "DELETE" }).then(() => {
+      loadTree();
       if (searching) void doSearch();
-      else load();
+      else void loadPage(selected, 0, false);
     });
   };
 
   return (
-    <Card title={`书签管理（${visible.length} 条${searching ? " · 搜索结果" : selected === "all" ? " · 全部" : ` · ${folderName(selected)}`}）`}>
+    <Card title={`书签管理（${visible.length} 条${hasMore ? "+" : ""}${searching ? " · 搜索结果" : selected === "all" ? " · 全部" : ` · ${folderName(selected)}`}）`}>
       <div className="mb-3 flex gap-2">
         <input
           className="flex-1 rounded-lg border border-border bg-card px-3 py-2 text-sm"
@@ -295,25 +315,22 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
           onKeyDown={() => void doSearch()}
         />
         <Btn onClick={() => void doSearch()}>搜索</Btn>
-        <Btn onClick={load}>全部</Btn>
+        <Btn onClick={() => selectFolder("all")}>全部</Btn>
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[240px_1fr]">
-        {/* 左：目录树（保留导入时的层级结构） */}
+        {/* 左：目录树（计数来自服务端聚合） */}
         <div className="max-h-[60vh] overflow-y-auto rounded-xl border border-border p-2">
           <div
             className={`flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-sm hover:bg-accent ${selected === "all" && !searching ? "bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-950" : ""}`}
-            onClick={() => {
-              setSelected("all");
-              setSearching(false);
-            }}
+            onClick={() => selectFolder("all")}
           >
             <span className="w-4 shrink-0" />
             <span>全部书签</span>
-            <span className="ml-auto text-xs text-muted-foreground">{items.length}</span>
+            <span className="ml-auto text-xs text-muted-foreground">{totalCount}</span>
           </div>
           {roots.map((r) => renderNode(r, 0))}
         </div>
-        {/* 右：当前目录的书签列表（行式布局） */}
+        {/* 右：当前视图书签（按需分页） */}
         <div className="max-h-[60vh] overflow-y-auto">
           {visible.map((b) => (
             <div key={b.id} className="flex items-center gap-3 border-b border-border py-2.5 last:border-0">
@@ -337,6 +354,11 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
             <p className="py-6 text-center text-sm text-muted-foreground">
               {searching ? "无搜索结果" : "该目录下暂无书签"}
             </p>
+          )}
+          {hasMore && !searching && (
+            <div className="py-3 text-center">
+              <Btn onClick={() => void loadPage(selected, items.length, true)}>加载更多</Btn>
+            </div>
           )}
         </div>
       </div>
