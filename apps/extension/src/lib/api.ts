@@ -87,7 +87,18 @@ export async function api<T>(
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(`${serverUrl}/api/v1${pathname}`, { ...init, headers });
   if (!res.ok) {
-    throw new Error(`api ${pathname} failed: HTTP ${res.status}`);
+    // 读响应体里的校验详情（zod 400 会带 issues），错误信息可诊断
+    let detail = "";
+    try {
+      const body = (await res.json()) as { detail?: unknown; error?: string };
+      if (body.error) detail = body.error;
+      if (Array.isArray(body.detail)) {
+        detail += " " + body.detail.map((d) => JSON.stringify(d)).join("; ").slice(0, 300);
+      }
+    } catch {
+      // body 非 JSON
+    }
+    throw new Error(`api ${pathname} failed: HTTP ${res.status}${detail ? ` — ${detail}` : ""}`);
   }
   return (await res.json()) as T;
 }

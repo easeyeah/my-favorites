@@ -22,6 +22,11 @@ interface TreeNode {
 
 const TOP_LEVEL_SKIP = new Set(["", "书签栏", "其他书签", "Bookmarks Bar", "Other favorites"]);
 
+/** 服务端 schema 限制（packages/shared ingestRequest）：防御性截断，避免 400 */
+const MAX_TITLE = 200;
+const MAX_FOLDER_DEPTH = 16;
+const MAX_FOLDER_NAME = 200;
+
 export function flattenBookmarkTree(root: TreeNode[]): BookmarkImportItem[] {
   const items: BookmarkImportItem[] = [];
 
@@ -32,14 +37,16 @@ export function flattenBookmarkTree(root: TreeNode[]): BookmarkImportItem[] {
         if (!/^https?:/.test(node.url)) continue; // 只导入 http(s)
         items.push({
           url: node.url,
-          title: node.title ?? node.url,
+          title: (node.title ?? node.url).slice(0, MAX_TITLE) || node.url,
           folderPath: path.length > 0 ? [...path] : [],
         });
         continue;
       }
       // 文件夹节点：虚拟根（无标题）不进 path；有标题则入栈
       const nextPath =
-        node.title && !TOP_LEVEL_SKIP.has(node.title) ? [...path, node.title] : path;
+        node.title && !TOP_LEVEL_SKIP.has(node.title) && path.length < MAX_FOLDER_DEPTH
+          ? [...path, node.title.slice(0, MAX_FOLDER_NAME)]
+          : path;
       if (node.children?.length) walk(node.children, nextPath);
     }
   };
