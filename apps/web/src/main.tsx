@@ -78,6 +78,7 @@ interface Bookmark {
 interface Folder {
   id: string;
   name: string;
+  parent_id: string | null;
   is_system_inbox: number;
 }
 interface ProposalAction {
@@ -184,75 +185,147 @@ function Overview({ cfg }: { cfg: AdminConfig }) {
 function Bookmarks({ cfg }: { cfg: AdminConfig }) {
   const [items, setItems] = useState<Bookmark[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
+  const [selected, setSelected] = useState<string | "all">("all");
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
+  const [searching, setSearching] = useState(false);
   const load = useCallback(() => {
     api<Bookmark[]>(cfg, "/bookmarks").then(setItems).catch(() => setItems([]));
     api<Folder[]>(cfg, "/folders").then(setFolders).catch(() => setFolders([]));
+    setSearching(false);
   }, [cfg]);
   useEffect(load, [load]);
 
-  const doSearch = async () => {
-    if (!q.trim()) return load();
-    const res = await api<{ results: Bookmark[] }>(cfg, `/search?q=${encodeURIComponent(q)}`);
-    setItems(res.results);
+  const folderName = (id: string) => folders.find((f) => f.id === id)?.name ?? "未整理";
+  const childrenOf = (parentId: string | null) =>
+    folders.filter((f) => f.parent_id === parentId && !f.is_system_inbox);
+  const countIn = (folderId: string) => items.filter((b) => b.folder_id === folderId).length;
+
+  const toggle = (id: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
-  const folderName = (id: string) => folders.find((f) => f.id === id)?.name ?? "?";
+
+  const doSearch = async () => {
+    if (!q.trim()) return setSearching(false);
+    setSearching(true);
+    const res = await api<{ results: Bookmark[] }>(cfg, `/search?q=${encodeURIComponent(q)}`);
+    setItems(res.results); // 复用 items 渲染结果；load() 恢复
+  };
+
+  const visible = searching ? items : items.filter((b) => selected === "all" || b.folder_id === selected);
+
+  const renderNode = (folder: Folder, depth: number): React.ReactNode => {
+    const kids = childrenOf(folder.id);
+    const isCollapsed = collapsed.has(folder.id);
+    const count = countIn(folder.id);
+    const descendantCount =
+      count +
+      kids.reduce((sum, k) => {
+        const kidCount = countIn(k.id) + childrenOf(k.id).reduce((s, kk) => s + countIn(kk.id), 0);
+        return sum + kidCount;
+      }, 0);
+    return (
+      <div key={folder.id}>
+        <div
+          className={`flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-sm hover:bg-accent ${selected === folder.id ? "bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-950" : ""}`}
+          style={{ paddingLeft: 8 + depth * 16 }}
+          onClick={() => {
+            setSelected(folder.id);
+            setSearching(false);
+          }}
+        >
+          {kids.length > 0 ? (
+            <button
+              className="w-4 shrink-0 text-muted-foreground"
+              onClick={(e) => {
+                e.stopPropagation();
+                toggle(folder.id);
+              }}
+            >
+              {isCollapsed ? "▸" : "▾"}
+            </button>
+          ) : (
+            <span className="w-4 shrink-0" />
+          )}
+          <span className="truncate">{folder.name}</span>
+          <span className="ml-auto text-xs text-muted-foreground">{descendantCount}</span>
+        </div>
+        {!isCollapsed && kids.map((k) => renderNode(k, depth + 1))}
+      </div>
+    );
+  };
+
+  const roots = childrenOf(null);
+
+  const remove = (b: Bookmark) => {
+    if (!confirm(`删除「${b.title}」？`)) return;
+    void api(cfg, `/bookmarks/${b.id}`, { method: "DELETE" }).then(() => {
+      if (searching) void doSearch();
+      else load();
+    });
+  };
 
   return (
-    <Card title={`书签管理（${items.length} 条）`}>
+    <Card title={`书签管理（${visible.length} 条${searching ? " · 搜索结果" : selected === "all" ? " · 全部" : ` · ${folderName(selected)}`}）`}>
       <div className="mb-3 flex gap-2">
         <input
           className="flex-1 rounded-lg border border-border bg-card px-3 py-2 text-sm"
-          placeholder="搜索书签 / 正文（输入后回车）"
+          placeholder="搜索书签 / 正文（回车）"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={() => void doSearch()}
         />
         <Btn onClick={() => void doSearch()}>搜索</Btn>
-        <Btn onClick={load}>刷新</Btn>
+        <Btn onClick={load}>全部</Btn>
       </div>
-      <table className="w-full text-left text-sm">
-        <thead className="text-muted-foreground">
-          <tr>
-            <th className="py-2">标题</th>
-            <th className="py-2">目录</th>
-            <th className="py-2">状态</th>
-            <th className="py-2">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((b) => (
-            <tr key={b.id} className="border-t border-border">
-              <td className="py-2">
-                <a className="hover:underline" href={b.url_canonical} target="_blank" rel="noreferrer">
-                  {b.is_private ? "🔒 " : ""}{b.title}
-                </a>
-              </td>
-              <td className="py-2 text-muted-foreground">{folderName(b.folder_id)}</td>
-              <td className="py-2">
-                {b.status !== "normal" && (
-                  <span className={`rounded-full px-2 py-0.5 text-xs ${b.status === "dead" ? "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300" : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300"}`}>
-                    {b.status === "dead" ? "死链" : "疑似"}
-                  </span>
-                )}
-                {b.status === "normal" && <span className="text-xs text-muted-foreground">正常</span>}
-              </td>
-              <td className="py-2">
-                <button
-                  className="text-xs text-red-500 hover:underline"
-                  onClick={() => {
-                    if (!confirm(`删除「${b.title}」？`)) return;
-                    void api(cfg, `/bookmarks/${b.id}`, { method: "DELETE" }).then(load);
-                  }}
-                >
-                  删除
-                </button>
-              </td>
-            </tr>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-[240px_1fr]">
+        {/* 左：目录树（保留导入时的层级结构） */}
+        <div className="max-h-[60vh] overflow-y-auto rounded-xl border border-border p-2">
+          <div
+            className={`flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-sm hover:bg-accent ${selected === "all" && !searching ? "bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-950" : ""}`}
+            onClick={() => {
+              setSelected("all");
+              setSearching(false);
+            }}
+          >
+            <span className="w-4 shrink-0" />
+            <span>全部书签</span>
+            <span className="ml-auto text-xs text-muted-foreground">{items.length}</span>
+          </div>
+          {roots.map((r) => renderNode(r, 0))}
+        </div>
+        {/* 右：当前目录的书签列表（行式布局） */}
+        <div className="max-h-[60vh] overflow-y-auto">
+          {visible.map((b) => (
+            <div key={b.id} className="flex items-center gap-3 border-b border-border py-2.5 last:border-0">
+              <a className="min-w-0 flex-1 truncate text-sm hover:underline" href={b.url_canonical} target="_blank" rel="noreferrer" title={b.title}>
+                {b.is_private ? "🔒 " : ""}{b.title}
+              </a>
+              {(searching || selected === "all") && (
+                <span className="shrink-0 text-xs text-muted-foreground">{folderName(b.folder_id)}</span>
+              )}
+              {b.status !== "normal" && (
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${b.status === "dead" ? "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300" : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300"}`}>
+                  {b.status === "dead" ? "死链" : "疑似"}
+                </span>
+              )}
+              <button className="shrink-0 text-xs text-red-500 hover:underline" onClick={() => remove(b)}>
+                删除
+              </button>
+            </div>
           ))}
-        </tbody>
-      </table>
-      {items.length === 0 && <p className="py-6 text-center text-sm text-muted-foreground">暂无书签，先在扩展里收藏或导入</p>}
+          {visible.length === 0 && (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              {searching ? "无搜索结果" : "该目录下暂无书签"}
+            </p>
+          )}
+        </div>
+      </div>
     </Card>
   );
 }
