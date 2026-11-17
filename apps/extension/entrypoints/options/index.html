@@ -3,9 +3,158 @@
   <head>
     <meta charset="UTF-8" />
     <title>my-favorites 设置</title>
-    <script type="module" src="./main.tsx"></script>
+    <style>
+      /* 自包含样式（options 页不挂 Tailwind pipeline，直接写） */
+      :root {
+        --bg: #f7f7f8;
+        --card: #ffffff;
+        --text: #1a1a1a;
+        --muted: #6b7280;
+        --border: #e5e7eb;
+        --accent: #4f46e5;
+        --accent-light: #eef2ff;
+        --danger: #dc2626;
+        --ok: #16a34a;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111113;
+          --card: #1c1c1f;
+          --text: #f3f4f6;
+          --muted: #9ca3af;
+          --border: #2d2d31;
+          --accent: #818cf8;
+          --accent-light: #2a2a35;
+        }
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+      }
+      .wrap { max-width: 640px; margin: 0 auto; padding: 32px 24px 60px; }
+      h1 { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
+      .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 20px 24px;
+        margin-bottom: 16px;
+      }
+      .card h2 {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 14px;
+      }
+      label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+      input[type="text"], input[type="password"] {
+        width: 100%;
+        padding: 10px 14px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 14px;
+        outline: none;
+        transition: border-color 0.15s;
+      }
+      input:focus { border-color: var(--accent); }
+      .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+      button {
+        padding: 9px 16px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--text);
+        font-size: 13px;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+      button:hover { border-color: var(--accent); color: var(--accent); }
+      button.primary {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+        font-weight: 500;
+      }
+      button.primary:hover { opacity: 0.9; color: #fff; }
+      button.accent {
+        background: var(--accent-light);
+        border-color: var(--accent);
+        color: var(--accent);
+        font-weight: 500;
+      }
+      .stats { font-size: 13px; color: var(--muted); margin-top: 8px; }
+      .stats b { color: var(--text); font-size: 18px; }
+      .msg { margin-top: 10px; font-size: 13px; min-height: 18px; }
+      .msg.ok { color: var(--ok); }
+      .msg.err { color: var(--danger); }
+      .divider { border-top: 1px solid var(--border); margin: 16px 0; }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div class="wrap">
+      <h1>my-favorites</h1>
+      <p class="sub">AI 书签导航 · 设置</p>
+
+      <div class="card">
+        <h2>① 服务端连接</h2>
+        <label for="server">服务端地址（官方云 / 自建 Docker）</label>
+        <input id="server" type="text" placeholder="http://localhost:3000" />
+        <div class="row">
+          <button class="primary" id="save">保存</button>
+          <button id="test">测试连接</button>
+        </div>
+        <p class="msg" id="msg-connect"></p>
+      </div>
+
+      <div class="card">
+        <h2>② 鉴权（可选）</h2>
+        <label for="pw">管理员密码（服务端设置了 ADMIN_PASSWORD 才需要）</label>
+        <input id="pw" type="password" placeholder="留空表示服务端未启用鉴权" />
+        <div class="row">
+          <button id="login">登录获取 token</button>
+        </div>
+        <p class="msg" id="msg-auth"></p>
+      </div>
+
+      <div class="card">
+        <h2>③ 数据迁移</h2>
+        <p style="font-size: 13px; color: var(--muted); margin-bottom: 12px">
+          把浏览器现有书签一键导入服务端（文件夹层级自动保留）
+        </p>
+        <div class="row">
+          <button class="accent" id="import">📥 一键导入浏览器全部书签</button>
+          <button id="sync">🔄 反向同步到浏览器</button>
+        </div>
+        <p class="msg" id="msg-data"></p>
+      </div>
+
+      <div class="card">
+        <h2>④ 收件箱</h2>
+        <p style="font-size: 13px; color: var(--muted); margin-bottom: 12px">
+          在浏览器书签栏创建「📥 自动整理」文件夹，丢进去的书签会被 AI 自动归位
+        </p>
+        <div class="row">
+          <button id="inbox">创建收件箱</button>
+        </div>
+        <p class="msg" id="msg-inbox"></p>
+      </div>
+
+      <div class="card">
+        <h2>⑤ 服务端概览</h2>
+        <div class="stats" id="stats">未连接</div>
+        <div class="row">
+          <button id="refresh">刷新统计</button>
+        </div>
+      </div>
+    </div>
+    <script src="./main.js"></script>
   </body>
 </html>
