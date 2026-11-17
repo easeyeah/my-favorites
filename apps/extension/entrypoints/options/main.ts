@@ -28,14 +28,41 @@ $("save").addEventListener("click", async () => {
 
 $("test").addEventListener("click", async () => {
   const el = $("msg-connect");
-  try {
-    await saveConfig({ serverUrl: serverInput.value.replace(/\/$/, "") });
-    const res = await fetch(`${serverInput.value}/healthz`);
-    const body = (await res.json()) as { ok: boolean };
-    msg(el, body.ok ? "✅ 连接成功" : "❌ 响应异常");
-  } catch {
-    msg(el, "❌ 无法连接（先启动 Docker 服务端）", false);
+  const raw = serverInput.value.replace(/\/$/, "");
+  await saveConfig({ serverUrl: raw });
+  msg(el, "测试中…");
+
+  /** 依次尝试：原地址 → localhost 换 127.0.0.1（避开 IPv6 ::1 解析/代理 bypass 问题） */
+  const candidates = [raw];
+  if (raw.includes("localhost")) {
+    candidates.push(raw.replace("localhost", "127.0.0.1"));
   }
+  let lastErr = "";
+  for (const base of candidates) {
+    try {
+      const res = await fetch(`${base}/healthz`, { signal: AbortSignal.timeout(4000) });
+      const body = (await res.json()) as { ok: boolean };
+      if (body.ok) {
+        if (base !== raw) {
+          await saveConfig({ serverUrl: base }); // 自动采用可用地址
+          serverInput.value = base;
+          msg(el, `✅ 连接成功（已自动切换为 ${base}）`);
+        } else {
+          msg(el, "✅ 连接成功");
+        }
+        return;
+      }
+      lastErr = `HTTP ${res.status}`;
+    } catch (err) {
+      lastErr = err instanceof Error ? err.message : String(err);
+    }
+  }
+  // 全部失败：给出可行动的排查建议
+  const hint =
+    lastErr.includes("Failed to fetch") || lastErr.includes("NetworkError")
+      ? "网络层失败。排查：① Docker 服务端是否启动（docker compose -f docker/docker-compose.dev.yml up -d）② 若使用系统代理（Clash 等），请将 localhost/127.0.0.1 加入直连规则 ③ 换 127.0.0.1:端口 试试"
+      : `服务端异常：${lastErr}`;
+  msg(el, `❌ ${hint}`, false);
 });
 
 $("login").addEventListener("click", async () => {

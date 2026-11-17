@@ -13,7 +13,7 @@ export interface ExtensionConfig {
   reportReadDate?: string;
 }
 
-const DEFAULTS: ExtensionConfig = { serverUrl: "http://localhost:3000" };
+const DEFAULTS: ExtensionConfig = { serverUrl: "http://127.0.0.1:3000" };
 
 export async function getConfig(): Promise<ExtensionConfig> {
   const stored = await browser.storage.local.get(["serverUrl", "inboxExtId", "token", "syncCursor", "reportReadDate"]);
