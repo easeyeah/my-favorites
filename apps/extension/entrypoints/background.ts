@@ -269,23 +269,50 @@ export default defineBackground((): void => {
         } else if (msg.type === "setup-inbox") {
           sendResponse(await ensureInboxFolder());
         } else if (msg.type === "import-bookmarks") {
-          const tree = await browser.bookmarks.getTree();
-          const items = flattenBookmarkTree(
-            tree as unknown as Parameters<typeof flattenBookmarkTree>[0],
-          );
-          const idempotencyKey = `browser-tree-${Date.now()}`;
-          const result = await api<{
-            imported: number;
-            skipped_duplicate: number;
-            skipped_invalid?: number;
-            total: number;
-          }>("/bookmarks/ingest", {
-            method: "POST",
-            headers: { "content-type": "application/json", "Idempotency-Key": idempotencyKey },
-            body: JSON.stringify({ idempotencyKey, items: items as BookmarkImportItem[] }),
-          });
-          void sendEvent("import_completed", { imported: result.imported, total: result.total });
-          sendResponse(result);
+          try {
+            const tree = await browser.bookmarks.getTree();
+            const items = flattenBookmarkTree(
+              tree as unknown as Parameters<typeof flattenBookmarkTree>[0],
+            );
+            if (items.length === 0) {
+              sendResponse({ imported: 0, total: 0, skipped_duplicate: 0, error: "浏览器书签树为空" });
+              return;
+            }
+            // 服务端 zod 限单批 ≤100 条 → 分批提交（幂等键每批独立）
+            const baseKey = `browser-tree-${Date.now()}`;
+            const BATCH = 100;
+            let imported = 0;
+            let skipped = 0;
+            let invalid = 0;
+            for (let i = 0; i < items.length; i += BATCH) {
+              const batch = items.slice(i, i + BATCH);
+              const result = await api<{
+                imported: number;
+                skipped_duplicate: number;
+                skipped_invalid?: number;
+              }>("/bookmarks/ingest", {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  "Idempotency-Key": `${baseKey}-${i / BATCH}`,
+                },
+                body: JSON.stringify({ idempotencyKey: `${baseKey}-${i / BATCH}`, items: batch as BookmarkImportItem[] }),
+              });
+              imported += result.imported;
+              skipped += result.skipped_duplicate;
+              invalid += result.skipped_invalid ?? 0;
+            }
+            void sendEvent("import_completed", { imported, total: items.length });
+            sendResponse({
+              imported,
+              total: items.length,
+              skipped_duplicate: skipped,
+              skipped_invalid: invalid,
+            });
+          } catch (err) {
+            // 服务端不可达/鉴权失败等：必须回传错误，否则 UI 永远卡在"导入中…"
+            sendResponse({ error: String(err).slice(0, 200) });
+          }
         } else if (msg.type === "snapshot-current") {
           const tab = (await browser.tabs.query({ active: true, currentWindow: true }))[0];
           sendResponse(await snapshotCurrentTab(tab));

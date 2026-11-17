@@ -2,7 +2,7 @@
  * options 页逻辑（DOM 操作版——页面自带样式，无需 React）。
  * 与 popup/sidepanel 共享 src/lib/api 的 storage 配置。
  */
-import { api, getConfig, saveConfig } from "../src/lib/api";
+import { api, getConfig, saveConfig } from "../../src/lib/api";
 
 const $ = (id: string) => document.getElementById(id) as HTMLInputElement;
 
@@ -68,11 +68,13 @@ $("import").addEventListener("click", async () => {
   msg(el, "导入中…");
   await browser.runtime.sendMessage(
     { type: "import-bookmarks" },
-    (res: { imported?: number; total?: number; skipped_duplicate?: number } | undefined) => {
+    (res: { imported?: number; total?: number; skipped_duplicate?: number; error?: string } | undefined) => {
+      // MV3：background 异常时回调收到 undefined + lastError
+      const lastErr = (globalThis as unknown as { chrome?: { runtime?: { lastError?: { message?: string } } } }).chrome?.runtime?.lastError?.message;
       if (res?.imported !== undefined) {
-        msg(el, `✅ 已导入 ${res.imported}/${res.total} 条（重复 ${res.skipped_duplicate} 跳过）`);
+        msg(el, `✅ 已导入 ${res.imported}/${res.total} 条（重复 ${res.skipped_duplicate ?? 0} 跳过）`);
       } else {
-        msg(el, "❌ 导入失败：先连接服务端", false);
+        msg(el, `❌ 导入失败：${res?.error ?? lastErr ?? "服务端未连接（先启动 Docker 并点上方「测试连接」）"}`, false);
       }
     },
   );
