@@ -2,6 +2,7 @@
 # 用法：docker compose -f docker/docker-compose.dev.yml up
 services:
   server:
+    container_name: my-favorites-server
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -21,11 +22,13 @@ services:
       LLM_BASE_URL: http://llm-mock:8080/v1
       LLM_API_KEY: mock
   llm-mock:
+    container_name: my-favorites-llm-mock
     image: node:22-alpine
     working_dir: /mock
     volumes:
       # 挂目录而非单文件：编辑器/sed 替换文件会更换 inode，单文件挂载会失效
-      - ./docker:/mock:ro
+      # 注意：相对路径以本 compose 文件所在目录（docker/）为基准 → 挂自身即 ./:/mock:ro
+      - ./:/mock:ro
     command: node /mock/llm-mock.mjs
     ports:
       - "18080:8080"

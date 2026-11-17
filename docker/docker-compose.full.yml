@@ -3,6 +3,7 @@
 # 扩展/管理台设置 LLM_BASE_URL 即可全离线运行
 services:
   server:
+    container_name: my-favorites-server
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -27,6 +28,7 @@ services:
     depends_on:
       - ollama
   ollama:
+    container_name: my-favorites-ollama
     image: ollama/ollama:latest
     volumes:
       - ollama-models:/root/.ollama
