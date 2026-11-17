@@ -25,6 +25,9 @@ function saveConfig(c: AdminConfig): void {
 async function api<T>(cfg: AdminConfig, path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${cfg.serverUrl}/api/v1${path}`, {
     ...init,
+    // 10 分钟兜底：维护任务（死链探测）是同步长任务，正常可达数分钟；
+    // 无超时会让失败的请求永久挂起（表现为按钮永远"运行中"）
+    signal: AbortSignal.timeout(10 * 60_000),
     headers: {
       "content-type": "application/json",
       ...(cfg.token ? { authorization: `Bearer ${cfg.token}` } : {}),
@@ -52,15 +55,30 @@ function Stat({ num, label, bad }: { num: number | string; label: string; bad?: 
     </div>
   );
 }
-function Btn({ children, onClick, primary }: { children: React.ReactNode; onClick?: () => void; primary?: boolean }) {
+function Btn({
+  children,
+  onClick,
+  primary,
+  disabled,
+  title,
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  primary?: boolean;
+  disabled?: boolean;
+  title?: string;
+}) {
+  const base = disabled
+    ? "cursor-not-allowed opacity-50"
+    : primary
+      ? "bg-indigo-600 text-white hover:bg-indigo-500"
+      : "hover:bg-accent";
   return (
     <button
       onClick={onClick}
-      className={
-        primary
-          ? "rounded-lg bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-500"
-          : "rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-accent"
-      }
+      disabled={disabled}
+      title={title}
+      className={`rounded-lg px-3 py-1.5 text-sm ${primary ? "" : "border border-border"} ${base}`}
     >
       {children}
     </button>
@@ -525,22 +543,56 @@ function NavSites({ cfg }: { cfg: AdminConfig }) {
 function Report({ cfg }: { cfg: AdminConfig }) {
   const [linkReport, setLinkReport] = useState<{ findings: { dead: number; suspect: number; normal: number; checked: number }; created_at: string } | null>(null);
   const [dupReport, setDupReport] = useState<{ findings: { groups: number; suggestions: Array<{ title: string }> } } | null>(null);
+  const [running, setRunning] = useState<"links" | "dups" | null>(null);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err" | "busy"; text: string } | null>(null);
   const load = useCallback(() => {
     api<typeof linkReport>(cfg, "/maintenance/report/latest?type=link_check").then(setLinkReport).catch(() => setLinkReport(null));
     api<typeof dupReport>(cfg, "/maintenance/report/latest?type=duplicate_scan").then(setDupReport).catch(() => setDupReport(null));
   }, [cfg]);
   useEffect(load, [load]);
 
+  /** 运行维护任务：按钮即时反馈 + 错误可见（此前 void 吞错，点了像没反应） */
+  const runTask = async (kind: "links" | "dups") => {
+    if (running) return; // 防连点叠加任务
+    setRunning(kind);
+    setMsg({ kind: "busy", text: kind === "links" ? "死链检测运行中——逐条探测外部链接，通常需要几十秒到几分钟…" : "查重扫描运行中…" });
+    try {
+      if (kind === "links") {
+        await api(cfg, "/maintenance/links/run", { method: "POST", body: "{}" });
+      } else {
+        await api(cfg, "/maintenance/duplicates/run", { method: "POST" });
+      }
+      setMsg({ kind: "ok", text: "✅ 任务完成，报告已刷新" });
+      load();
+    } catch (err) {
+      setMsg({ kind: "err", text: `❌ 任务失败：${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      setRunning(null);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <Card title="维护任务">
-        <div className="flex flex-wrap gap-2">
-          <Btn primary onClick={() => void api(cfg, "/maintenance/links/run", { method: "POST", body: "{}" }).then(load)}>
-            🔗 运行死链检测
+        <div className="flex flex-wrap items-center gap-2">
+          <Btn
+            primary
+            disabled={running !== null}
+            onClick={() => void runTask("links")}
+            title="对最久未检查的书签做连通性探测（HTTP HEAD/GET）"
+          >
+            {running === "links" ? "⏳ 检测运行中…" : "🔗 运行死链检测"}
           </Btn>
-          <Btn onClick={() => void api(cfg, "/maintenance/duplicates/run", { method: "POST" }).then(load)}>🔗 运行查重扫描</Btn>
+          <Btn disabled={running !== null} onClick={() => void runTask("dups")}>
+            {running === "dups" ? "⏳ 扫描运行中…" : "🗂 运行查重扫描"}
+          </Btn>
           <Btn onClick={() => window.open(`${cfg.serverUrl}/health-report`, "_blank")}>📊 体检报告页</Btn>
         </div>
+        {msg && (
+          <p className={`mt-3 text-sm ${msg.kind === "err" ? "text-red-500" : msg.kind === "ok" ? "text-green-600" : "text-muted-foreground"}`}>
+            {msg.text}
+          </p>
+        )}
       </Card>
       <Card title="死链周报">
         {linkReport ? (

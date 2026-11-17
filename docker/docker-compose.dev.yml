@@ -12,6 +12,8 @@ services:
     volumes:
       - ../packages:/app/packages
       - ../apps/server:/app/apps/server
+      # 管理台静态产物本地构建、容器只托管（此前回退读到 apps/server/web-dist 旧拷贝）
+      - ../apps/web/dist:/web-dist:ro
       - server-data:/data
     ports:
       - "3000:3000"
@@ -19,6 +21,8 @@ services:
       MF_FORM: self-hosted
       MF_ENV: dev # 开发语义：A4-1 安全门槛按 dev 处理（生产语义默认锁定 setup）
       PORT: 3000
+      # 管理台产物指向挂载的本地构建（pnpm --filter @mf/web build 后即时生效）
+      WEB_DIST_DIR: /web-dist
       # 数据进命名卷（与 full.yml 一致；不设的话 tsx cwd 在 apps/server，数据会落到宿主机源码目录）
       DATA_DIR: /data
       # LLM 三档切换只改这里：llm-mock -> http://llm-mock:8080/v1
