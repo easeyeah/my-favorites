@@ -88,6 +88,7 @@ export function buildApp(deps: AppDeps): Hono {
       folderId: c.req.query("folderId"),
       status: c.req.query("status"),
       limit: c.req.query("limit") ? Math.min(Number(c.req.query("limit")), 1000) : undefined,
+      offset: c.req.query("offset") ? Math.max(Number(c.req.query("offset")), 0) : undefined,
     });
     return privateVisible(c) ? rows : rows.filter((b) => !b.is_private);
   };

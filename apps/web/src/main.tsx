@@ -190,7 +190,21 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
   const load = useCallback(() => {
-    api<Bookmark[]>(cfg, "/bookmarks").then(setItems).catch(() => setItems([]));
+    // 服务端单页上限 1000 → 循环分页拉全量（几千条 ~1MB，管理台可接受）
+    (async () => {
+      const all: Bookmark[] = [];
+      const PAGE = 1000;
+      try {
+        for (let offset = 0; ; offset += PAGE) {
+          const batch = await api<Bookmark[]>(cfg, `/bookmarks?limit=${PAGE}&offset=${offset}`);
+          all.push(...batch);
+          if (batch.length < PAGE) break;
+        }
+        setItems(all);
+      } catch {
+        setItems([]);
+      }
+    })();
     api<Folder[]>(cfg, "/folders").then(setFolders).catch(() => setFolders([]));
     setSearching(false);
   }, [cfg]);

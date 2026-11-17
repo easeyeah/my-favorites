@@ -222,6 +222,7 @@ export class Store {
     folderId?: string;
     status?: string;
     limit?: number;
+    offset?: number;
   }): BookmarkRow[] {
     const conds: string[] = [];
     const args: (string | number)[] = [];
@@ -235,9 +236,11 @@ export class Store {
     }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
     const limit = filter?.limit ?? 1000;
+    // 追加 id 保证分页稳定排序（同 added_at 时不错位）
+    const offset = filter?.offset ?? 0;
     return this.db
       .prepare(
-        `SELECT * FROM bookmarks ${where} ORDER BY pinned DESC, added_at DESC LIMIT ${limit}`,
+        `SELECT * FROM bookmarks ${where} ORDER BY pinned DESC, added_at DESC, id LIMIT ${limit} OFFSET ${offset}`,
       )
       .all(...args) as unknown as BookmarkRow[];
   }
