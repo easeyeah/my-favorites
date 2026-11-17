@@ -43,6 +43,11 @@ export async function startServer(): Promise<void> {
       DATA_DIR: dataDir,
       PORT: String(PORT),
       NODE_ENV: "production",
+      // A4-1 安全默认值：E2E 服务端按 test 语义启动（不触发生产 setup 门槛）。
+      // 如需验证生产语义，单独用 MF_ENV=production 启动并走 /admin/setup 流程。
+      MF_ENV: process.env.E2E_MF_ENV ?? "test",
+      // 管理台静态产物（web-dist 已移出版本库，本地 E2E 指向 web 构建产物）
+      WEB_DIST_DIR: path.resolve(__dirname, "../../web/dist"),
       MF_SKIP_SERVE: undefined,
       NO_PROXY: "*",
       no_proxy: "*",

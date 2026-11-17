@@ -11,6 +11,9 @@ import { MaintenanceService } from "./maintenance";
 import { buildApp, type AppDeps } from "./app";
 import type { LlmClient } from "@mf/ai/llm-client";
 
+// A4-1：测试进程默认显式 dev 语义（未设 MF_ENV 时不触发生产 setup 门槛）
+if (!process.env.MF_ENV) process.env.MF_ENV = "test";
+
 export interface TestEnv extends AppDeps {
   app: ReturnType<typeof buildApp>;
   cleanup: () => void;

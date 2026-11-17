@@ -62,7 +62,7 @@ test("扩展 popup：UI 渲染 + 收藏按钮", async () => {
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/popup.html`);
   await expect(page.locator("h1")).toHaveText("my-favorites");
-  await expect(page.getByText("收藏（AI 自动归位）")).toBeVisible();
+  await expect(page.getByText("收藏（自动归类）")).toBeVisible();
   await expect(page.getByText("丢进收件箱")).toBeVisible();
   await page.close();
 });

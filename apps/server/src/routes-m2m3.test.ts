@@ -305,10 +305,34 @@ describe("快照配额 + 私密书签 + 迁移回灌", () => {
     ).json()) as { id: string };
     const res = await env.app.request(`/api/v1/snapshots?bookmarkId=${bm.id}`, {
       method: "POST",
-      headers: { "content-type": "text/plain" },
-      body: "超过 10 字节的快照内容",
+      headers: { "content-type": "message/rfc822" },
+      // 合法 MHTML 头（A4-4 格式校验通过）+ 超配额体积
+      body:
+        "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"---x\"\r\n\r\n" +
+        "超过 10 字节的快照内容（pad pad pad pad pad）",
     });
     expect(res.status).toBe(402);
+  });
+
+  it("快照格式校验：非 MHTML 内容 400，不记为成功（A4-4）", async () => {
+    env = makeEnv();
+    const bm = (await (
+      await env.app.request("/api/v1/bookmarks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: "https://example.com/fmt", title: "fmt" }),
+      })
+    ).json()) as { id: string };
+    const res = await env.app.request(`/api/v1/snapshots?bookmarkId=${bm.id}`, {
+      method: "POST",
+      headers: { "content-type": "message/rfc822" },
+      body: "这不是 MHTML 格式的任意字节",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("invalid_mhtml_format");
+    // 无快照记录
+    expect(env.store.db.prepare("SELECT COUNT(*) as c FROM snapshot").get()).toMatchObject({ c: 0 });
   });
 
   it("私密书签：列表默认隐藏、详情 403、内容抓取被拒（隐私红线）", async () => {
@@ -341,7 +365,7 @@ describe("快照配额 + 私密书签 + 迁移回灌", () => {
         body: JSON.stringify({ ids: [bm.id] }),
       })
     ).json()) as { results: Array<{ reason: string }> };
-    expect(crawl.results[0]?.reason).toBe("privacy_domain");
+    expect(crawl.results[0]?.reason).toBe("privacy"); // A1-3：隐私拒绝（域/私密书签统一）
   });
 
   it("导出 → 导入回灌（迁移工具 round-trip）", async () => {

@@ -9,8 +9,10 @@
 import {
   AUTO_MOVE_CONFIDENCE,
   canonicalizeUrl,
+  checkPrivacy,
   classifyByRules,
   isPrivacyDomain,
+  type PrivacyRules,
 } from "@mf/shared";
 import type { LlmClient } from "@mf/ai/llm-client";
 import type { Store } from "./store";
@@ -33,6 +35,20 @@ export class Pipeline {
 
   privacyCheck(url: string): boolean {
     return isPrivacyDomain(url, { patterns: this.store.privacyPatterns() });
+  }
+
+  /** A1-1/A1-3：服务端侧统一策略判定（不信任客户端"已经检查"声明） */
+  private serverRules(): PrivacyRules {
+    const { patterns, revision } = this.store.privacyRules();
+    return { patterns, revision };
+  }
+
+  serverDecide(
+    action: "upload_content" | "call_model" | "server_fetch" | "snapshot",
+    url: string,
+    opts: { isPrivateBookmark?: boolean } = {},
+  ) {
+    return checkPrivacy(action, url, this.serverRules(), opts);
   }
 
   /** F1.4 即时归位：仅缓存+规则（<50ms 路径，不调 LLM） */
@@ -106,14 +122,22 @@ export class Pipeline {
     description?: string;
     faviconDataUrl?: string;
     urlForPrivacyCheck: string;
-  }): Promise<{ summarized: boolean; skippedPrivacy?: boolean }> {
-    if (this.privacyCheck(input.urlForPrivacyCheck)) {
+  }): Promise<{ summarized: boolean; skippedPrivacy?: boolean; skipReason?: string }> {
+    // A1-3 服务端纵深校验：独立判定，不信任扩展端"已检查"（扩展端校验是第一道，这是第二道）
+    const bm = this.store.getBookmark(input.bookmarkId);
+    const decision = checkPrivacy(
+      "upload_content",
+      input.urlForPrivacyCheck,
+      this.serverRules(),
+      { isPrivateBookmark: bm?.is_private === 1 },
+    );
+    if (!decision.allowed) {
       this.store.upsertCache({
         bookmarkId: input.bookmarkId,
         fetchedVia: "extension_capture",
-        failReason: "privacy_domain_skipped",
+        failReason: `privacy_${decision.reason}`,
       });
-      return { summarized: false, skippedPrivacy: true };
+      return { summarized: false, skippedPrivacy: true, skipReason: decision.reason };
     }
     // 红线：正文截断 20KB（技术方案 §7.2）
     const l2 = input.l2Text?.slice(0, 20_000) ?? null;
@@ -143,6 +167,10 @@ export class Pipeline {
     if (!llm || !l2 || l2.length < 40) return false;
     const bm = this.store.getBookmark(bookmarkId);
     if (!bm) return false;
+    // A1-3：调用模型前独立判定 call_model（隐私域/私密书签不外发内容）
+    if (!this.serverDecide("call_model", bm.url_canonical, { isPrivateBookmark: bm.is_private === 1 }).allowed) {
+      return false;
+    }
 
     const run = async () => {
       try {

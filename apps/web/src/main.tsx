@@ -350,7 +350,10 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
           {visible.map((b) => (
             <div key={b.id} className="flex items-center gap-3 border-b border-border py-2.5 last:border-0">
               <a className="min-w-0 flex-1 truncate text-sm hover:underline" href={b.url_canonical} target="_blank" rel="noreferrer" title={b.title}>
-                {b.is_private ? "🔒 " : ""}{b.title}
+                {b.is_private ? (
+                  <span title="实验性：仅隐藏显示，未做二次验证或加密（决策 D19）">🔒</span>
+                ) : null}
+                {b.title}
               </a>
               {(searching || selected === "all") && (
                 <span className="shrink-0 text-xs text-muted-foreground">{folderName(b.folder_id)}</span>

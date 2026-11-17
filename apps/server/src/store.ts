@@ -1,7 +1,9 @@
 /** 仓储层 —— 全部 SQL 集中在此，路由不直接摸 SQL */
+import { rmSync } from "node:fs";
 import { canonicalizeUrl } from "@mf/shared";
 import type { Db } from "./db";
 import { newId, now } from "./db";
+import { protectKeyForStorage, keyForUse } from "./secret-box";
 
 export interface FolderRow {
   id: string;
@@ -28,6 +30,10 @@ export interface BookmarkRow {
   pinned: number;
   is_private: number;
   created_at: string;
+  /** A3-5 软归档：被合并时指向保留方；NULL = 正常书签 */
+  archived_into?: string | null;
+  /** A3-4 冲突检测：用户手动修改计数（提案前后对比） */
+  content_revision?: number;
 }
 
 export class Store {
@@ -198,6 +204,13 @@ export class Store {
     this.db
       .prepare(`UPDATE bookmarks SET ${set} WHERE id = ?`)
       .run(...vals, id);
+    // A3-4 冲突检测信号：用户手动修改（标题/目录/状态/固定/私密）递增修订版本
+    const manualCols = ["title", "folder_id", "status", "pinned", "is_private"];
+    if (keys.some((k) => manualCols.includes(k))) {
+      this.db
+        .prepare("UPDATE bookmarks SET content_revision = content_revision + 1 WHERE id = ?")
+        .run(id);
+    }
   }
 
   moveBookmark(id: string, toFolderId: string): BookmarkRow | undefined {
@@ -236,11 +249,11 @@ export class Store {
     }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
     const limit = filter?.limit ?? 1000;
-    // 追加 id 保证分页稳定排序（同 added_at 时不错位）
+    // 追加 id 保证分页稳定排序（同 added_at 时不错位）；A3-5：软归档书签不出现在常规列表
     const offset = filter?.offset ?? 0;
     return this.db
       .prepare(
-        `SELECT * FROM bookmarks ${where} ORDER BY pinned DESC, added_at DESC, id LIMIT ${limit} OFFSET ${offset}`,
+        `SELECT * FROM bookmarks ${where ? where + " AND" : "WHERE"} archived_into IS NULL ORDER BY pinned DESC, added_at DESC, id LIMIT ${limit} OFFSET ${offset}`,
       )
       .all(...args) as unknown as BookmarkRow[];
   }
@@ -251,7 +264,7 @@ export class Store {
       .prepare(
         `SELECT DISTINCT b.* FROM bookmarks b
          LEFT JOIN content_cache c ON c.bookmark_id = b.id
-         WHERE b.title LIKE ? OR b.url_canonical LIKE ? OR IFNULL(b.description,'') LIKE ? OR IFNULL(c.l2_text,'') LIKE ?
+         WHERE b.archived_into IS NULL AND (b.title LIKE ? OR b.url_canonical LIKE ? OR IFNULL(b.description,'') LIKE ? OR IFNULL(c.l2_text,'') LIKE ?)
          LIMIT ?`,
       )
       .all(like, like, like, like, limit) as unknown as BookmarkRow[];
@@ -260,7 +273,7 @@ export class Store {
   countBookmarks(): { total: number; dead: number; suspect: number } {
     const row = this.db
       .prepare(
-        "SELECT COUNT(*) as total, SUM(status='dead') as dead, SUM(status='suspect') as suspect FROM bookmarks",
+        "SELECT COUNT(*) as total, SUM(status='dead') as dead, SUM(status='suspect') as suspect FROM bookmarks WHERE archived_into IS NULL",
       )
       .get() as { total: number; dead: number | null; suspect: number | null };
     return { total: row.total, dead: row.dead ?? 0, suspect: row.suspect ?? 0 };
@@ -400,6 +413,76 @@ export class Store {
     this.db
       .prepare("INSERT OR IGNORE INTO privacy_domain (pattern, builtin) VALUES (?, 0)")
       .run(pattern);
+    this.bumpPrivacyRevision();
+  }
+
+  removePrivacyPattern(pattern: string): void {
+    // 内置项不可删（AGENTS.md 红线 2：用户可增不可删）
+    this.db
+      .prepare("DELETE FROM privacy_domain WHERE pattern = ? AND builtin = 0")
+      .run(pattern);
+    this.bumpPrivacyRevision();
+  }
+
+  /** 隐私规则修订版本：每次变更 +1（A1-1，扩展端同步失效检测） */
+  privacyRevision(): number {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'privacy_rules_revision'")
+      .get() as { value: string } | undefined;
+    return row ? Number(row.value) : 0;
+  }
+
+  private bumpPrivacyRevision(): void {
+    this.setSetting("privacy_rules_revision", String(this.privacyRevision() + 1));
+  }
+
+  /** A1-1 统一策略规则视图（服务端纵深校验与 /privacy/rules 下发共用） */
+  privacyRules(): { patterns: string[]; revision: number } {
+    return { patterns: this.privacyPatterns(), revision: this.privacyRevision() };
+  }
+
+  /**
+   * A1-5 隐私规则变化后的存量清理：对命中（新）规则的存量书签，
+   * 清除正文缓存/摘要/关键词/向量（content_cache 行内敏感字段），保留 fail_reason 说明。
+   * 快照文件与索引一并删除（快照含完整页面内容）。
+   * 返回清理计数。已发送给第三方的数据（LLM 供应商）无法追回——界面需说明（见设置页）。
+   */
+  purgeContentForPrivacyRules(isPrivacy: (url: string) => boolean): {
+    bookmarks: number;
+    snapshots: number;
+  } {
+    let bookmarks = 0;
+    let snapshots = 0;
+    const all = this.listBookmarks({ limit: 100_000 });
+    for (const bm of all) {
+      if (!isPrivacy(bm.url_canonical) && bm.is_private === 0) continue;
+      const cache = this.getCache(bm.id);
+      const hasSensitiveData =
+        cache && ((cache.l2_text as string | null) || (cache.l1_summary as string | null) || (cache.keywords as string) !== "[]");
+      if (hasSensitiveData || cache) {
+        // 清空内容字段，保留行并标记原因（可解释、可审计）
+        this.db
+          .prepare(
+            "UPDATE content_cache SET l1_summary = NULL, l1_tags = '[]', keywords = '[]', l2_text = NULL, embedding = NULL, fail_reason = 'privacy_rules_changed' WHERE bookmark_id = ?",
+          )
+          .run(bm.id);
+        bookmarks++;
+      }
+      // 关联快照删除（文件 + 索引）
+      const snaps = this.db
+        .prepare("SELECT id, path FROM snapshot WHERE bookmark_id = ?")
+        .all(bm.id) as unknown as Array<{ id: string; path: string }>;
+      for (const s of snaps) {
+        try {
+          rmSync(s.path, { force: true });
+        } catch {
+          // 文件缺失：继续删索引
+        }
+        this.db.prepare("DELETE FROM snapshot WHERE id = ?").run(s.id);
+        snapshots++;
+      }
+    }
+    return { bookmarks, snapshots };
   }
 
   // ---------- nav ----------
@@ -415,6 +498,126 @@ export class Store {
     return this.db.prepare("SELECT * FROM nav_site WHERE slug = ?").get(slug) as
       | { slug: string; title: string }
       | undefined;
+  }
+
+  // ==================== A2：设备身份映射 / 待执行操作 / 软归档 ====================
+
+  // ---------- 设备（A2-1） ----------
+  ensureDevice(deviceId: string, label?: string): void {
+    this.db
+      .prepare(
+        "INSERT INTO device (device_id, label, created_at, last_seen_at) VALUES (?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET last_seen_at = excluded.last_seen_at, label = COALESCE(NULLIF(excluded.label, ''), label)",
+      )
+      .run(deviceId, label ?? null, now(), now());
+  }
+
+  /** A2-1 核心映射：device_id + browser_bookmark_id ↔ app_bookmark_id（幂等 upsert） */
+  upsertIdentity(input: {
+    deviceId: string;
+    browserBookmarkId: string;
+    appBookmarkId: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO bookmark_identity (device_id, browser_bookmark_id, app_bookmark_id, mapped_at)
+         VALUES (?,?,?,?)
+         ON CONFLICT(device_id, browser_bookmark_id) DO UPDATE SET app_bookmark_id = excluded.app_bookmark_id, mapped_at = excluded.mapped_at`,
+      )
+      .run(input.deviceId, input.browserBookmarkId, input.appBookmarkId, now());
+  }
+
+  /** 按浏览器节点 ID 找应用库书签 ID（收件箱事件入口的映射查询） */
+  findAppBookmarkId(deviceId: string, browserBookmarkId: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT app_bookmark_id FROM bookmark_identity WHERE device_id = ? AND browser_bookmark_id = ?")
+      .get(deviceId, browserBookmarkId) as { app_bookmark_id: string } | undefined;
+    return row?.app_bookmark_id;
+  }
+
+  identitiesForApp(appBookmarkId: string): Array<{ device_id: string; browser_bookmark_id: string }> {
+    return this.db
+      .prepare("SELECT device_id, browser_bookmark_id FROM bookmark_identity WHERE app_bookmark_id = ?")
+      .all(appBookmarkId) as unknown as Array<{ device_id: string; browser_bookmark_id: string }>;
+  }
+
+  // ---------- 浏览器待执行操作（A2-3/A2-4 镜像模式 D20：持久队列，不与 DB 事务共用） ----------
+  enqueueBrowserOp(input: {
+    deviceId: string;
+    op: "move" | "create" | "remove";
+    browserBookmarkId?: string | null;
+    targetBrowserParentId?: string | null;
+    payload?: unknown;
+  }): number {
+    const r = this.db
+      .prepare(
+        `INSERT INTO pending_browser_ops
+           (device_id, op, browser_bookmark_id, target_browser_parent_id, payload, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      )
+      .run(
+        input.deviceId,
+        input.op,
+        input.browserBookmarkId ?? null,
+        input.targetBrowserParentId ?? null,
+        JSON.stringify(input.payload ?? null),
+        now(),
+        now(),
+      );
+    return Number(r.lastInsertRowid);
+  }
+
+  /** 幂等入队：同 device+op+bookmark+target 的 pending 操作不重复入队（A2 验收：重复事件不产生重复任务） */
+  enqueueBrowserOpIdempotent(input: Parameters<Store["enqueueBrowserOp"]>[0]): number | null {
+    const dup = this.db
+      .prepare(
+        `SELECT id FROM pending_browser_ops
+         WHERE device_id = ? AND op = ? AND IFNULL(browser_bookmark_id,'') = IFNULL(?,'')
+           AND IFNULL(target_browser_parent_id,'') = IFNULL(?,'') AND status = 'pending'`,
+      )
+      .get(input.deviceId, input.op, input.browserBookmarkId ?? null, input.targetBrowserParentId ?? null) as
+      | { id: number }
+      | undefined;
+    if (dup) return null;
+    return this.enqueueBrowserOp(input);
+  }
+
+  pendingBrowserOps(deviceId?: string): Array<{
+    id: number;
+    device_id: string;
+    op: string;
+    browser_bookmark_id: string | null;
+    target_browser_parent_id: string | null;
+    payload: unknown;
+    attempts: number;
+  }> {
+    const rows = (deviceId
+      ? this.db
+          .prepare("SELECT * FROM pending_browser_ops WHERE status = 'pending' AND device_id = ? ORDER BY id")
+          .all(deviceId)
+      : this.db
+          .prepare("SELECT * FROM pending_browser_ops WHERE status = 'pending' ORDER BY id")
+          .all()) as unknown as Array<{
+      id: number;
+      device_id: string;
+      op: string;
+      browser_bookmark_id: string | null;
+      target_browser_parent_id: string | null;
+      payload: string | null;
+      attempts: number;
+    }>;
+    return rows.map((r) => ({ ...r, payload: r.payload ? JSON.parse(r.payload) : null }));
+  }
+
+  completeBrowserOp(id: number, status: "done" | "failed" | "cancelled", lastError?: string): void {
+    this.db
+      .prepare("UPDATE pending_browser_ops SET status = ?, last_error = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?")
+      .run(status, lastError ?? null, now(), id);
+  }
+
+  bumpBrowserOpAttempt(id: number, error: string): void {
+    this.db
+      .prepare("UPDATE pending_browser_ops SET attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ?")
+      .run(error.slice(0, 300), now(), id);
   }
 
   // ==================== M2/M3：鉴权 / 同步 / 维护 / 偏好 / 供应商 / 设置 ====================
@@ -571,7 +774,7 @@ export class Store {
       .all() as unknown as Array<Record<string, unknown>>;
     for (const r of rows) {
       r.purpose_models = JSON.parse((r.purpose_models as string) ?? "{}");
-      r.api_key = r.api_key ? "********" : null; // 不回显明文
+      r.api_key = r.api_key ? "********" : null; // 不回显明文（A4-2：展示永远脱敏）
       r.has_key = true;
     }
     return rows;
@@ -586,11 +789,13 @@ export class Store {
     enabled?: boolean;
   }): string {
     const id = input.id ?? newId();
+    // A4-2：密钥加密保存（生产无 MF_SECRET_KEY 时拒绝保存明文）
+    const protectedKey = protectKeyForStorage(input.apiKey ?? null);
     this.db
       .prepare(
         "INSERT INTO provider_config (id, provider_id, base_url, api_key, purpose_models, enabled, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider_id=excluded.provider_id, base_url=excluded.base_url, api_key=COALESCE(excluded.api_key, api_key), purpose_models=excluded.purpose_models, enabled=excluded.enabled",
       )
-      .run(id, input.providerId, input.baseUrl, input.apiKey ?? null, JSON.stringify(input.purposeModels ?? {}), input.enabled === false ? 0 : 1, now());
+      .run(id, input.providerId, input.baseUrl, protectedKey, JSON.stringify(input.purposeModels ?? {}), input.enabled === false ? 0 : 1, now());
     return id;
   }
 
@@ -610,7 +815,11 @@ export class Store {
       api_key: string | null;
       purpose_models: string;
     }>;
-    return rows.map((r) => ({ ...r, purpose_models: JSON.parse(r.purpose_models) }));
+    return rows.map((r) => ({
+      ...r,
+      api_key: keyForUse(r.api_key), // A4-2：使用时解密（内存中短暂存在）
+      purpose_models: JSON.parse(r.purpose_models),
+    }));
   }
 
   // ---------- 设置 KV ----------
@@ -649,14 +858,14 @@ export class Store {
     const folders = this.listFolders();
     const counts = new Map<string, number>();
     const rows = this.db
-      .prepare("SELECT folder_id, COUNT(*) as c FROM bookmarks GROUP BY folder_id")
+      .prepare("SELECT folder_id, COUNT(*) as c FROM bookmarks WHERE archived_into IS NULL GROUP BY folder_id")
       .all() as unknown as Array<{ folder_id: string; c: number }>;
     for (const r of rows) counts.set(r.folder_id, r.c);
     // 排除私密书签的计数（与列表可见性一致）
     if (privateVisibleOnly) {
       const visibleCounts = new Map<string, number>();
       const visRows = this.db
-        .prepare("SELECT folder_id, COUNT(*) as c FROM bookmarks WHERE is_private = 0 GROUP BY folder_id")
+        .prepare("SELECT folder_id, COUNT(*) as c FROM bookmarks WHERE is_private = 0 AND archived_into IS NULL GROUP BY folder_id")
         .all() as unknown as Array<{ folder_id: string; c: number }>;
       for (const r of visRows) visibleCounts.set(r.folder_id, r.c);
       for (const f of folders) {

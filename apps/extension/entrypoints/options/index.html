@@ -139,7 +139,7 @@
       <div class="card">
         <h2>④ 收件箱</h2>
         <p style="font-size: 13px; color: var(--muted); margin-bottom: 12px">
-          在浏览器书签栏创建「📥 自动整理」文件夹，丢进去的书签会被 AI 自动归位
+          在浏览器书签栏创建「📥 自动整理」文件夹，丢进去的书签会自动归类（应用库 + 浏览器同步整理）
         </p>
         <div class="row">
           <button id="inbox">创建收件箱</button>
@@ -148,7 +148,18 @@
       </div>
 
       <div class="card">
-        <h2>⑤ 服务端概览</h2>
+        <h2>⑤ 隐私保护</h2>
+        <p style="font-size: 13px; color: var(--muted); margin-bottom: 8px">
+          隐私域名（银行、内网等）的书签：<b>不读取正文、不上传内容、不调用 AI、不做快照</b>，只保存标题和地址。规则在收藏前于本设备判定，服务端再次校验。
+        </p>
+        <p style="font-size: 12px; color: var(--muted)">
+          规则变更后会自动清理已保存的正文、摘要与快照；<b>已发送给 AI 供应商的内容无法追回</b>。
+          私密书签（🔒）为实验性能力：仅隐藏显示，暂无二次验证或加密。
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>⑥ 服务端概览</h2>
         <div class="stats" id="stats">未连接</div>
         <div class="row">
           <button id="refresh">刷新统计</button>

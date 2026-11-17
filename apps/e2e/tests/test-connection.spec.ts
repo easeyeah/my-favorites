@@ -1,9 +1,38 @@
 import { test, expect } from "@playwright/test";
 import { chromium } from "@playwright/test";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const EXTENSION_PATH = path.resolve(here, "../../extension/.output/chrome-mv3");
+const PORT = 3007;
+const BASE = `http://127.0.0.1:${PORT}`;
+
+let server: ChildProcess | null = null;
+const dataDir = mkdtempSync(path.join(os.tmpdir(), "mf-testconn-"));
+
+test.beforeAll(async () => {
+  // 自带 server（不依赖其他 spec 的启动顺序）
+  server = spawn("node", [path.resolve(here, "../../server/dist/index.js")], {
+    env: { ...process.env, DATA_DIR: dataDir, PORT: String(PORT), MF_ENV: "test" },
+    stdio: "ignore",
+  });
+  for (let i = 0; i < 40; i++) {
+    try {
+      if ((await fetch(`${BASE}/healthz`)).ok) break;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}, 60_000);
+
+test.afterAll(async () => {
+  server?.kill();
+  try {
+    rmSync(dataDir, { recursive: true, force: true });
+  } catch {}
+});
 
 test("options 测试连接：localhost 失败时自动回退 127.0.0.1 并成功", async () => {
   const ctx = await chromium.launchPersistentContext("", {

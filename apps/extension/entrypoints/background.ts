@@ -7,6 +7,14 @@ import { browser } from "wxt/browser";
 import { api, fetchWeeklyReport, getConfig, saveConfig, sendEvent } from "../src/lib/api";
 import { flattenBookmarkTree, type BookmarkImportItem } from "../src/lib/import";
 import type { BookmarkDto } from "../src/lib/api";
+import { decidePrivacy } from "../src/lib/privacy";
+import {
+  drainQueue,
+  enqueueOp,
+  getDeviceId,
+  isMirrorMove,
+  runMirrorOps,
+} from "../src/lib/device";
 
 const MENU_SAVE_ID = "mf-save";
 const INBOX_TITLE = "📥 自动整理";
@@ -39,16 +47,20 @@ async function saveFromTab(
   const url = overrideUrl ?? tab.url;
   if (!url || !/^https?:/.test(url)) return null;
 
-  // 就地捕获（通道A：用户正在页面上，登录墙/内网/反爬全覆盖）
+  // A1-2 隐私前置校验：在读取正文【前】判定（规则未加载 → 保守禁止，仅元数据）
+  const readDecision = await decidePrivacy("read_content", url);
   let capture: PageCapture | null = null;
-  try {
-    const [injection] = await browser.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: captureInPage,
-    });
-    capture = (injection?.result as PageCapture | null) ?? null;
-  } catch {
-    // 受限页面（chrome:// 等）：仅存元数据
+  if (readDecision.allowed) {
+    // 就地捕获（通道A：用户正在页面上，登录墙/内网/反爬全覆盖）
+    try {
+      const [injection] = await browser.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: captureInPage,
+      });
+      capture = (injection?.result as PageCapture | null) ?? null;
+    } catch {
+      // 受限页面（chrome:// 等）：仅存元数据
+    }
   }
 
   const created = await api<BookmarkDto>("/bookmarks", {
@@ -59,18 +71,21 @@ async function saveFromTab(
   void sendEvent("bookmark_saved");
   lastSavedBookmarkId = created.id;
 
-  // 内容上行（服务端做隐私校验 + 20KB 截断；fire-and-forget）
+  // A1-2 上传前二次校验：上传【前】判定（禁止"先上传，再由服务端补校验"）
   if (capture) {
-    void api("/content/capture", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        bookmarkId: created.id,
-        l2Text: capture.text,
-        description: capture.description,
-        faviconDataUrl: capture.favicon,
-      }),
-    }).catch(() => undefined);
+    const uploadDecision = await decidePrivacy("upload_content", url);
+    if (uploadDecision.allowed) {
+      void api("/content/capture", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          bookmarkId: created.id,
+          l2Text: capture.text,
+          description: capture.description,
+          faviconDataUrl: capture.favicon,
+        }),
+      }).catch(() => undefined);
+    }
   }
   return { saved: !created.duplicate };
 }
@@ -115,12 +130,31 @@ async function snapshotCurrentTab(tab: chrome.tabs.Tab | undefined): Promise<{ o
     }
   }
   if (!bookmarkId) return { ok: false };
+  // A1-2 快照前校验：隐私页面禁止 captureMHTML（读取行为本身就是敏感动作）
+  const snapDecision = await decidePrivacy("snapshot", tab.url ?? "");
+  if (!snapDecision.allowed) return { ok: false };
   const mhtml = await new Promise<ArrayBuffer | null>((resolve) => {
     // wxt/browser shim 未实现 pageCapture，直接用 chrome 命名空间
     const pageCapture = (globalThis as unknown as { chrome: { pageCapture: { captureMHTML: (opts: { tabId: number }, cb: (data?: string) => void) => void } } }).chrome.pageCapture;
     pageCapture.captureMHTML({ tabId: tab.id! }, (data?: string) => {
       if (!data) return resolve(null);
-      resolve(new Blob([data]).arrayBuffer());
+      // A4-3：Chrome/Edge captureMHTML 返回 base64 编码字符串（非原始 MHTML 文本）。
+      // 直接 new Blob([data]) 会把 base64 字符当 UTF-8 字节存 → 文件损坏。
+      // 正确路径：atob 解码为字节。若返回的已是明文 MHTML（未来规范变化），探测失败则按原文。
+      try {
+        const bin = atob(data);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const head = new TextDecoder("latin1").decode(bytes.slice(0, 200));
+        if (/content-type:\s*multipart|mime-version/i.test(head)) {
+          resolve(bytes.buffer);
+        } else {
+          // 解码后不像 MHTML → 原文可能是明文（旧实现兼容）
+          resolve(new Blob([data]).arrayBuffer());
+        }
+      } catch {
+        resolve(new Blob([data]).arrayBuffer());
+      }
     });
   });
   if (!mhtml) return { ok: false };
@@ -156,39 +190,62 @@ async function syncMirror(): Promise<{ added: number }> {
   return { added };
 }
 
-// ---------- 收件箱监听（防抖聚合，长任务委托服务端） ----------
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-const inboxQueue = new Set<string>();
+// ---------- 收件箱监听（A2 改造：持久队列 + 身份映射 + 镜像） ----------
 
-async function queueInboxCheck(extFolderId: string, childId: string): Promise<void> {
+/** 事件入持久队列（A2-3：SW 重启不丢；A2-2：先映射再处理） */
+async function onInboxEvent(childId: string): Promise<void> {
+  const { inboxExtId } = await getConfig();
+  if (!inboxExtId) return;
   const node = await browser.bookmarks.get(childId).catch(() => []);
-  if (node[0]?.parentId !== extFolderId) return;
-  inboxQueue.add(childId);
-  if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => void flushInbox(), 1200);
+  const bm = node[0];
+  if (!bm || bm.parentId !== inboxExtId || !bm.url) return;
+  // A2-5 循环保护：镜像执行引发的移动不再入队
+  if (await isMirrorMove()) return;
+  await enqueueOp({
+    key: `inbox_map:${childId}:${bm.url}`,
+    kind: "inbox_map",
+    payload: { browserBookmarkId: childId, url: bm.url, title: bm.title ?? bm.url },
+  });
+  scheduleFlush();
+}
+
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleFlush(delayMs = 1200): void {
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = setTimeout(() => void flushInbox(), delayMs);
 }
 
 async function flushInbox(): Promise<void> {
-  const ids = [...inboxQueue];
-  inboxQueue.clear();
-  if (ids.length === 0) return;
+  // A2-2/A2-3：先把积压事件映射成应用库书签（服务端确认才出队）
+  const drained = await drainQueue();
+  // 映射完成后处理收件箱（应用库 ID）；带 deviceId 以生成镜像操作（A2-4）
   try {
-    const result = await api<{
-      moved: Array<{ id: string; to: string }>;
-      left: Array<{ id: string; reason: string }>;
-    }>("/inbox/process", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bookmarkIds: ids }),
-    });
-    if (result.moved.length > 0) {
-      void sendEvent("inbox_auto_sorted", { count: result.moved.length });
-      void browser.action.setBadgeText({ text: `归位${result.moved.length}` });
-      setTimeout(() => void browser.action.setBadgeText({ text: "" }), 5000);
+    const deviceId = await getDeviceId();
+    const inbox = await api<{ id: string }>("/inbox/setup", { method: "POST" });
+    const inboxItems = await api<Array<{ id: string }>>(`/bookmarks?folderId=${inbox.id}&limit=100`, {});
+    if (inboxItems.length > 0) {
+      const result = await api<{
+        moved: Array<{ id: string; to: string }>;
+        left: Array<{ id: string; reason: string }>;
+      }>("/inbox/process", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ bookmarkIds: inboxItems.map((b) => b.id), deviceId }),
+      });
+      if (result.moved.length > 0) {
+        void sendEvent("inbox_auto_sorted", { count: result.moved.length });
+        void browser.action.setBadgeText({ text: `归位${result.moved.length}` });
+        setTimeout(() => void browser.action.setBadgeText({ text: "" }), 5000);
+        // A2-4：立即执行镜像（把浏览器节点也移进对应目录）
+        await runMirrorOps();
+      }
     }
+    // A2-5：无论是否有移动，顺带执行可能积压的镜像操作
+    await runMirrorOps();
   } catch {
-    // 服务端不可达：书签留在收件箱（永不丢书签），等待下次清扫
+    // 服务端不可达：事件留在持久队列，等下次唤醒（A2 验收：离线不丢操作）
   }
+  void drained;
 }
 
 export default defineBackground((): void => {
@@ -199,10 +256,18 @@ export default defineBackground((): void => {
       contexts: ["page", "link"],
     });
     void sendEvent("install");
+    // A1-2：安装即拉取隐私规则（服务端不可达时 loadLocalPrivacyRules 内置兜底）
+    void (async () => {
+      const { syncPrivacyRules } = await import("../src/lib/privacy");
+      await syncPrivacyRules();
+    })();
   });
 
   // F5.5 周报角标（留存钩子④）：每日首次启动 SW 时检查一次
   void (async () => {
+    // A1-2：每日首启刷新隐私规则（修订版本同步）
+    const { syncPrivacyRules } = await import("../src/lib/privacy");
+    await syncPrivacyRules();
     const today = new Date().toISOString().slice(0, 10);
     const { reportReadDate } = await getConfig();
     if (reportReadDate === today) return;
@@ -225,21 +290,34 @@ export default defineBackground((): void => {
 
   browser.bookmarks.onCreated.addListener((_id, bookmark) => {
     void (async () => {
+      if (await isMirrorMove()) return; // A2-5：镜像执行不触发处理
       const { inboxExtId } = await getConfig();
       if (inboxExtId && bookmark.parentId === inboxExtId) {
-        await queueInboxCheck(inboxExtId, bookmark.id);
+        await onInboxEvent(bookmark.id);
       }
     })();
   });
 
   browser.bookmarks.onMoved.addListener((id, info) => {
     void (async () => {
+      if (await isMirrorMove()) return; // A2-5：镜像移动不触发处理（监听循环保护）
       const { inboxExtId } = await getConfig();
       if (inboxExtId && info.parentId === inboxExtId) {
-        await queueInboxCheck(inboxExtId, id);
+        await onInboxEvent(id);
       }
+      // A2-5：用户手动把书签移出镜像目录 → 记录用户手动归类（不自动移回）
+      // 当前实现不处理移出场景的自动重排（用户手动优先），仅确保不误处理
     })();
   });
+
+  // A2-3：SW 每次启动恢复持久队列 + 镜像操作（内存队列丢失 ≠ 操作丢失）
+  void (async () => {
+    const drainResult = await drainQueue();
+    if (drainResult.left === 0 && drainResult.done > 0) {
+      scheduleFlush(0); // 恢复了积压事件 → 立即处理
+    }
+    await runMirrorOps();
+  })();
 
   // ---------- 消息路由（popup/options → background） ----------
   browser.runtime.onMessage.addListener(

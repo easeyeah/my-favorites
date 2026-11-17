@@ -1,6 +1,8 @@
 export * from "./url";
 export * from "./classify-rules";
 export * from "./netscape";
+export * from "./eval-samples";
+export * from "./privacy";
 import { canonicalizeUrl } from "./url";
 
 /** 领域类型 —— 技术方案 §4 数据模型的 TS 侧镜像（DB schema 以 server 端 Drizzle 为准） */

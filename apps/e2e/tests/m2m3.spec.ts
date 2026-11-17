@@ -163,7 +163,7 @@ test("迁移：export → import 回灌到新实例", async ({ request }) => {
   // 用无鉴权新实例验证导入
   const newData = mkdtempSync(path.join(os.tmpdir(), "mf-imp-"));
   const imp = spawn("node", [path.resolve(here, "../../server/dist/index.js")], {
-    env: { ...process.env, DATA_DIR: newData, PORT: "3211" },
+    env: { ...process.env, DATA_DIR: newData, PORT: "3211", MF_ENV: "test" },
     stdio: "ignore",
   });
   await new Promise((r) => setTimeout(r, 1500));

@@ -33,15 +33,20 @@ ENV NODE_ENV=development
 COPY --from=deps /app/.pnpm-store /app/.pnpm-store
 RUN pnpm config set store-dir /app/.pnpm-store
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
 COPY packages/ai packages/ai
 COPY apps/server apps/server
+COPY apps/web apps/web
 RUN pnpm install --frozen-lockfile --prefer-offline
-RUN pnpm --filter @mf/server build
+RUN pnpm --filter @mf/server build \
+  && pnpm --filter @mf/web build \
+  && cp -r apps/web/dist web-dist
 
 FROM node:24-alpine AS prod
 WORKDIR /app
 COPY --from=build /app/apps/server/dist/index.js ./dist/index.js
+COPY --from=build /app/web-dist ./web-dist
 
 ENV PORT=3000 \
     MF_FORM=self-hosted \

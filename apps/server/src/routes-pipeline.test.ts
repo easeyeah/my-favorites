@@ -194,7 +194,7 @@ describe("内容捕获与摘要（F2.1/F2.3）", () => {
       await env.app.request(`/api/v1/content/${bm.id}`)
     ).json()) as { l2_text: string | null; fail_reason: string };
     expect(cache.l2_text).toBeNull();
-    expect(cache.fail_reason).toBe("privacy_domain_skipped");
+    expect(cache.fail_reason).toBe("privacy_privacy_domain"); // A1-3 统一策略原因码
   });
 
   it("正文超长截断到 20KB（成本红线）", async () => {

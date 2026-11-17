@@ -4,7 +4,6 @@
  */
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { logger } from "hono/logger";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { randomBytes, scryptSync } from "node:crypto";
 import path from "node:path";
@@ -12,6 +11,7 @@ import {
   ingestRequest,
   captureRequest,
   canonicalizeUrl,
+  isPrivacyDomain,
   parseNetscapeBookmarks,
   exportNetscapeHtml,
 } from "@mf/shared";
@@ -22,8 +22,17 @@ import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
 import { navData, renderNavHtml, renderPasswordPage, NAV_TEMPLATES, type NavTemplate } from "./nav";
 import { login, mountAuth, authEnabled } from "./auth";
+import {
+  mountSecurity,
+  adminSetup,
+  loginWithDbHash,
+  isProductionLike,
+  setupRequired,
+} from "./security";
 import type { MaintenanceService } from "./maintenance";
 import type { SemanticService } from "./semantic";
+import { fetchGuardConfigFromEnv, guardedFetch } from "./fetch-guard";
+import { buildSnapshotView } from "./snapshot-view";
 
 export type LlmFor = (purpose: "organize" | "summarize" | "embedding") => LlmClient | null;
 
@@ -60,7 +69,16 @@ export function buildApp(deps: AppDeps): Hono {
     v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
   const api = new Hono().basePath("/api/v1");
-  api.use(logger());
+  // A1-3 日志脱敏：hono 默认 logger 会输出完整 path+query（含 /by-url?url= 的完整隐私 URL）。
+  // 自定义 logger：只输出方法、路径模板（去 query）、状态、耗时。
+  api.use(async (c, next) => {
+    const start = Date.now();
+    await next();
+    const pathOnly = c.req.path.split("?")[0];
+    console.log(
+      `${c.req.method} ${pathOnly} → ${c.res?.status ?? "?"} ${Date.now() - start}ms`,
+    );
+  });
   api.use(
     "*",
     cors({
@@ -75,8 +93,21 @@ export function buildApp(deps: AppDeps): Hono {
     }),
   );
 
-  // ---------- 鉴权（F6.2，设置 ADMIN_PASSWORD 后启用） ----------
-  mountAuth(api, store, adminPassword);
+  // ---------- 鉴权（F6.2 + A4-1 安全默认值） ----------
+  // 环境变量密码模式：原逻辑；生产语义无密码：强制 setup 门槛（503）或 DB hash + token
+  if (authEnabled(adminPassword)) {
+    mountAuth(api, store, adminPassword);
+  } else {
+    mountSecurity(api, store, adminPassword);
+    // 首启 setup（唯一免鉴权通道；仅一次）
+    api.post("/admin/setup", async (c) => {
+      const body = (await c.req.json().catch(() => ({}))) as { password?: string };
+      if (!body.password) return c.json({ error: "password_required" }, 400);
+      const result = await adminSetup(store, body.password);
+      if ("error" in result) return c.json({ error: result.error }, 400);
+      return c.json(result);
+    });
+  }
 
   const privateVisible = (c: { req: { header: (n: string) => string | undefined } }): boolean =>
     c.req.header("x-mf-private") === "1";
@@ -395,8 +426,117 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json(folder, 201);
   });
 
+  // ---------- A2-1/A2-2：设备注册 + 浏览器书签身份映射 ----------
+  api.post("/devices/register", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { deviceId?: string; label?: string };
+    if (!body.deviceId || body.deviceId.length < 8) {
+      return c.json({ error: "deviceId_required" }, 400);
+    }
+    store.ensureDevice(body.deviceId, body.label);
+    return c.json({ ok: true });
+  });
+
+  /**
+   * A2-2 收件箱映射入库：浏览器事件携带 (deviceId, browserBookmarkId, url, title)。
+   * 服务端按 canonical URL 幂等找/建应用库书签（收件箱目录），建立身份映射，
+   * 返回应用库书签 ID。重复事件 → 同一 ID（幂等，不重复建书签/任务）。
+   */
+  api.post("/inbox/map", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      deviceId?: string;
+      browserBookmarkId?: string;
+      url?: string;
+      title?: string;
+    };
+    if (!body.deviceId || !body.browserBookmarkId || !body.url) {
+      return c.json({ error: "deviceId_browserBookmarkId_url_required" }, 400);
+    }
+    store.ensureDevice(body.deviceId);
+    const canon = canonicalizeUrl(body.url);
+    if (!canon) return c.json({ error: "invalid_url" }, 400);
+
+    // 已有映射 → 直接返回（重复事件幂等）
+    const existingAppId = store.findAppBookmarkId(body.deviceId, body.browserBookmarkId);
+    if (existingAppId && store.getBookmark(existingAppId)) {
+      return c.json({ bookmarkId: existingAppId, mapped: true, duplicate: true });
+    }
+    // canonical 查重（扩展已收藏过 / 导入过）
+    const byCanonical = store.findByCanonical(canon.canonical);
+    const inbox = store.inboxFolder() ?? store.createFolder("📥 自动整理", null, "user", true);
+    const bm =
+      byCanonical ??
+      store.createBookmark({
+        folderId: inbox.id,
+        urlRaw: body.url,
+        urlCanonical: canon.canonical,
+        title: body.title ?? body.url,
+      });
+    store.upsertIdentity({
+      deviceId: body.deviceId,
+      browserBookmarkId: body.browserBookmarkId,
+      appBookmarkId: bm.id,
+    });
+    return c.json({ bookmarkId: bm.id, mapped: true, duplicate: byCanonical !== undefined });
+  });
+
+  /**
+   * A2-3/A2-4 待执行操作（浏览器镜像 D20）：
+   * 扩展拉取 pending 操作 → 执行浏览器节点移动 → 回执。
+   * 幂等：enqueue 已去重；回执后不再下发；失败递增 attempts 保留待重试。
+   */
+  api.get("/browser/ops", (c) => {
+    const deviceId = c.req.query("deviceId");
+    if (!deviceId) return c.json({ error: "deviceId_required" }, 400);
+    return c.json({ ops: store.pendingBrowserOps(deviceId) });
+  });
+
+  api.post("/browser/ops/:id/result", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      status?: "done" | "failed" | "cancelled";
+      error?: string;
+    };
+    const id = Number(c.req.param("id"));
+    if (!body.status || !["done", "failed", "cancelled"].includes(body.status)) {
+      return c.json({ error: "status_required" }, 400);
+    }
+    store.completeBrowserOp(id, body.status, body.error);
+    return c.json({ ok: true });
+  });
+
+  // ---------- A1-1 隐私规则下发（扩展端同步本地） ----------
+  api.get("/privacy/rules", (c) => c.json(store.privacyRules()));
+
+  api.post("/privacy/rules", async (c) => {
+    // 用户自定义隐私规则（追加/删除自定义项；内置项不可删）
+    const body = (await c.req.json().catch(() => ({}))) as {
+      add?: string[];
+      remove?: string[];
+      /** 规则变化后是否清理存量内容（默认清理；界面需先展示清理范围） */
+      purgeExisting?: boolean;
+    };
+    for (const p of body.add ?? []) {
+      if (typeof p === "string" && p.length > 0 && p.length <= 253) store.addPrivacyPattern(p.trim().toLowerCase());
+    }
+    for (const p of body.remove ?? []) {
+      if (typeof p === "string") store.removePrivacyPattern(p.trim().toLowerCase());
+    }
+    // A1-5：规则变化后清理存量（正文/摘要/关键词/向量/快照）；
+    // 已发送给第三方的数据无法追回（界面需说明）
+    let purged: { bookmarks: number; snapshots: number } | null = null;
+    if (body.purgeExisting !== false) {
+      purged = store.purgeContentForPrivacyRules((url) =>
+        isPrivacyDomain(url, { patterns: store.privacyPatterns() }),
+      );
+    }
+    return c.json({ ...store.privacyRules(), purged });
+  });
+
   api.post("/inbox/process", async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { bookmarkIds?: string[] };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      bookmarkIds?: string[];
+      /** A2-4 镜像模式：触发设备（用于把移动镜像回浏览器书签） */
+      deviceId?: string;
+    };
     const inbox = store.inboxFolder();
     if (!inbox) return c.json({ error: "inbox_not_setup" }, 400);
     const ids = body.bookmarkIds ?? [];
@@ -406,6 +546,25 @@ export function buildApp(deps: AppDeps): Hono {
       }
     }
     const result = await pipeline.processInbox(ids, inbox.id);
+    // A2-4 镜像模式（D20）：应用库归位后，为触发设备排浏览器节点移动操作。
+    // 不与 DB 事务共用（浏览器外部状态），走持久待执行队列，扩展拉取后执行。
+    if (body.deviceId) {
+      for (const mv of result.moved) {
+        for (const ident of store.identitiesForApp(mv.id)) {
+          if (ident.device_id !== body.deviceId) continue;
+          const target = store.findFolderByName(mv.to);
+          if (!target) continue;
+          // 浏览器侧目标目录节点：按「分类名」在映射表里找该设备的节点（扩展端 ensureMirrorFolder 维护）
+          store.enqueueBrowserOpIdempotent({
+            deviceId: ident.device_id,
+            op: "move",
+            browserBookmarkId: ident.browser_bookmark_id,
+            targetBrowserParentId: `mf-folder:${target.name}`,
+            payload: { folderName: target.name, appFolderId: target.id },
+          });
+        }
+      }
+    }
     return c.json(result);
   });
 
@@ -440,29 +599,30 @@ export function buildApp(deps: AppDeps): Hono {
     const targets = body.ids?.length
       ? body.ids.map((id) => store.getBookmark(id)).filter((b) => b !== undefined)
       : store.bookmarksMissingContent(10);
+    const guardConfig = fetchGuardConfigFromEnv();
     const results: Array<{ id: string; ok: boolean; reason?: string }> = [];
     for (const bm of targets) {
       if (!bm) continue;
-      if (bm.is_private || pipeline.privacyCheck(bm.url_canonical)) {
+      // A1-3 服务端纵深校验：隐私域/私密书签禁止抓取（独立判定，不信任任何客户端声明）
+      const decision = pipeline.serverDecide("server_fetch", bm.url_canonical, {
+        isPrivateBookmark: bm.is_private === 1,
+      });
+      if (!decision.allowed) {
         store.upsertCache({
           bookmarkId: bm.id,
           fetchedVia: "server_crawl",
-          failReason: "privacy_domain_skipped",
+          failReason: `privacy_${decision.reason}`,
         });
-        results.push({ id: bm.id, ok: false, reason: "privacy_domain" });
+        results.push({ id: bm.id, ok: false, reason: "privacy" });
         continue;
       }
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 10_000);
-        const res = await fetch(bm.url_canonical, {
-          signal: controller.signal,
-          redirect: "follow",
+        // A1-4 网络访问策略：私网/回环/链路本地禁止（自建显式开启才放行）；每跳重定向重新校验
+        const res = await guardedFetch(bm.url_canonical, guardConfig, {
           headers: {
             "user-agent": "my-favorites-bot/0.1 (+https://github.com/easeyeah/my-favorites)",
           },
         });
-        clearTimeout(timer);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const html = (await res.text()).slice(0, 500_000);
         const description =
@@ -612,11 +772,26 @@ export function buildApp(deps: AppDeps): Hono {
   // ---------- F2.4 快照（配额管控） ----------
   api.post("/snapshots", async (c) => {
     const bookmarkId = c.req.query("bookmarkId");
-    if (!bookmarkId || !store.getBookmark(bookmarkId)) {
+    const bm = bookmarkId ? store.getBookmark(bookmarkId) : undefined;
+    if (!bookmarkId || !bm) {
       return c.json({ error: "bookmark_not_found" }, 404);
+    }
+    // A1-3 服务端纵深校验：隐私域/私密书签不接受快照上传
+    const decision = pipeline.serverDecide("snapshot", bm.url_canonical, {
+      isPrivateBookmark: bm.is_private === 1,
+    });
+    if (!decision.allowed) {
+      return c.json({ error: "privacy_blocked", reason: decision.reason }, 403);
     }
     const buf = await c.req.arrayBuffer();
     if (!buf || buf.byteLength === 0) return c.json({ error: "empty_body" }, 400);
+    // A4-4 前置：MHTML 格式 magic 校验（捕获失败/不完整文件不记为成功）
+    const head = new TextDecoder("latin1").decode(buf.slice(0, 512));
+    if (!/content-type:\s*multipart\/related/i.test(head) && !/^mime-version:/im.test(head)) {
+      return c.json({ error: "invalid_mhtml_format" }, 400);
+    }
+    const MB = 1024 * 1024;
+    if (buf.byteLength > 20 * MB) return c.json({ error: "snapshot_too_large", maxBytes: 20 * MB }, 413);
     // 配额（技术方案 §7.2）：snapshot_quota_bytes 未设置 = 不限（自建）；云端按套餐
     const quota = Number(store.getSetting("snapshot_quota_bytes") ?? 0);
     if (quota > 0 && store.snapshotUsageBytes() + buf.byteLength > quota) {
@@ -633,6 +808,59 @@ export function buildApp(deps: AppDeps): Hono {
       )
       .run(id, bookmarkId, "mhtml", file, buf.byteLength, new Date().toISOString(), "extension_mhtml");
     return c.json({ id, size: buf.byteLength, usageBytes: store.snapshotUsageBytes() }, 201);
+  });
+
+  // A4-4/A4-5：快照查看（净化视图，禁脚本/禁外联）与受控下载分开
+  api.get("/snapshots/:id/view", (c) => {
+    const row = store.db
+      .prepare("SELECT s.*, b.url_canonical, b.title, b.is_private FROM snapshot s JOIN bookmarks b ON b.id = s.bookmark_id WHERE s.id = ?")
+      .get(c.req.param("id")) as
+      | { id: string; path: string; title: string; url_canonical: string; is_private: number }
+      | undefined;
+    if (!row) return c.json({ error: "not_found" }, 404);
+    // 隐私域/私密书签：下载执行隐私检查（A4-5），查看同样受控
+    const decision = pipeline.serverDecide("snapshot", row.url_canonical, {
+      isPrivateBookmark: row.is_private === 1,
+    });
+    if (!decision.allowed) return c.json({ error: "privacy_blocked" }, 403);
+    try {
+      const mhtml = readFileSync(row.path, "utf8");
+      const view = buildSnapshotView(mhtml, { snapshotId: row.id, title: row.title });
+      if (!view.ok || !view.viewer) {
+        // 无法安全内嵌：给出受控下载路径与说明（A4-5：不假装可显示）
+        return c.html(
+          `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>快照无法在线显示</title></head><body style="font:14px/1.6 -apple-system,sans-serif;max-width:560px;margin:15vh auto;padding:0 24px"><h2>该快照无法安全在线显示</h2><p>此 MHTML 不包含可净化的 HTML 部分，或解码失败。你可以下载原始文件后用浏览器打开，注意其中可能包含原始页面的脚本与外部引用。</p><p><a href="/api/v1/snapshots/${row.id}/download">下载原始 MHTML</a></p></body></html>`,
+        );
+      }
+      c.header("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'");
+      c.header("content-type", "text/html; charset=utf-8");
+      return c.body(view.viewer);
+    } catch {
+      return c.json({ error: "file_missing" }, 500);
+    }
+  });
+
+  // 受控下载：鉴权（API 中间件已保证）+ 隐私检查 + attachment（不内联执行）
+  api.get("/snapshots/:id/download", (c) => {
+    const row = store.db
+      .prepare("SELECT s.*, b.url_canonical, b.is_private FROM snapshot s JOIN bookmarks b ON b.id = s.bookmark_id WHERE s.id = ?")
+      .get(c.req.param("id")) as
+      | { id: string; path: string; url_canonical: string; is_private: number }
+      | undefined;
+    if (!row) return c.json({ error: "not_found" }, 404);
+    const decision = pipeline.serverDecide("snapshot", row.url_canonical, {
+      isPrivateBookmark: row.is_private === 1,
+    });
+    if (!decision.allowed) return c.json({ error: "privacy_blocked" }, 403);
+    try {
+      const data = readFileSync(row.path);
+      c.header("content-type", "application/octet-stream"); // 不用 message/rfc822 内联
+      c.header("content-disposition", `attachment; filename="snapshot-${row.id}.mhtml"`);
+      c.header("x-content-type-options", "nosniff");
+      return c.body(data);
+    } catch {
+      return c.json({ error: "file_missing" }, 500);
+    }
   });
 
   api.get("/snapshots/:id", (c) => {
@@ -707,14 +935,26 @@ export function buildApp(deps: AppDeps): Hono {
     if (!body.providerId || !body.baseUrl) {
       return c.json({ error: "providerId_and_baseUrl_required" }, 400);
     }
-    const id = store.saveProviderConfig({
-      id: body.id,
-      providerId: body.providerId,
-      baseUrl: body.baseUrl,
-      apiKey: body.apiKey ?? null,
-      purposeModels: body.purposeModels ?? {},
-      enabled: body.enabled,
-    });
+    let id: string;
+    try {
+      id = store.saveProviderConfig({
+        id: body.id,
+        providerId: body.providerId,
+        baseUrl: body.baseUrl,
+        apiKey: body.apiKey ?? null,
+        purposeModels: body.purposeModels ?? {},
+        enabled: body.enabled,
+      });
+    } catch (err) {
+      // A4-2：生产未配置 MF_SECRET_KEY → 明确指引（不静默明文落库）
+      if (String(err).includes("MF_SECRET_KEY_required_for_provider_keys")) {
+        return c.json(
+          { error: "MF_SECRET_KEY_required_for_provider_keys", hint: "在部署环境中设置 MF_SECRET_KEY（≥16 字符）后再保存 Provider Key" },
+          400,
+        );
+      }
+      throw err;
+    }
     return c.json({ id }, 201);
   });
 
@@ -772,6 +1012,30 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json(Object.fromEntries(names.map((n) => [n, store.countEvents(n)])));
   });
 
+  // ---------- 令牌管理（A4-1：可撤销、可失效） ----------
+  api.get("/auth/tokens", (c) => {
+    const rows = store.db
+      .prepare("SELECT token, label, created_at FROM tokens ORDER BY created_at DESC")
+      .all() as unknown as Array<{ token: string; label: string | null; created_at: string }>;
+    return c.json({
+      tokens: rows.map((r) => ({ ...r, token: `${r.token.slice(0, 8)}…` })), // 脱敏展示
+    });
+  });
+
+  api.delete("/auth/tokens/:token", (c) => {
+    const token = c.req.param("token");
+    store.db.prepare("DELETE FROM tokens WHERE token = ?").run(token);
+    return c.json({ revoked: true });
+  });
+
+  api.post("/auth/logout", (c) => {
+    // 撤销当前请求使用的 token
+    const header = c.req.header("authorization") ?? "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+    if (token) store.db.prepare("DELETE FROM tokens WHERE token = ?").run(token);
+    return c.json({ loggedOut: true });
+  });
+
   // ---------- stats ----------
   api.get("/stats", (c) => {
     const counts = store.countBookmarks();
@@ -792,15 +1056,29 @@ export function buildApp(deps: AppDeps): Hono {
     }),
   );
 
-  // F6.2 登录（自建管理员密码 → token）
+  // F6.2/A4-1 登录（环境变量密码或 DB hash；均带速率限制）
   root.post("/auth/login", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { password?: string; label?: string };
     if (!body.password) return c.json({ error: "password_required" }, 400);
-    const result = login(store, adminPassword, body.password, body.label ?? "device");
-    if ("error" in result) {
-      return c.json(result, authEnabled(adminPassword) ? 401 : 400);
+    // 环境变量模式（兼容既有部署）
+    if (authEnabled(adminPassword)) {
+      const result = login(store, adminPassword, body.password, body.label ?? "device");
+      if ("error" in result) {
+        return c.json(result, result.error === "auth_disabled" ? 400 : 401);
+      }
+      return c.json(result);
     }
-    return c.json(result);
+    // A4-1 DB hash 模式（生产语义首启 setup 后）
+    if (isProductionLike() && !setupRequired(store)) {
+      const clientKey = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || "local";
+      const result = loginWithDbHash(store, body.password, body.label ?? "device", clientKey);
+      if ("status" in result) {
+        const status = result.status as 401 | 429;
+        return c.json({ error: result.error }, status);
+      }
+      return c.json(result);
+    }
+    return c.json({ error: "auth_disabled" }, 400);
   });
 
   // 体检报告页（获客钩子：可分享）

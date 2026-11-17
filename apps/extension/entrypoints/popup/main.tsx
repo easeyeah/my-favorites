@@ -26,9 +26,9 @@ function Popup() {
       <div className="mt-3 space-y-2">
         <button
           className="w-full rounded-lg bg-neutral-900 px-3 py-2 text-sm text-white"
-          onClick={() => send("save-current", "已收藏（AI 已归位）", "已收藏过（未重复）")}
+          onClick={() => send("save-current", "已收藏（已自动归类）", "已收藏过（未重复）")}
         >
-          ★ 收藏（AI 自动归位）
+          ★ 收藏（自动归类）
         </button>
         <button
           className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
