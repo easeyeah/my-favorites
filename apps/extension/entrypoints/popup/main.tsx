@@ -37,6 +37,25 @@ function Popup() {
           📥 丢进收件箱
         </button>
         <button
+          className="w-full rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700"
+          onClick={() => {
+            setStatus("导入中…");
+            void browser.runtime.sendMessage(
+              { type: "import-bookmarks" },
+              (res: { imported?: number; total?: number; skipped_duplicate?: number } | undefined) => {
+                setStatus(
+                  res?.imported !== undefined
+                    ? `✅ 导入 ${res.imported}/${res.total} 条（重复 ${res.skipped_duplicate} 跳过）`
+                    : "导入失败：先在「设置」连接服务端",
+                );
+                setTimeout(() => setStatus(""), 5000);
+              },
+            );
+          }}
+        >
+          📥 一键导入全部书签
+        </button>
+        <button
           className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
           onClick={() => send("snapshot-current", "快照已保存", "已收藏过，快照已保存")}
         >

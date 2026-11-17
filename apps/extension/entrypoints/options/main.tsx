@@ -109,6 +109,10 @@ function Options() {
             共 {stats.total} 条书签 / {stats.folders} 个目录
           </p>
         )}
+        <div className="mt-6 border-t pt-4">
+          <label className="block text-sm font-semibold">📂 数据迁移</label>
+          <p className="mt-1 text-xs text-neutral-500">把浏览器现有的所有书签到入服务端（文件夹层级自动保留）</p>
+        </div>
         <button
           className="mt-3 rounded-lg border px-3 py-2 text-sm"
           onClick={() =>
