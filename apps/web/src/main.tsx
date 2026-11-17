@@ -13,9 +13,9 @@ interface AdminConfig {
 }
 function loadConfig(): AdminConfig {
   try {
-    return { serverUrl: "http://localhost:3000", token: "", ...JSON.parse(localStorage.getItem(configKey) ?? "{}") };
+    return { serverUrl: "http://127.0.0.1:3000", token: "", ...JSON.parse(localStorage.getItem(configKey) ?? "{}") };
   } catch {
-    return { serverUrl: "http://localhost:3000", token: "" };
+    return { serverUrl: "http://127.0.0.1:3000", token: "" };
   }
 }
 function saveConfig(c: AdminConfig): void {
