@@ -99,7 +99,22 @@ type TabKey = "overview" | "bookmarks" | "organize" | "nav" | "report" | "settin
 
 function Admin() {
   const [cfg, setCfg] = useState<AdminConfig>(loadConfig);
-  const [tab, setTab] = useState<TabKey>("overview");
+  // tab 持久化到 URL hash：刷新/前进后退都恢复当前页面（用户反馈）
+  const TAB_KEYS: TabKey[] = ["overview", "bookmarks", "organize", "nav", "report", "settings"];
+  const readTab = (): TabKey => {
+    const h = location.hash.replace("#", "") as TabKey;
+    return TAB_KEYS.includes(h) ? h : "overview";
+  };
+  const [tab, setTab] = useState<TabKey>(readTab);
+  useEffect(() => {
+    const onHash = () => setTab(readTab());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const switchTab = (key: TabKey) => {
+    setTab(key);
+    if (location.hash !== `#${key}`) history.replaceState(null, "", `#${key}`);
+  };
   const [connected, setConnected] = useState(false);
   const refreshAll = useCallback(() => {
     fetch(`${cfg.serverUrl}/healthz`)
@@ -130,7 +145,7 @@ function Admin() {
         {tabs.map(([key, label]) => (
           <button
             key={key}
-            onClick={() => setTab(key)}
+            onClick={() => switchTab(key)}
             className={`rounded-lg px-4 py-2 text-sm ${tab === key ? "bg-indigo-600 text-white" : "hover:bg-accent"}`}
           >
             {label}
