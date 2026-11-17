@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
-import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { randomBytes, scryptSync } from "node:crypto";
 import path from "node:path";
 import {
@@ -849,6 +849,44 @@ footer{margin-top:28px;text-align:center;color:var(--muted);font-size:12px}</sty
         .join("")}</ul><p><a class="back" href="javascript:history.back()">← 返回</a></p></body></html>`,
     );
   });
+
+  // ---------- Web 管理台静态托管（F6.2：单容器自带 Web 界面，打开服务端地址即是管理台） ----------
+  const webDist = process.env.WEB_DIST_DIR ?? path.join(process.cwd(), "web-dist");
+  let adminIndexHtml: string | null = null;
+  try {
+    adminIndexHtml = readFileSync(path.join(webDist, "index.html"), "utf8");
+  } catch {
+    // 无管理台产物（纯 API 部署）——优雅跳过
+  }
+  if (adminIndexHtml) {
+    const ASSET_MIME: Record<string, string> = {
+      ".js": "text/javascript",
+      ".css": "text/css",
+      ".html": "text/html",
+      ".svg": "image/svg+xml",
+      ".png": "image/png",
+      ".ico": "image/x-icon",
+      ".woff2": "font/woff2",
+    };
+    root.get("/", (c) => c.html(adminIndexHtml!));
+    root.get("/assets/*", (c) => {
+      const rel = c.req.path.replace(/^\/assets\//, "");
+      // 防目录穿越
+      const file = path.resolve(webDist, "assets", rel);
+      if (!file.startsWith(path.resolve(webDist, "assets"))) {
+        return c.json({ error: "forbidden" }, 403);
+      }
+      try {
+        const data = readFileSync(file);
+        c.header("content-type", ASSET_MIME[path.extname(file)] ?? "application/octet-stream");
+        c.header("cache-control", "public, max-age=86400"); // 带 hash 的产物可长缓存
+        return c.body(data);
+      } catch {
+        return c.json({ error: "not_found" }, 404);
+      }
+    });
+    root.get("/favicon.ico", (c) => c.body(null, 204));
+  }
 
   // 导航站公开页（模板 + 密码）
   root.get("/s/:slug", (c) => {

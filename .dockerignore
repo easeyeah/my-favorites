@@ -4,9 +4,10 @@ node_modules
 .git
 .DS_Store
 docs
-**/dist
-**/.output
-**/.wxt
+# server 产物（镜像内重新构建）；web/dist 保留——管理台静态产物直接进镜像
+apps/server/dist
+apps/extension/.output
+apps/extension/.wxt
 **/*.db
 data
 /data
