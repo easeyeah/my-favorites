@@ -1,6 +1,8 @@
 # 全离线自建（M3）：自建服务端 + 本机 Ollama，零云依赖
 # 用法：docker compose -f docker/docker-compose.full.yml up -d
 # 扩展/管理台设置 LLM_BASE_URL 即可全离线运行
+# name：编排项目名（默认取目录名 docker → 卷/网络会叫 docker_*，显式命名与项目代号一致）
+name: my-favorites
 services:
   server:
     container_name: my-favorites-server

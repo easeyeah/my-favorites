@@ -1,5 +1,7 @@
 # 本地开发环境（技术方案 §8.1）：服务端一律跑 Docker，开发环境即自建端形态
 # 用法：docker compose -f docker/docker-compose.dev.yml up
+# name：编排项目名（默认取目录名 docker → 卷/网络会叫 docker_*，显式命名与项目代号一致）
+name: my-favorites
 services:
   server:
     container_name: my-favorites-server
@@ -15,7 +17,10 @@ services:
       - "3000:3000"
     environment:
       MF_FORM: self-hosted
+      MF_ENV: dev # 开发语义：A4-1 安全门槛按 dev 处理（生产语义默认锁定 setup）
       PORT: 3000
+      # 数据进命名卷（与 full.yml 一致；不设的话 tsx cwd 在 apps/server，数据会落到宿主机源码目录）
+      DATA_DIR: /data
       # LLM 三档切换只改这里：llm-mock -> http://llm-mock:8080/v1
       #                    本机 Ollama -> http://host.docker.internal:11434/v1
       #                    真实端点 -> 厂商 OpenAI 兼容 URL
