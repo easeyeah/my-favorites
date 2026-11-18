@@ -122,15 +122,19 @@ export class MaintenanceService {
   }
 
   /** 查重（F5.2）：同域同名分组 → 合并建议清单（不自动删除，红线 3） */
-  runDuplicateScan(): { groups: number; reportId: string; suggestions: Array<{ keep: string; dupes: string[]; title: string }> } {
+  runDuplicateScan(): { groups: number; reportId: string; suggestions: Array<{ keep: string; dupes: string[]; title: string; items?: Array<{ id: string; title: string; url: string; isKeep: boolean }> }> } {
     const groups = this.store.duplicateGroups();
     const suggestions = groups.map((g) => {
-      const sorted = [...g.items].sort((a, b) => a.added_at.localeCompare(b.added_at));
+      const sorted = [...g.items].sort(
+        (a, b) => a.added_at.localeCompare(b.added_at) || a.id.localeCompare(b.id),
+      );
       const keep = sorted[0]!;
       return {
         keep: keep.id,
         title: keep.title,
         dupes: sorted.slice(1).map((d) => d.id),
+        // 明细快照（管理台重复组列表展示：标题/URL，书签删除后仍可见）
+        items: sorted.map((b) => ({ id: b.id, title: b.title, url: b.url_raw, isKeep: b.id === keep.id })),
       };
     });
     const reportId = this.store.saveReport("duplicate_scan", { groups: suggestions.length, suggestions });

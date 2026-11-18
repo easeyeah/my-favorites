@@ -21,6 +21,7 @@ import {
   AlertCircle,
   BarChart3,
   CheckCircle2,
+  ChevronRight,
   Copy,
   ExternalLink,
   FilePlus2,
@@ -83,11 +84,37 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
     </UiCard>
   );
 }
-function Stat({ num, label, bad }: { num: number | string; label: string; bad?: boolean }) {
+function Stat({
+  num,
+  label,
+  bad,
+  onClick,
+  hint,
+}: {
+  num: number | string;
+  label: string;
+  bad?: boolean;
+  /** 点击钻取：数字卡是入口，不是死数字 */
+  onClick?: () => void;
+  hint?: string;
+}) {
+  const clickable = Boolean(onClick);
   return (
-    <div className="rounded-xl border border-border bg-card p-4 text-center transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm">
+    <div
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={(e) => clickable && e.key === "Enter" && onClick?.()}
+      title={hint}
+      className={`rounded-xl border border-border bg-card p-4 text-center transition-all duration-200 ${
+        clickable ? "hover:border-primary/40 hover:-translate-y-0.5 hover:shadow-md focus-visible:ring-ring/50 cursor-pointer focus-visible:ring-[3px] outline-none" : ""
+      }`}
+    >
       <div className={`text-3xl font-bold ${bad ? "text-red-500" : ""}`}>{num}</div>
-      <div className="mt-1 text-xs text-muted-foreground">{label}</div>
+      <div className="text-muted-foreground mt-1 flex items-center justify-center gap-1 text-xs">
+        {label}
+        {clickable && <ChevronRight className="size-3" />}
+      </div>
     </div>
   );
 }
@@ -163,18 +190,25 @@ function Admin() {
   const [cfg, setCfg] = useState<AdminConfig>(loadConfig);
   // tab 持久化到 URL hash：刷新/前进后退都恢复当前页面（用户反馈）
   const TAB_KEYS: TabKey[] = ["overview", "bookmarks", "organize", "nav", "report", "settings"];
-  const readTab = (): TabKey => {
-    const h = location.hash.replace("#", "") as TabKey;
-    return TAB_KEYS.includes(h) ? h : "overview";
+  /** hash 解析：#bookmarks?status=dead → tab=bookmarks、params.status=dead（数字→明细钻取链路） */
+  const readTab = (): { tab: TabKey; params: URLSearchParams } => {
+    const raw = location.hash.replace("#", "");
+    const [name, query = ""] = raw.split("?");
+    const tab = name as TabKey;
+    return {
+      tab: TAB_KEYS.includes(tab) ? tab : "overview",
+      params: new URLSearchParams(query),
+    };
   };
-  const [tab, setTab] = useState<TabKey>(readTab);
+  const [route, setRoute] = useState(readTab);
+  const tab = route.tab;
   useEffect(() => {
-    const onHash = () => setTab(readTab());
+    const onHash = () => setRoute(readTab());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const switchTab = (key: TabKey) => {
-    setTab(key);
+    setRoute({ tab: key, params: new URLSearchParams() });
     if (location.hash !== `#${key}`) history.replaceState(null, "", `#${key}`);
   };
   const [connected, setConnected] = useState(false);
@@ -217,7 +251,7 @@ function Admin() {
       </nav>
       <main className="mt-5">
         {tab === "overview" && <Overview cfg={cfg} />}
-        {tab === "bookmarks" && <Bookmarks cfg={cfg} />}
+        {tab === "bookmarks" && <Bookmarks cfg={cfg} initialStatus={route.params.get("status")} />}
         {tab === "organize" && <Organize cfg={cfg} />}
         {tab === "nav" && <NavSites cfg={cfg} />}
         {tab === "report" && <Report cfg={cfg} />}
@@ -243,12 +277,15 @@ function Overview({ cfg }: { cfg: AdminConfig }) {
     api<typeof stats>(cfg, "/stats").then(setStats).catch(() => setStats(null));
     api<typeof report>(cfg, "/health-report").then(setReport).catch(() => setReport(null));
   }, [cfg]);
+  const go = (hash: string) => {
+    location.hash = hash;
+  };
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-      <Stat num={stats?.total ?? "–"} label="书签总数" />
-      <Stat num={stats?.folders ?? "–"} label="目录数" />
-      <Stat num={stats?.dead ?? "–"} label="死链" bad={(stats?.dead ?? 0) > 0} />
-      <Stat num={report?.duplicates ?? "–"} label="重复组" bad={(report?.duplicates ?? 0) > 0} />
+      <Stat num={stats?.total ?? "–"} label="书签总数" hint="查看全部书签" onClick={() => go("bookmarks")} />
+      <Stat num={stats?.folders ?? "–"} label="目录数" hint="按目录浏览" onClick={() => go("bookmarks")} />
+      <Stat num={stats?.dead ?? "–"} label="死链" bad={(stats?.dead ?? 0) > 0} hint="查看哪些链接已失效" onClick={() => go("bookmarks?status=dead")} />
+      <Stat num={report?.duplicates ?? "–"} label="重复组" bad={(report?.duplicates ?? 0) > 0} hint="查看哪些书签重复" onClick={() => go("report")} />
       <div className="col-span-2 md:col-span-4">
         <Card title="快捷入口">
           <div className="flex flex-wrap gap-2">
@@ -268,10 +305,14 @@ function Overview({ cfg }: { cfg: AdminConfig }) {
   );
 }
 
-function Bookmarks({ cfg }: { cfg: AdminConfig }) {
+function Bookmarks({ cfg, initialStatus }: { cfg: AdminConfig; initialStatus?: string | null }) {
   const [items, setItems] = useState<Bookmark[]>([]);
   const [folders, setFolders] = useState<FolderTreeNode[]>([]);
   const [selected, setSelected] = useState<string | "all">("all");
+  /** 健康状态筛选（全部/死链/疑似）——概览数字卡钻取入口的目标视图 */
+  const [statusFilter, setStatusFilter] = useState<"all" | "dead" | "suspect">(
+    initialStatus === "dead" || initialStatus === "suspect" ? initialStatus : "all",
+  );
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
@@ -287,10 +328,11 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
   /** 按需分页拉取当前视图（目录 or 全部）——不拉全量 */
   const loadPage = useCallback(
     async (view: string | "all", offset: number, append: boolean): Promise<void> => {
-      const query =
+      const base =
         view === "all"
           ? `limit=${PAGE}&offset=${offset}`
           : `folderId=${encodeURIComponent(view)}&limit=${PAGE}&offset=${offset}`;
+      const query = statusFilter === "all" ? base : `${base}&status=${statusFilter}`;
       try {
         const batch = await api<Bookmark[]>(cfg, `/bookmarks?${query}`);
         setItems((prev) => (append ? [...prev, ...batch] : batch));
@@ -300,7 +342,7 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
         setHasMore(false);
       }
     },
-    [cfg],
+    [cfg, statusFilter],
   );
 
   const selectFolder = (id: string | "all") => {
@@ -404,6 +446,31 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
           <Search /> 搜索
         </Btn>
         <Btn onClick={() => selectFolder("all")}>全部</Btn>
+      </div>
+      <div className="mb-3 flex items-center gap-1.5 text-xs">
+        <span className="text-muted-foreground">状态筛选：</span>
+        {(
+          [
+            ["all", "全部"],
+            ["dead", "死链"],
+            ["suspect", "疑似"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            onClick={() => {
+              setStatusFilter(value);
+              void loadPage(selected, 0, false);
+            }}
+            className={`rounded-full border px-2.5 py-0.5 transition-all duration-150 ${
+              statusFilter === value
+                ? "border-primary/40 bg-primary text-primary-foreground shadow-xs"
+                : "border-border hover:bg-accent"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[240px_1fr]">
         {/* 左：目录树（计数来自服务端聚合） */}
@@ -779,7 +846,17 @@ function Report({ cfg }: { cfg: AdminConfig }) {
     };
     created_at: string;
   } | null>(null);
-  const [dupReport, setDupReport] = useState<{ findings: { groups: number; suggestions: Array<{ title: string }> } } | null>(null);
+  const [dupReport, setDupReport] = useState<{
+    findings: {
+      groups: number;
+      suggestions: Array<{
+        keep: string;
+        title: string;
+        dupes: string[];
+        items?: Array<{ id: string; title: string; url: string; isKeep: boolean }>;
+      }>;
+    };
+  } | null>(null);
   const [running, setRunning] = useState<"links" | "dups" | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err" | "busy"; text: string } | null>(null);
   const [progress, setProgress] = useState<{
@@ -966,10 +1043,48 @@ function Report({ cfg }: { cfg: AdminConfig }) {
         )}
       </Card>
       <Card title="重复组">
-        {dupReport ? (
-          <p className="text-sm">
-            发现 {dupReport.findings.groups} 组重复（{dupReport.findings.suggestions.slice(0, 5).map((s) => s.title).join("、")}）
-          </p>
+        {dupReport && dupReport.findings.groups > 0 ? (
+          <div className="space-y-3 text-sm">
+            <p className="text-muted-foreground text-xs">
+              共 {dupReport.findings.groups} 组相似书签（同域名同标题）。每组默认保留最早收藏的一条；在「整理」页发送「合并重复」可生成合并提案（先预览、可回滚）。
+            </p>
+            <ul className="space-y-3">
+              {dupReport.findings.suggestions.map((g, gi) => (
+                <li key={g.keep} className="rounded-lg border border-border p-3">
+                  <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
+                    <Badge variant="secondary">第 {gi + 1} 组</Badge>
+                    保留「{g.title}」，合并 {g.dupes.length} 条
+                  </p>
+                  <ul className="space-y-1">
+                    {(g.items ?? []).map((it) => (
+                      <li key={it.id} className="flex items-center justify-between gap-2 text-xs">
+                        <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                          {it.isKeep ? (
+                            <Badge variant="success" className="shrink-0">保留</Badge>
+                          ) : (
+                            <Badge variant="outline" className="shrink-0">重复</Badge>
+                          )}
+                          <span className="truncate">{it.title}</span>
+                          <span className="text-muted-foreground shrink-0">({(() => { try { return new URL(it.url).host; } catch { return it.url; } })()})</span>
+                        </span>
+                        <a
+                          className="text-muted-foreground hover:text-foreground shrink-0 rounded p-1 transition-colors hover:bg-accent"
+                          href={it.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="打开验证是否真的重复"
+                        >
+                          <ExternalLink className="size-3.5" />
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : dupReport ? (
+          <p className="text-sm text-muted-foreground">未发现重复书签</p>
         ) : (
           <p className="text-sm text-muted-foreground">尚未扫描</p>
         )}
