@@ -545,6 +545,14 @@ function Report({ cfg }: { cfg: AdminConfig }) {
   const [dupReport, setDupReport] = useState<{ findings: { groups: number; suggestions: Array<{ title: string }> } } | null>(null);
   const [running, setRunning] = useState<"links" | "dups" | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err" | "busy"; text: string } | null>(null);
+  const [progress, setProgress] = useState<{
+    total: number;
+    checked: number;
+    dead: number;
+    suspect: number;
+    normal: number;
+    items: Array<{ i: number; title: string; host: string; verdict: "normal" | "suspect" | "dead" }>;
+  } | null>(null);
   const load = useCallback(() => {
     api<typeof linkReport>(cfg, "/maintenance/report/latest?type=link_check").then(setLinkReport).catch(() => setLinkReport(null));
     api<typeof dupReport>(cfg, "/maintenance/report/latest?type=duplicate_scan").then(setDupReport).catch(() => setDupReport(null));
@@ -555,13 +563,13 @@ function Report({ cfg }: { cfg: AdminConfig }) {
   const runTask = async (kind: "links" | "dups") => {
     if (running) return; // 防连点叠加任务
     setRunning(kind);
-    setMsg({ kind: "busy", text: kind === "links" ? "死链检测运行中——逐条探测外部链接，通常需要几十秒到几分钟…" : "查重扫描运行中…" });
+    if (kind === "links") {
+      await runLinkCheckStream();
+      return;
+    }
+    setMsg({ kind: "busy", text: "查重扫描运行中…" });
     try {
-      if (kind === "links") {
-        await api(cfg, "/maintenance/links/run", { method: "POST", body: "{}" });
-      } else {
-        await api(cfg, "/maintenance/duplicates/run", { method: "POST" });
-      }
+      await api(cfg, "/maintenance/duplicates/run", { method: "POST" });
       setMsg({ kind: "ok", text: "✅ 任务完成，报告已刷新" });
       load();
     } catch (err) {
@@ -569,6 +577,79 @@ function Report({ cfg }: { cfg: AdminConfig }) {
     } finally {
       setRunning(null);
     }
+  };
+
+  /**
+   * 死链检测（SSE 流式）：逐条接收进度，实时渲染进度条与明细。
+   * 服务端每检查完一条推送一条；浏览器关闭页面/组件卸载时 fetch 中断，
+   * 服务端检测到 stream.aborted 即停止后续探测。
+   */
+  const runLinkCheckStream = async () => {
+    setProgress({ total: 0, checked: 0, dead: 0, suspect: 0, normal: 0, items: [] });
+    setMsg({ kind: "busy", text: "死链检测运行中——逐条探测外部链接…" });
+    try {
+      const res = await fetch(`${cfg.serverUrl}/api/v1/maintenance/links/run/stream?limit=20`, {
+        headers: cfg.token ? { authorization: `Bearer ${cfg.token}` } : {},
+      });
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}（鉴权失败或服务端异常）`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // SSE 帧以空行分帧：event:xxx\ndata:{...}\n\n
+        let sep: number;
+        while ((sep = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLines = frame.split("\n").filter((l) => l.startsWith("data:"));
+          if (dataLines.length === 0) continue;
+          const event = frame.match(/^event:\s*(\S+)/m)?.[1];
+          let payload: Record<string, unknown>;
+          try {
+            payload = JSON.parse(dataLines.map((l) => l.slice(5).replace(/^ /, "")).join("\n")) as Record<string, unknown>;
+          } catch {
+            continue; // 半帧/坏帧丢弃，等下一帧
+          }
+          if (event === "start") {
+            setProgress((p) => ({ ...(p ?? emptyProgress()), total: Number(payload.total ?? 0) }));
+          } else if (event === "item") {
+            const it = payload as unknown as { i: number; title: string; host: string; verdict: "normal" | "suspect" | "dead"; total: number };
+            setProgress((p) => {
+              const base = p ?? emptyProgress();
+              return {
+                total: it.total || base.total,
+                checked: base.checked + 1,
+                dead: base.dead + (it.verdict === "dead" ? 1 : 0),
+                suspect: base.suspect + (it.verdict === "suspect" ? 1 : 0),
+                normal: base.normal + (it.verdict === "normal" ? 1 : 0),
+                items: [it, ...base.items].slice(0, 8), // 最近 8 条
+              };
+            });
+          } else if (event === "done") {
+            const d = payload as unknown as { checked: number; dead: number; suspect: number; normal: number };
+            setMsg({ kind: "ok", text: `✅ 检测完成：共 ${d.checked} 条，死链 ${d.dead}、疑似 ${d.suspect}、正常 ${d.normal}` });
+            load();
+          } else if (event === "error") {
+            throw new Error(String(payload.error ?? "服务端检测失败"));
+          }
+        }
+      }
+    } catch (err) {
+      setMsg({ kind: "err", text: `❌ 死链检测失败：${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      setRunning(null);
+    }
+  };
+
+  const emptyProgress = () => ({ total: 0, checked: 0, dead: 0, suspect: 0, normal: 0, items: [] as Array<{ i: number; title: string; host: string; verdict: "normal" | "suspect" | "dead" }> });
+
+  const verdictBadge: Record<string, { label: string; cls: string }> = {
+    normal: { label: "正常", cls: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300" },
+    suspect: { label: "疑似", cls: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300" },
+    dead: { label: "死链", cls: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300" },
   };
 
   return (
@@ -579,7 +660,7 @@ function Report({ cfg }: { cfg: AdminConfig }) {
             primary
             disabled={running !== null}
             onClick={() => void runTask("links")}
-            title="对最久未检查的书签做连通性探测（HTTP HEAD/GET）"
+            title="对最久未检查的书签做连通性探测（HTTP HEAD/GET），逐条实时显示进度"
           >
             {running === "links" ? "⏳ 检测运行中…" : "🔗 运行死链检测"}
           </Btn>
@@ -592,6 +673,42 @@ function Report({ cfg }: { cfg: AdminConfig }) {
           <p className={`mt-3 text-sm ${msg.kind === "err" ? "text-red-500" : msg.kind === "ok" ? "text-green-600" : "text-muted-foreground"}`}>
             {msg.text}
           </p>
+        )}
+        {running === "links" && progress && (
+          <div className="mt-4 space-y-3 rounded-xl border border-border bg-card p-4">
+            <div className="flex items-center justify-between text-sm">
+              <span className="font-medium">
+                {progress.checked}/{progress.total || "…"} 条已检查
+              </span>
+              <span className="flex gap-3 text-xs">
+                <span className="text-green-600">✓ 正常 {progress.normal}</span>
+                <span className="text-yellow-600">⚠ 疑似 {progress.suspect}</span>
+                <span className="text-red-500">✗ 死链 {progress.dead}</span>
+              </span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-indigo-500 transition-all duration-300"
+                style={{ width: `${progress.total > 0 ? Math.round((progress.checked / progress.total) * 100) : 0}%` }}
+              />
+            </div>
+            {progress.items.length > 0 && (
+              <ul className="space-y-1 text-xs">
+                {progress.items.map((it) => (
+                  <li key={it.i} className="flex items-center justify-between gap-2">
+                    <span className="min-w-0 flex-1 truncate">
+                      {it.verdict === "dead" ? "✗" : it.verdict === "suspect" ? "⚠" : "✓"} {it.title}
+                      <span className="ml-1 text-muted-foreground">({it.host})</span>
+                    </span>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 ${verdictBadge[it.verdict]?.cls ?? ""}`}>
+                      {verdictBadge[it.verdict]?.label ?? it.verdict}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="text-xs text-muted-foreground">每条探测含超时重试与礼貌间隔，关闭本页面即中止检测</p>
+          </div>
         )}
       </Card>
       <Card title="死链周报">

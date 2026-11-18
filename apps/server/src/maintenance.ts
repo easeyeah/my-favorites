@@ -51,19 +51,54 @@ export async function checkLink(url: string): Promise<LinkCheckResult["verdict"]
   return "suspect"; // 超时：疑似失效，仅标注
 }
 
+export interface LinkCheckProgressItem {
+  /** 序号（1 起） */
+  i: number;
+  id: string;
+  title: string;
+  /** 域名级展示（不外泄完整 URL 到前端日志面） */
+  host: string;
+  verdict: LinkCheckResult["verdict"];
+}
+
 export class MaintenanceService {
   constructor(private store: Store) {}
 
-  async runLinkCheck(limit = 20): Promise<{ checked: number; results: LinkCheckResult[]; reportId: string }> {
+  /**
+   * 死链检测（带逐条进度回调）。
+   * onProgress 在每条检测完成、状态已落库后调用——SSE 端点用它实时推送。
+   * onProgress 返回 false 或抛错时中止检测（客户端断开场景）。
+   */
+  async runLinkCheckWithProgress(
+    limit: number,
+    onProgress?: (item: LinkCheckProgressItem, total: number) => boolean | void,
+  ): Promise<{ checked: number; results: LinkCheckResult[]; reportId: string }> {
     const candidates: BookmarkRow[] = this.store.candidatesForLinkCheck(limit);
     const results: LinkCheckResult[] = [];
-    for (const bm of candidates) {
+    let aborted = false;
+    for (const [idx, bm] of candidates.entries()) {
       const verdict = await checkLink(bm.url_canonical);
       this.store.updateBookmark(bm.id, {
         status: verdict,
         last_checked_at: new Date().toISOString(),
       });
       results.push({ id: bm.id, url: bm.url_canonical, verdict, detail: "" });
+      if (onProgress) {
+        let host = bm.url_canonical;
+        try {
+          host = new URL(bm.url_canonical).host;
+        } catch {
+          // 保底原样
+        }
+        const ok = onProgress(
+          { i: idx + 1, id: bm.id, title: bm.title, host, verdict },
+          candidates.length,
+        );
+        if (ok === false) {
+          aborted = true;
+          break;
+        }
+      }
       await new Promise((r) => setTimeout(r, 300)); // 礼貌限速
     }
     const reportId = this.store.saveReport("link_check", {
@@ -72,8 +107,13 @@ export class MaintenanceService {
       suspect: results.filter((r) => r.verdict === "suspect").length,
       normal: results.filter((r) => r.verdict === "normal").length,
       results,
+      ...(aborted ? { aborted: true } : {}),
     });
     return { checked: results.length, results, reportId };
+  }
+
+  async runLinkCheck(limit = 20): Promise<{ checked: number; results: LinkCheckResult[]; reportId: string }> {
+    return this.runLinkCheckWithProgress(limit);
   }
 
   /** 查重（F5.2）：同域同名分组 → 合并建议清单（不自动删除，红线 3） */

@@ -4,6 +4,7 @@
  */
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { streamSSE } from "hono/streaming";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { randomBytes, scryptSync } from "node:crypto";
 import path from "node:path";
@@ -907,6 +908,33 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json(result);
   });
 
+  // ---------- F5 死链检测进度流（SSE：每检查完一条推送一条，断开即中止） ----------
+  api.get("/maintenance/links/run/stream", (c) => {
+    const limit = Math.min(Number(c.req.query("limit") ?? 20) || 20, 50);
+    return streamSSE(c, async (stream) => {
+      await stream.writeSSE({ event: "start", data: JSON.stringify({ total: limit }) });
+      try {
+        const result = await maintenance.runLinkCheckWithProgress(limit, (item, total) => {
+          if (stream.aborted) return false; // 客户端断开 → 停止后续探测
+          void stream.writeSSE({ event: "item", data: JSON.stringify({ ...item, total }) });
+          return true;
+        });
+        await stream.writeSSE({
+          event: "done",
+          data: JSON.stringify({
+            checked: result.checked,
+            reportId: result.reportId,
+            dead: result.results.filter((r) => r.verdict === "dead").length,
+            suspect: result.results.filter((r) => r.verdict === "suspect").length,
+            normal: result.results.filter((r) => r.verdict === "normal").length,
+          }),
+        });
+      } catch (err) {
+        await stream.writeSSE({ event: "error", data: JSON.stringify({ error: String(err).slice(0, 200) }) });
+      }
+    });
+  });
+
   api.post("/maintenance/duplicates/run", (c) => c.json(maintenance.runDuplicateScan()));
 
   api.get("/maintenance/report/latest", (c) => {
@@ -1130,13 +1158,8 @@ footer{margin-top:28px;text-align:center;color:var(--muted);font-size:12px}</sty
 
   // ---------- Web 管理台静态托管（F6.2：单容器自带 Web 界面，打开服务端地址即是管理台） ----------
   const webDist = process.env.WEB_DIST_DIR ?? path.join(process.cwd(), "web-dist");
-  let adminIndexHtml: string | null = null;
-  try {
-    adminIndexHtml = readFileSync(path.join(webDist, "index.html"), "utf8");
-  } catch {
-    // 无管理台产物（纯 API 部署）——优雅跳过
-  }
-  if (adminIndexHtml) {
+  const hasAdminUi = existsSync(path.join(webDist, "index.html"));
+  if (hasAdminUi) {
     const ASSET_MIME: Record<string, string> = {
       ".js": "text/javascript",
       ".css": "text/css",
@@ -1146,7 +1169,8 @@ footer{margin-top:28px;text-align:center;color:var(--muted);font-size:12px}</sty
       ".ico": "image/x-icon",
       ".woff2": "font/woff2",
     };
-    root.get("/", (c) => c.html(adminIndexHtml!));
+    // index.html 每请求读取（不缓存进内存）：dev 场景 web 构建产物更新后无需重启即生效
+    root.get("/", (c) => c.html(readFileSync(path.join(webDist, "index.html"), "utf8")));
     root.get("/assets/*", (c) => {
       const rel = c.req.path.replace(/^\/assets\//, "");
       // 防目录穿越
