@@ -9,6 +9,8 @@ import type { Store, BookmarkRow } from "./store";
 export interface LinkCheckResult {
   id: string;
   url: string;
+  /** 书签标题（报告快照：书签删除后仍可见当时标题） */
+  title?: string;
   verdict: "normal" | "suspect" | "dead";
   detail: string;
 }
@@ -35,20 +37,21 @@ async function probe(url: string, method: "HEAD" | "GET", timeoutMs = 8000): Pro
   }
 }
 
-/** 三级判定：HEAD 先行，异常才 GET 复验（省 80% 请求成本，技术方案 §6 F5.1） */
-export async function checkLink(url: string): Promise<LinkCheckResult["verdict"]> {
+/** 三级判定：HEAD 先行，异常才 GET 复验（省 80% 请求成本，技术方案 §6 F5.1）
+ * 返回 verdict + detail（为什么打不开：HTTP 状态 / DNS / 连接 / 超时——报告明细展示用） */
+export async function checkLink(url: string): Promise<{ verdict: LinkCheckResult["verdict"]; detail: string }> {
   // 自建场景允许收藏内网地址（通道A特性），探测策略一致
   const head = await probe(url, "HEAD");
-  if (typeof head === "number" && head >= 200 && head < 400) return "normal";
+  if (typeof head === "number" && head >= 200 && head < 400) return { verdict: "normal", detail: `HTTP ${head}` };
 
   const get = await probe(url, "GET");
   if (typeof get === "number") {
-    if (get >= 200 && get < 400) return "normal";
-    if (get === 404 || get === 410) return "dead";
-    return "suspect"; // 401/403/429/5xx：疑似反爬/限流，仅标注
+    if (get >= 200 && get < 400) return { verdict: "normal", detail: `HTTP ${get}` };
+    if (get === 404 || get === 410) return { verdict: "dead", detail: `HTTP ${get} 页面不存在` };
+    return { verdict: "suspect", detail: `HTTP ${get}（疑似反爬/限流/需登录，不代表失效）` };
   }
-  if (get === "unreachable") return "dead";
-  return "suspect"; // 超时：疑似失效，仅标注
+  if (get === "unreachable") return { verdict: "dead", detail: "DNS 解析失败或连接被拒" };
+  return { verdict: "suspect", detail: "超时（8s 无响应，可能被墙或限流）" };
 }
 
 export interface LinkCheckProgressItem {
@@ -59,6 +62,8 @@ export interface LinkCheckProgressItem {
   /** 域名级展示（不外泄完整 URL 到前端日志面） */
   host: string;
   verdict: LinkCheckResult["verdict"];
+  /** 为什么打不开：HTTP 状态 / DNS / 连接 / 超时 */
+  detail: string;
 }
 
 export class MaintenanceService {
@@ -77,12 +82,12 @@ export class MaintenanceService {
     const results: LinkCheckResult[] = [];
     let aborted = false;
     for (const [idx, bm] of candidates.entries()) {
-      const verdict = await checkLink(bm.url_canonical);
+      const { verdict, detail } = await checkLink(bm.url_canonical);
       this.store.updateBookmark(bm.id, {
         status: verdict,
         last_checked_at: new Date().toISOString(),
       });
-      results.push({ id: bm.id, url: bm.url_canonical, verdict, detail: "" });
+      results.push({ id: bm.id, url: bm.url_canonical, title: bm.title, verdict, detail });
       if (onProgress) {
         let host = bm.url_canonical;
         try {
@@ -91,7 +96,7 @@ export class MaintenanceService {
           // 保底原样
         }
         const ok = onProgress(
-          { i: idx + 1, id: bm.id, title: bm.title, host, verdict },
+          { i: idx + 1, id: bm.id, title: bm.title, host, verdict, detail },
           candidates.length,
         );
         if (ok === false) {

@@ -672,8 +672,113 @@ function NavSites({ cfg }: { cfg: AdminConfig }) {
   );
 }
 
+/** 死链周表明细：分组列出死链/疑似，每条含标题、域名、打不开的原因、打开原链验证。
+ * 正常项只计数不列出（用户关心的是坏链接）。 */
+function LinkReportDetail({
+  results,
+}: {
+  results: Array<{ id: string; url: string; title?: string; verdict: "normal" | "suspect" | "dead"; detail: string }>;
+}) {
+  const [showNormal, setShowNormal] = useState(false);
+  const dead = results.filter((r) => r.verdict === "dead");
+  const suspect = results.filter((r) => r.verdict === "suspect");
+  const normal = results.filter((r) => r.verdict === "normal");
+  const host = (url: string) => {
+    try {
+      return new URL(url).host;
+    } catch {
+      return url;
+    }
+  };
+  if (dead.length === 0 && suspect.length === 0 && normal.length === 0) {
+    return <p className="text-muted-foreground text-xs">该报告无逐条明细（旧版报告格式，重新运行检测后可查看）</p>;
+  }
+  const Row = ({ r }: { r: (typeof results)[number] }) => (
+    <li className="hover:bg-accent/40 flex items-start justify-between gap-2 rounded-lg px-2 py-1.5 transition-colors">
+      <div className="min-w-0 flex-1">
+        <p className="flex items-center gap-1.5 truncate text-sm">
+          {r.verdict === "dead" ? (
+            <TriangleAlert className="text-destructive size-3.5 shrink-0" />
+          ) : r.verdict === "suspect" ? (
+            <TriangleAlert className="size-3.5 shrink-0 text-amber-500" />
+          ) : (
+            <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" />
+          )}
+          <span className="truncate">{r.title || host(r.url)}</span>
+          <span className="text-muted-foreground shrink-0 text-xs">({host(r.url)})</span>
+        </p>
+        {r.detail && <p className="text-muted-foreground mt-0.5 pl-5 text-xs">{r.detail}</p>}
+      </div>
+      <a
+        className="text-muted-foreground hover:text-foreground shrink-0 rounded p-1 transition-colors hover:bg-accent"
+        href={r.url}
+        target="_blank"
+        rel="noreferrer"
+        title="打开原链接亲自验证"
+      >
+        <ExternalLink className="size-3.5" />
+      </a>
+    </li>
+  );
+  return (
+    <div className="space-y-3">
+      {dead.length > 0 && (
+        <section>
+          <p className="mb-1 flex items-center gap-1.5 text-xs font-medium">
+            <Badge variant="destructive">死链 {dead.length}</Badge>
+            确认失效（页面不存在 / 域名解析失败），建议删除或找替代
+          </p>
+          <ul className="space-y-0.5">
+            {dead.map((r) => (
+              <Row key={r.id} r={r} />
+            ))}
+          </ul>
+        </section>
+      )}
+      {suspect.length > 0 && (
+        <section>
+          <p className="mb-1 flex items-center gap-1.5 text-xs font-medium">
+            <Badge variant="warning">疑似 {suspect.length}</Badge>
+            访问异常但不一定失效（反爬 / 限流 / 需登录 / 超时），可点开验证
+          </p>
+          <ul className="space-y-0.5">
+            {suspect.map((r) => (
+              <Row key={r.id} r={r} />
+            ))}
+          </ul>
+        </section>
+      )}
+      {normal.length > 0 && (
+        <section>
+          <button
+            className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs transition-colors"
+            onClick={() => setShowNormal((v) => !v)}
+          >
+            <CheckCircle2 className="size-3.5 text-emerald-500" />
+            正常 {normal.length} 条 {showNormal ? "收起" : "展开"}
+          </button>
+          {showNormal && (
+            <ul className="mt-1 space-y-0.5">
+              {normal.map((r) => (
+                <Row key={r.id} r={r} />
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
 function Report({ cfg }: { cfg: AdminConfig }) {
-  const [linkReport, setLinkReport] = useState<{ findings: { dead: number; suspect: number; normal: number; checked: number }; created_at: string } | null>(null);
+  const [linkReport, setLinkReport] = useState<{
+    findings: {
+      dead: number; suspect: number; normal: number; checked: number;
+      /** 每条明细（新报告含 title/detail；旧报告降级显示域名） */
+      results?: Array<{ id: string; url: string; title?: string; verdict: "normal" | "suspect" | "dead"; detail: string }>;
+    };
+    created_at: string;
+  } | null>(null);
   const [dupReport, setDupReport] = useState<{ findings: { groups: number; suggestions: Array<{ title: string }> } } | null>(null);
   const [running, setRunning] = useState<"links" | "dups" | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err" | "busy"; text: string } | null>(null);
@@ -847,9 +952,15 @@ function Report({ cfg }: { cfg: AdminConfig }) {
       </Card>
       <Card title="死链周报">
         {linkReport ? (
-          <p className="text-sm">
-            {linkReport.created_at.slice(0, 10)} 检查 {linkReport.findings.checked} 条：死链 {linkReport.findings.dead}、疑似 {linkReport.findings.suspect}、正常 {linkReport.findings.normal}
-          </p>
+          <div className="space-y-3 text-sm">
+            <p className="flex flex-wrap items-center gap-1.5">
+              <span>{linkReport.created_at.slice(0, 10)} 检查 {linkReport.findings.checked} 条：</span>
+              <Badge variant="destructive">死链 {linkReport.findings.dead}</Badge>
+              <Badge variant="warning">疑似 {linkReport.findings.suspect}</Badge>
+              <Badge variant="success">正常 {linkReport.findings.normal}</Badge>
+            </p>
+            <LinkReportDetail results={linkReport.findings.results ?? []} />
+          </div>
         ) : (
           <p className="text-sm text-muted-foreground">尚未运行过检测</p>
         )}
