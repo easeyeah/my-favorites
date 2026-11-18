@@ -1109,29 +1109,9 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json({ error: "auth_disabled" }, 400);
   });
 
-  // 体检报告页（获客钩子：可分享）
-  root.get("/health-report", (c) => {
-    const report = maintenance.healthReport();
-    c.header("content-type", "text/html; charset=utf-8");
-    return c.body(
-      `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>书签体检报告</title>
-<style>:root{--bg:#f7f7f8;--text:#222;--muted:#888;--card:#fff;--border:#e5e5e8}
-@media (prefers-color-scheme: dark){:root{--bg:#161618;--text:#eee;--muted:#999;--card:#222225;--border:#333}}
-body{margin:0 auto;max-width:560px;padding:40px 24px;background:var(--bg);color:var(--text);font:15px/1.6 -apple-system,"PingFang SC",sans-serif}
-.cards{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:24px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;text-align:center}
-.num{font-size:28px;font-weight:700}.bad{color:#e5484d}.ok{color:#30a46c}
-footer{margin-top:28px;text-align:center;color:var(--muted);font-size:12px}</style></head>
-<body><h1>📊 书签体检报告</h1>
-<div class="cards">
-<div class="card"><div class="num ${report.dead > 0 ? "bad" : "ok"}">${report.dead}</div><div style="color:var(--muted)">死链</div></div>
-<div class="card"><div class="num ${report.suspect > 0 ? "bad" : "ok"}">${report.suspect}</div><div style="color:var(--muted)">疑似失效</div></div>
-<div class="card"><div class="num ${report.duplicates > 0 ? "bad" : "ok"}">${report.duplicates}</div><div style="color:var(--muted)">重复组</div></div>
-<div class="card"><div class="num">${report.stale}</div><div style="color:var(--muted)">久未整理</div></div>
-</div>
-<footer>⚡ 由 <a href="https://github.com/easeyeah/my-favorites">my-favorites</a> 体检生成</footer></body></html>`,
-    );
-  });
+  // D21（2026-11-18）：删除公开体检报告 HTML 获客页——该功能服务于官方云 SaaS 的
+  // 传播裂变设想，在 D15 自建端形态下无获客目标，且无鉴权暴露统计、误导管理台用户。
+  // JSON 数据端点保留（/api/v1/health-report，管理台概览数据源）。云端阶段如需落地页重新设计。
 
   // 导航站搜索落地页（P0 XSS 修复版：q 全量转义）
   root.get("/s/search", (c) => {

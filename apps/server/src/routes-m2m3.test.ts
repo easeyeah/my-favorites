@@ -157,17 +157,16 @@ describe("死链检测 + 查重 + 体检（F5）", () => {
     expect(all.length).toBe(5);
   });
 
-  it("体检报告 JSON + HTML 页", async () => {
+  it("体检报告 JSON（概览数据源；D21 删除 HTML 获客页）", async () => {
     env = makeEnv();
     await seed(env);
     const json = (await (
       await env.app.request("/api/v1/health-report")
     ).json()) as { duplicates: number };
     expect(json.duplicates).toBe(1);
+    // D21（2026-11-18）：公开 HTML 获客页已删除——API 保留（管理台概览数据源）
     const page = await env.app.request("/health-report");
-    const html = await page.text();
-    expect(html).toContain("书签体检报告");
-    expect(html).toContain("my-favorites");
+    expect(page.status).toBe(404);
   });
 });
 

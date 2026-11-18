@@ -19,7 +19,6 @@ import {
 } from "@/components/ui/dialog";
 import {
   AlertCircle,
-  BarChart3,
   CheckCircle2,
   ChevronRight,
   Copy,
@@ -289,9 +288,6 @@ function Overview({ cfg }: { cfg: AdminConfig }) {
       <div className="col-span-2 md:col-span-4">
         <Card title="快捷入口">
           <div className="flex flex-wrap gap-2">
-            <Btn primary onClick={() => window.open(`${cfg.serverUrl}/health-report`, "_blank")}>
-              <BarChart3 /> 体检报告页
-            </Btn>
             <Btn onClick={() => api(cfg, "/crawl/run", { method: "POST", body: "{}" })}>
               <Globe /> 立即补漏抓取
             </Btn>
@@ -976,9 +972,6 @@ function Report({ cfg }: { cfg: AdminConfig }) {
           <Btn disabled={running !== null} onClick={() => void runTask("dups")}>
             {running === "dups" ? <Loader2 className="animate-spin" /> : <Copy />}
             {running === "dups" ? "扫描运行中…" : "运行查重扫描"}
-          </Btn>
-          <Btn onClick={() => window.open(`${cfg.serverUrl}/health-report`, "_blank")}>
-            <BarChart3 /> 体检报告页
           </Btn>
         </div>
         <FeedbackBar msg={msg} />
