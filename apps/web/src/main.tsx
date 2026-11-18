@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { Button } from "@/components/ui/button";
+import { Card as UiCard, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import "./index.css";
 
 // ---------- API 基建 ----------
@@ -38,23 +40,27 @@ async function api<T>(cfg: AdminConfig, path: string, init?: RequestInit): Promi
   return (await res.json()) as T;
 }
 
-// ---------- 通用 UI ----------
+// ---------- 通用 UI（基于 shadcn/ui 组件的适配层，2026-11-18 起接入） ----------
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-2xl border border-border bg-card p-5">
-      <h2 className="mb-3 text-sm font-semibold text-muted-foreground">{title}</h2>
-      {children}
-    </div>
+    <UiCard className="gap-3 py-4">
+      <CardHeader className="px-5">
+        <CardTitle className="text-sm font-semibold text-muted-foreground">{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="px-5">{children}</CardContent>
+    </UiCard>
   );
 }
 function Stat({ num, label, bad }: { num: number | string; label: string; bad?: boolean }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-4 text-center">
+    <div className="rounded-xl border border-border bg-card p-4 text-center transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm">
       <div className={`text-3xl font-bold ${bad ? "text-red-500" : ""}`}>{num}</div>
       <div className="mt-1 text-xs text-muted-foreground">{label}</div>
     </div>
   );
 }
+/** 按钮适配层：保留管理台既有签名（primary/disabled/title），底层为 shadcn Button
+ * （含 transition-all 渐变、hover 色变/阴影、active 按压缩放、focus-visible 焦点环） */
 function Btn({
   children,
   onClick,
@@ -68,20 +74,10 @@ function Btn({
   disabled?: boolean;
   title?: string;
 }) {
-  const base = disabled
-    ? "cursor-not-allowed opacity-50"
-    : primary
-      ? "bg-indigo-600 text-white hover:bg-indigo-500"
-      : "hover:bg-accent";
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className={`rounded-lg px-3 py-1.5 text-sm ${primary ? "" : "border border-border"} ${base}`}
-    >
+    <Button variant={primary ? "default" : "outline"} size="sm" onClick={onClick} disabled={disabled} title={title}>
       {children}
-    </button>
+    </Button>
   );
 }
 
@@ -164,7 +160,7 @@ function Admin() {
           <button
             key={key}
             onClick={() => switchTab(key)}
-            className={`rounded-lg px-4 py-2 text-sm ${tab === key ? "bg-indigo-600 text-white" : "hover:bg-accent"}`}
+            className={`rounded-lg px-4 py-2 text-sm transition-all duration-200 ${tab === key ? "bg-indigo-600 text-white shadow-xs" : "hover:bg-accent hover:-translate-y-px"}`}
           >
             {label}
           </button>
@@ -298,7 +294,7 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
     return (
       <div key={folder.id}>
         <div
-          className={`flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-sm hover:bg-accent ${selected === folder.id && !searching ? "bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-950" : ""}`}
+          className={`flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-sm transition-colors duration-150 hover:bg-accent ${selected === folder.id && !searching ? "bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-950" : ""}`}
           style={{ paddingLeft: 8 + depth * 16 }}
           onClick={() => selectFolder(folder.id)}
         >
@@ -354,7 +350,7 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
         {/* 左：目录树（计数来自服务端聚合） */}
         <div className="max-h-[60vh] overflow-y-auto rounded-xl border border-border p-2">
           <div
-            className={`flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-sm hover:bg-accent ${selected === "all" && !searching ? "bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-950" : ""}`}
+            className={`flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-sm transition-colors duration-150 hover:bg-accent ${selected === "all" && !searching ? "bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-950" : ""}`}
             onClick={() => selectFolder("all")}
           >
             <span className="w-4 shrink-0" />
