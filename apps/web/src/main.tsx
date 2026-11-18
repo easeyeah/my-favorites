@@ -4,6 +4,38 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  AlertCircle,
+  BarChart3,
+  CheckCircle2,
+  Copy,
+  ExternalLink,
+  FilePlus2,
+  FolderInput,
+  Globe,
+  Link as LinkIcon,
+  Loader2,
+  RotateCcw,
+  Search,
+  Send,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  TriangleAlert,
+} from "lucide-react";
 import "./index.css";
 
 // ---------- API 基建 ----------
@@ -59,6 +91,22 @@ function Stat({ num, label, bad }: { num: number | string; label: string; bad?: 
     </div>
   );
 }
+/** 统一反馈条：成功/失败/进行中三态，带图标与色彩语义 */
+function FeedbackBar({ msg }: { msg: { kind: "ok" | "err" | "busy"; text: string } | null }) {
+  if (!msg) return null;
+  const conf = {
+    ok: { icon: <CheckCircle2 className="size-4 shrink-0" />, cls: "text-emerald-600 dark:text-emerald-400" },
+    err: { icon: <AlertCircle className="size-4 shrink-0" />, cls: "text-red-500 dark:text-red-400" },
+    busy: { icon: <Loader2 className="size-4 shrink-0 animate-spin" />, cls: "text-muted-foreground" },
+  }[msg.kind];
+  return (
+    <p className={`mt-3 flex items-center gap-1.5 text-sm ${conf.cls}`}>
+      {conf.icon}
+      {msg.text}
+    </p>
+  );
+}
+
 /** 按钮适配层：保留管理台既有签名（primary/disabled/title），底层为 shadcn Button
  * （含 transition-all 渐变、hover 色变/阴影、active 按压缩放、focus-visible 焦点环） */
 function Btn({
@@ -151,9 +199,10 @@ function Admin() {
     <div className="mx-auto max-w-5xl p-6">
       <header className="flex items-center justify-between border-b border-border pb-4">
         <h1 className="text-xl font-bold">my-favorites 管理台</h1>
-        <span className={`rounded-full px-3 py-1 text-xs ${connected ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300" : "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300"}`}>
+        <Badge variant={connected ? "success" : "destructive"} className="gap-1.5 px-3 py-1">
+          <span className={`size-1.5 rounded-full ${connected ? "bg-emerald-500" : "bg-red-500"}`} />
           {connected ? "已连接" : "未连接"}
-        </span>
+        </Badge>
       </header>
       <nav className="mt-4 flex gap-1">
         {tabs.map(([key, label]) => (
@@ -204,10 +253,14 @@ function Overview({ cfg }: { cfg: AdminConfig }) {
         <Card title="快捷入口">
           <div className="flex flex-wrap gap-2">
             <Btn primary onClick={() => window.open(`${cfg.serverUrl}/health-report`, "_blank")}>
-              📊 体检报告页
+              <BarChart3 /> 体检报告页
             </Btn>
-            <Btn onClick={() => api(cfg, "/crawl/run", { method: "POST", body: "{}" })}>🕷️ 立即补漏抓取</Btn>
-            <Btn onClick={() => api(cfg, "/maintenance/links/run", { method: "POST", body: "{}" })}>🔗 立即死链检测</Btn>
+            <Btn onClick={() => api(cfg, "/crawl/run", { method: "POST", body: "{}" })}>
+              <Globe /> 立即补漏抓取
+            </Btn>
+            <Btn onClick={() => api(cfg, "/maintenance/links/run", { method: "POST", body: "{}" })}>
+              <LinkIcon /> 立即死链检测
+            </Btn>
           </div>
         </Card>
       </div>
@@ -223,6 +276,7 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
   const [hasMore, setHasMore] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<Bookmark | null>(null);
   const PAGE = 100;
 
   const loadTree = useCallback(() => {
@@ -325,8 +379,8 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
     .reduce((sum, f) => sum + f.totalCount, 0);
 
   const remove = (b: Bookmark) => {
-    if (!confirm(`删除「${b.title}」？`)) return;
     void api(cfg, `/bookmarks/${b.id}`, { method: "DELETE" }).then(() => {
+      setPendingDelete(null);
       loadTree();
       if (searching) void doSearch();
       else void loadPage(selected, 0, false);
@@ -336,14 +390,19 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
   return (
     <Card title={`书签管理（${visible.length} 条${hasMore ? "+" : ""}${searching ? " · 搜索结果" : selected === "all" ? " · 全部" : ` · ${folderName(selected)}`}）`}>
       <div className="mb-3 flex gap-2">
-        <input
-          className="flex-1 rounded-lg border border-border bg-card px-3 py-2 text-sm"
-          placeholder="搜索书签 / 正文（回车）"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          onKeyDown={() => void doSearch()}
-        />
-        <Btn onClick={() => void doSearch()}>搜索</Btn>
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            className="pl-9"
+            placeholder="搜索书签 / 正文（回车）"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={() => void doSearch()}
+          />
+        </div>
+        <Btn onClick={() => void doSearch()}>
+          <Search /> 搜索
+        </Btn>
         <Btn onClick={() => selectFolder("all")}>全部</Btn>
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[240px_1fr]">
@@ -373,12 +432,16 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
                 <span className="shrink-0 text-xs text-muted-foreground">{folderName(b.folder_id)}</span>
               )}
               {b.status !== "normal" && (
-                <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${b.status === "dead" ? "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300" : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300"}`}>
+                <Badge variant={b.status === "dead" ? "destructive" : "warning"} className="shrink-0">
                   {b.status === "dead" ? "死链" : "疑似"}
-                </span>
+                </Badge>
               )}
-              <button className="shrink-0 text-xs text-red-500 hover:underline" onClick={() => remove(b)}>
-                删除
+              <button
+                className="text-destructive hover:text-destructive/80 shrink-0 rounded p-1 transition-colors hover:bg-red-50 dark:hover:bg-red-950"
+                title="删除书签"
+                onClick={() => setPendingDelete(b)}
+              >
+                <Trash2 className="size-3.5" />
               </button>
             </div>
           ))}
@@ -394,6 +457,29 @@ function Bookmarks({ cfg }: { cfg: AdminConfig }) {
           )}
         </div>
       </div>
+
+      {/* 删除确认（对话框替代原生 confirm：不可逆操作显式二次确认） */}
+      <Dialog open={pendingDelete !== null} onOpenChange={(open) => !open && setPendingDelete(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <TriangleAlert className="text-destructive size-5" />
+              删除书签
+            </DialogTitle>
+            <DialogDescription>
+              确定删除「{pendingDelete?.title}」？该操作不可恢复，关联的正文缓存与快照将一并删除。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Btn>取消</Btn>
+            </DialogClose>
+            <Button variant="destructive" size="sm" onClick={() => pendingDelete && remove(pendingDelete)}>
+              <Trash2 /> 删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
@@ -432,37 +518,60 @@ function Organize({ cfg }: { cfg: AdminConfig }) {
 
   return (
     <Card title="AI 聊天整理">
-      <div className="min-h-16 rounded-lg bg-accent/40 p-3 text-sm">{answer || "输入指令，例如：「整理」「合并重复」「整理 开发 文件夹」"}</div>
+      <div className="bg-accent/40 flex min-h-16 items-start gap-2 rounded-lg p-3 text-sm">
+        <Sparkles className="text-muted-foreground mt-0.5 size-4 shrink-0" />
+        <span>{answer || "输入指令，例如：「整理」「合并重复」「整理 开发 文件夹」"}</span>
+      </div>
       {proposal && proposal.length > 0 && (
         <ul className="mt-3 space-y-1 rounded-lg border border-border p-3 text-xs">
           {proposal.map((a, i) => (
-            <li key={i}>
-              {a.type === "move" && `📦 「${a.bookmarkTitle}」${a.fromFolder} → ${a.toFolder}`}
-              {a.type === "merge" && `🔗 合并 ${a.mergeFrom?.length ?? 0} 条到「${a.bookmarkTitle}」`}
-              {a.type === "createFolder" && `📁 新建「${a.folderName}」`}
+            <li key={i} className="flex items-center gap-1.5">
+              {a.type === "move" && (
+                <>
+                  <FolderInput className="text-muted-foreground size-3.5 shrink-0" />
+                  「{a.bookmarkTitle}」{a.fromFolder} → {a.toFolder}
+                </>
+              )}
+              {a.type === "merge" && (
+                <>
+                  <Copy className="text-muted-foreground size-3.5 shrink-0" />
+                  合并 {a.mergeFrom?.length ?? 0} 条到「{a.bookmarkTitle}」
+                </>
+              )}
+              {a.type === "createFolder" && (
+                <>
+                  <FilePlus2 className="text-muted-foreground size-3.5 shrink-0" />
+                  新建「{a.folderName}」
+                </>
+              )}
             </li>
           ))}
         </ul>
       )}
       {proposal && proposal.length > 0 && (
         <div className="mt-2">
-          <Btn primary onClick={() => void apply()}>应用变更</Btn>
+          <Btn primary onClick={() => void apply()}>
+            <ShieldCheck /> 应用变更
+          </Btn>
         </div>
       )}
       {versionId && (
         <div className="mt-2">
-          <Btn onClick={() => void rollback()}>↩️ 回滚上次整理</Btn>
+          <Btn onClick={() => void rollback()}>
+            <RotateCcw /> 回滚上次整理
+          </Btn>
         </div>
       )}
       <div className="mt-3 flex gap-2">
-        <input
-          className="flex-1 rounded-lg border border-border bg-card px-3 py-2 text-sm"
+        <Input
           value={message}
           placeholder="告诉我要怎么整理…"
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={() => void send()}
         />
-        <Btn primary onClick={() => void send()}>发送</Btn>
+        <Btn primary onClick={() => void send()}>
+          <Send /> 发送
+        </Btn>
       </div>
     </Card>
   );
@@ -490,43 +599,70 @@ function NavSites({ cfg }: { cfg: AdminConfig }) {
     load();
   };
 
+  const TEMPLATE_LABELS: Record<string, string> = {
+    grid: "经典宫格",
+    list: "极简清单",
+    cards: "卡片瀑布流",
+    home: "个人主页",
+  };
+
   return (
     <Card title="导航站（4 套模板）">
-      <div className="flex flex-wrap items-end gap-2">
-        <div>
-          <label className="block text-xs text-muted-foreground">标题</label>
-          <input className="rounded-lg border border-border bg-card px-3 py-2 text-sm" value={title} onChange={(e) => setTitle(e.target.value)} />
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="w-48">
+          <label className="text-muted-foreground mb-1 block text-xs">标题</label>
+          <Input value={title} onChange={(e) => setTitle(e.target.value)} />
         </div>
-        <div>
-          <label className="block text-xs text-muted-foreground">模板</label>
-          <select className="rounded-lg border border-border bg-card px-3 py-2 text-sm" value={template} onChange={(e) => setTemplate(e.target.value)}>
-            <option value="grid">经典宫格</option>
-            <option value="list">极简清单</option>
-            <option value="cards">卡片瀑布流</option>
-            <option value="home">个人主页</option>
-          </select>
+        <div className="w-36">
+          <label className="text-muted-foreground mb-1 block text-xs">模板</label>
+          <Select value={template} onValueChange={setTemplate}>
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {Object.entries(TEMPLATE_LABELS).map(([v, label]) => (
+                <SelectItem key={v} value={v}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
-        <div>
-          <label className="block text-xs text-muted-foreground">访问密码（可选）</label>
-          <input className="rounded-lg border border-border bg-card px-3 py-2 text-sm" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <div className="w-44">
+          <label className="text-muted-foreground mb-1 block text-xs">访问密码（可选）</label>
+          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
         </div>
-        <Btn primary onClick={() => void publish()}>发布</Btn>
+        <Btn primary onClick={() => void publish()}>
+          <Globe /> 发布
+        </Btn>
       </div>
       <ul className="mt-4 space-y-2 text-sm">
         {sites.map((s) => (
-          <li key={s.slug} className="flex items-center justify-between rounded-lg border border-border p-3">
-            <span>
-              「{s.title}」<span className="text-xs text-muted-foreground">模板：{s.template}</span>
+          <li key={s.slug} className="hover:border-border/80 flex items-center justify-between rounded-lg border border-border p-3 transition-colors">
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="truncate">「{s.title}」</span>
+              <Badge variant="secondary">{TEMPLATE_LABELS[s.template] ?? s.template}</Badge>
             </span>
-            <span className="flex items-center gap-2">
-              <select className="rounded border border-border bg-card px-2 py-1 text-xs" value={s.template} onChange={(e) => void changeTemplate(s.slug, e.target.value)}>
-                <option value="grid">宫格</option>
-                <option value="list">清单</option>
-                <option value="cards">瀑布流</option>
-                <option value="home">主页</option>
-              </select>
-              <a className="text-xs underline" href={`${cfg.serverUrl}/s/${s.slug}`} target="_blank" rel="noreferrer">
-                打开
+            <span className="flex shrink-0 items-center gap-2">
+              <Select value={s.template} onValueChange={(v) => void changeTemplate(s.slug, v)}>
+                <SelectTrigger size="sm" className="w-28">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(TEMPLATE_LABELS).map(([v, label]) => (
+                    <SelectItem key={v} value={v}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <a
+                className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-xs transition-colors hover:underline"
+                href={`${cfg.serverUrl}/s/${s.slug}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <ExternalLink className="size-3.5" /> 打开
               </a>
             </span>
           </li>
@@ -642,12 +778,6 @@ function Report({ cfg }: { cfg: AdminConfig }) {
 
   const emptyProgress = () => ({ total: 0, checked: 0, dead: 0, suspect: 0, normal: 0, items: [] as Array<{ i: number; title: string; host: string; verdict: "normal" | "suspect" | "dead" }> });
 
-  const verdictBadge: Record<string, { label: string; cls: string }> = {
-    normal: { label: "正常", cls: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300" },
-    suspect: { label: "疑似", cls: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300" },
-    dead: { label: "死链", cls: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300" },
-  };
-
   return (
     <div className="space-y-4">
       <Card title="维护任务">
@@ -658,52 +788,60 @@ function Report({ cfg }: { cfg: AdminConfig }) {
             onClick={() => void runTask("links")}
             title="对最久未检查的书签做连通性探测（HTTP HEAD/GET），逐条实时显示进度"
           >
-            {running === "links" ? "⏳ 检测运行中…" : "🔗 运行死链检测"}
+            {running === "links" ? <Loader2 className="animate-spin" /> : <LinkIcon />}
+            {running === "links" ? "检测运行中…" : "运行死链检测"}
           </Btn>
           <Btn disabled={running !== null} onClick={() => void runTask("dups")}>
-            {running === "dups" ? "⏳ 扫描运行中…" : "🗂 运行查重扫描"}
+            {running === "dups" ? <Loader2 className="animate-spin" /> : <Copy />}
+            {running === "dups" ? "扫描运行中…" : "运行查重扫描"}
           </Btn>
-          <Btn onClick={() => window.open(`${cfg.serverUrl}/health-report`, "_blank")}>📊 体检报告页</Btn>
+          <Btn onClick={() => window.open(`${cfg.serverUrl}/health-report`, "_blank")}>
+            <BarChart3 /> 体检报告页
+          </Btn>
         </div>
-        {msg && (
-          <p className={`mt-3 text-sm ${msg.kind === "err" ? "text-red-500" : msg.kind === "ok" ? "text-green-600" : "text-muted-foreground"}`}>
-            {msg.text}
-          </p>
-        )}
+        <FeedbackBar msg={msg} />
         {running === "links" && progress && (
-          <div className="mt-4 space-y-3 rounded-xl border border-border bg-card p-4">
+          <div className="bg-accent/30 mt-4 space-y-3 rounded-xl border border-border p-4">
             <div className="flex items-center justify-between text-sm">
               <span className="font-medium">
                 {progress.checked}/{progress.total || "…"} 条已检查
               </span>
-              <span className="flex gap-3 text-xs">
-                <span className="text-green-600">✓ 正常 {progress.normal}</span>
-                <span className="text-yellow-600">⚠ 疑似 {progress.suspect}</span>
-                <span className="text-red-500">✗ 死链 {progress.dead}</span>
+              <span className="flex gap-2">
+                <Badge variant="success">正常 {progress.normal}</Badge>
+                <Badge variant="warning">疑似 {progress.suspect}</Badge>
+                <Badge variant="destructive">死链 {progress.dead}</Badge>
               </span>
             </div>
-            <div className="h-2 overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full bg-indigo-500 transition-all duration-300"
-                style={{ width: `${progress.total > 0 ? Math.round((progress.checked / progress.total) * 100) : 0}%` }}
-              />
-            </div>
+            <Progress value={progress.total > 0 ? Math.round((progress.checked / progress.total) * 100) : 0} />
             {progress.items.length > 0 && (
               <ul className="space-y-1 text-xs">
                 {progress.items.map((it) => (
                   <li key={it.i} className="flex items-center justify-between gap-2">
                     <span className="min-w-0 flex-1 truncate">
-                      {it.verdict === "dead" ? "✗" : it.verdict === "suspect" ? "⚠" : "✓"} {it.title}
-                      <span className="ml-1 text-muted-foreground">({it.host})</span>
+                      {it.verdict === "dead" ? (
+                        <TriangleAlert className="text-destructive inline size-3.5" />
+                      ) : it.verdict === "suspect" ? (
+                        <TriangleAlert className="text-amber-500 inline size-3.5" />
+                      ) : (
+                        <CheckCircle2 className="text-emerald-500 inline size-3.5" />
+                      )}{" "}
+                      {it.title}
+                      <span className="text-muted-foreground ml-1">({it.host})</span>
                     </span>
-                    <span className={`shrink-0 rounded-full px-2 py-0.5 ${verdictBadge[it.verdict]?.cls ?? ""}`}>
-                      {verdictBadge[it.verdict]?.label ?? it.verdict}
-                    </span>
+                    <Badge
+                      variant={it.verdict === "dead" ? "destructive" : it.verdict === "suspect" ? "warning" : "success"}
+                      className="shrink-0"
+                    >
+                      {it.verdict === "dead" ? "死链" : it.verdict === "suspect" ? "疑似" : "正常"}
+                    </Badge>
                   </li>
                 ))}
               </ul>
             )}
-            <p className="text-xs text-muted-foreground">每条探测含超时重试与礼貌间隔，关闭本页面即中止检测</p>
+            <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+              <Loader2 className="size-3 animate-spin" />
+              每条探测含超时重试与礼貌间隔，关闭本页面即中止检测
+            </p>
           </div>
         )}
       </Card>
@@ -756,16 +894,33 @@ function Settings({ cfg, onSave }: { cfg: AdminConfig; onSave: (c: AdminConfig) 
     <Card title="连接设置">
       <div className="space-y-3 text-sm">
         <label className="block">服务端地址（官方云 / 自建 NAS Docker）</label>
-        <input className="w-full rounded-lg border border-border bg-card px-3 py-2" value={serverUrl} onChange={(e) => setServerUrl(e.target.value)} />
+        <Input value={serverUrl} onChange={(e) => setServerUrl(e.target.value)} />
         <label className="block">管理员密码登录（启用鉴权的服务端）</label>
         <div className="flex gap-2">
-          <input className="flex-1 rounded-lg border border-border bg-card px-3 py-2" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-          <Btn onClick={() => void login()}>登录</Btn>
+          <Input
+            className="flex-1"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void login()}
+          />
+          <Btn onClick={() => void login()}>
+            <ShieldCheck /> 登录
+          </Btn>
         </div>
-        <label className="block text-xs text-muted-foreground">Token（登录后自动填充）</label>
-        <input className="w-full rounded-lg border border-border bg-card px-3 py-2 text-xs" value={token} onChange={(e) => setToken(e.target.value)} />
-        <Btn primary onClick={() => onSave({ serverUrl, token })}>保存并连接</Btn>
-        {msg && <p className="text-green-600">{msg}</p>}
+        <label className="text-muted-foreground block text-xs">Token（登录后自动填充）</label>
+        <Input className="font-mono text-xs" value={token} onChange={(e) => setToken(e.target.value)} />
+        <div>
+          <Btn primary onClick={() => onSave({ serverUrl, token })}>
+            保存并连接
+          </Btn>
+        </div>
+        {msg && (
+          <p className={`flex items-center gap-1.5 ${msg.startsWith("✅") ? "text-emerald-600 dark:text-emerald-400" : "text-red-500 dark:text-red-400"}`}>
+            {msg.startsWith("✅") ? <CheckCircle2 className="size-4" /> : <AlertCircle className="size-4" />}
+            {msg.replace(/^[✅❌]\s*/, "")}
+          </p>
+        )}
       </div>
     </Card>
   );
