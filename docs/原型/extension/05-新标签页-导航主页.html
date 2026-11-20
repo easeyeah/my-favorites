@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05 · 新标签页 · 原生式极简 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .ntp { background: var(--bg); min-height: 560px; position: relative; }
+  .ntp-center { max-width: 640px; margin: 0 auto; padding: 88px 32px 56px; }
+  .big-search {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 999px; padding: 12px 20px;
+    box-shadow: var(--shadow-1);
+  }
+  .big-search input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 14.5px; color: var(--text); font-family: inherit; }
+  .eng-chip { font-size: 12px; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--border-2); color: var(--text-3); cursor: pointer; }
+  .eng-chip.on { background: var(--primary); color: var(--primary-fg); border-color: var(--primary); font-weight: 600; }
+  .tilegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 4px; }
+  .tile.mini { padding: 12px 6px 10px; }
+  .clock { text-align: center; font-size: 26px; font-weight: 300; letter-spacing: 2px; font-variant-numeric: tabular-nums; color: var(--text-2); }
+  .clock .dt { display: block; font-size: 12px; font-weight: 400; letter-spacing: 0; color: var(--text-3); margin-top: 2px; }
+  .top-label { display: flex; align-items: center; gap: 8px; margin: 30px 2px 10px; }
+  .top-label b { font-size: 12.5px; color: var(--text-2); }
+  .corner { position: absolute; right: 20px; bottom: 20px; display: flex; gap: 8px; }
+  .corner .icon-btn { background: var(--panel); border: 1px solid var(--border); }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>05 · 新标签页</b>（原生式极简 · D39/D40，已随实际实现对齐）</span>
+  <span class="hint right">留存钩子③ · 「打开就搜、顺手点最常用」，别无他物</span>
+</header>
+
+<main class="wrap-n">
+
+  <div class="row mb12">
+    <span class="demo-note"><b>D39/D40 现行定案</b>（替代原 D29 三档密度——用户走查判定「太乱」）：新标签页 = <b>品牌标 + 小时钟 + 搜索框 + 最常访问磁贴</b>，别无他物；自定义仅两处（常用区数量、外部引擎）。全量分组浏览属于管理台/侧栏，不进新标签页。<br><b>D30/D31 叠加</b>：「最常访问」经站点化分析只呈现站点级入口；失效卡片标「📸 快照可用」。极简 ≠ 空旷：小时钟 + 日期常驻（D40）。</span>
+  </div>
+
+  <div class="browser">
+    <div class="browser-bar"><span class="dots"><i></i><i></i><i></i></span><span class="urlbar">🆕 新标签页</span></div>
+    <div class="browser-body ntp">
+      <div class="ntp-center">
+
+        <div class="mb-4" style="text-align:center;font-weight:800;font-size:17px;letter-spacing:.5px">my-favorites</div>
+
+        <div class="clock mb-9">14:32<span class="dt">11 月 20 日 星期四</span></div>
+
+        <div class="big-search">
+          <span style="opacity:.5">⌕</span>
+          <input placeholder="搜索你的书签，或输入网址…">
+          <span class="eng-chip on">书签</span>
+          <span class="eng-chip">百度</span>
+          <span class="eng-chip">必应</span>
+        </div>
+
+        <div class="top-label">
+          <b>📌 最常访问</b>
+          <span class="hint">按实际使用自动更新 · 只显示网站入口（D30 站点化）</span>
+        </div>
+        <div class="tilegrid">
+          <div class="tile mini"><span class="fav fc-1">G</span><span class="nm">GitHub</span></div>
+          <div class="tile mini"><span class="fav fc-2">M</span><span class="nm">MDN 📌</span></div>
+          <div class="tile mini"><span class="fav fc-3">D</span><span class="nm">Drizzle</span></div>
+          <div class="tile mini"><span class="fav fc-5">F</span><span class="nm">Figma</span></div>
+          <div class="tile mini"><span class="fav fc-7">Z</span><span class="nm">知乎</span></div>
+          <div class="tile mini"><span class="fav fc-4">V</span><span class="nm">V2EX</span></div>
+          <div class="tile mini"><span class="flag badge b-ai">📸</span><span class="fav fc-6">W</span><span class="nm">Webpack旧版</span></div>
+          <div class="tile mini"><span class="fav fc-2">R</span><span class="nm">React</span></div>
+        </div>
+        <div class="hint mt6" style="margin-top:10px">冷启动为空时此区自然隐藏（无点击数据 → 不占位，D39）</div>
+      </div>
+
+      <div class="corner">
+        <button class="icon-btn" title="AI 聊天整理（侧栏）">✦</button>
+        <button class="icon-btn" title="自定义">⚙️</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 自定义面板 -->
+  <div style="margin-top:30px"><span class="demo-note">⚙️ 自定义面板（D39：仅两处可调——刻意克制，其他参数不做）</span></div>
+  <div class="card mt12" style="max-width:560px;margin-left:auto;margin-right:auto">
+    <div class="card-h"><span class="t">自定义新标签页</span><button class="btn btn-g btn-xs right">✕</button></div>
+    <div class="card-b s" style="font-size:14px">
+      <div class="row"><span class="grow">常用区数量</span>
+        <select class="select" style="width:auto;padding:5px 10px;font-size:13px"><option>显示 8 个</option><option>4 个</option><option>12 个</option><option>16 个</option><option>关闭</option></select>
+      </div>
+      <div class="divider" style="margin:10px 0"></div>
+      <div class="row"><span class="grow">外部搜索引擎</span>
+        <span class="chip on">百度</span><span class="chip on">必应</span><span class="chip">Google</span>
+        <span class="hint"><span class="kbd">Tab</span> 切换</span>
+      </div>
+      <div class="row mt12" style="justify-content:flex-end"><button class="btn btn-g btn-xs">恢复默认</button></div>
+    </div>
+  </div>
+
+  <div class="callout c-warn mt20"><span class="ico">🧭</span><div><b>历史沿革（评审追溯）</b>：D29 三档密度（极简/标准/完整）→ 开发走查中用户判定「太乱」→ <b>D39 原生式极简</b>（现行，仅两处自定义）→ <b>D40 小时钟回归</b>（用户反馈纯无时钟空旷）。原型 05 曾演示的三档形态已废弃。</div></div>
+
+  <details class="talk" open>
+    <summary>✅ 已定决策（D39/D40，2026-11-20）</summary>
+    <div class="talk-b">
+      <ul style="padding-left:20px">
+        <li><b>D39 原生式极简（现行）：</b>品牌标 + 搜索框 + 最常访问磁贴；自定义仅常用区数量与外部引擎；冷启动为空自然隐藏</li>
+        <li><b>D40 小时钟：</b>品牌下方 26px 细体时钟 + 日期，15s 刷新，常驻不进自定义面板</li>
+        <li><b>站点化叠加（D30/D31）：</b>最常访问只显示站点入口；失效卡片「📸 快照可用」；深链不占导航位</li>
+      </ul>
+    </div>
+  </details>
+
+</main>
+<footer class="proto-foot">05 · 新标签页 · my-favorites 原型 v0.5 · D39 原生式极简 + D40 小时钟 · 对应 F4.5 / D30/D31 站点投影 · 与 apps/extension/entrypoints/newtab 实现一致</footer>
+</body>
+</html>

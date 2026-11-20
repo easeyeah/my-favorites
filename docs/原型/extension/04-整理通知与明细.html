@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 · 整理结果通知与只读明细 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .diffwrap { width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  .done-card { border: 1.5px solid var(--text); border-radius: 10px; padding: 16px 18px; background: var(--panel); }
+  .done-row { display: flex; gap: 18px; font-size: 13px; color: var(--text-2); }
+  .bm-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .del-card { border: 1.5px solid var(--text); border-radius: 8px; padding: 12px 14px; background: var(--panel); }
+  .ro-tag { font-size: 11px; font-weight: 700; letter-spacing: .5px; color: var(--text-3); border: 1px solid var(--border-2); border-radius: 4px; padding: 1px 7px; }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>04 · 整理结果通知 + 只读明细</b>（D27：无确认流）</span>
+  <span class="hint right">红线③不变：删除类建议永不自动执行</span>
+</header>
+
+<main class="wrap">
+
+  <div class="row mb12">
+    <span class="demo-note"><b>D27 决策</b>：砍掉「diff 预览 → 确认 → 应用」。AI 整理<b>直接生效</b>，本页只剩两件事——① 告诉你它做了什么（通知）；② 让你随时反悔（撤销 / 只读明细 / 版本回滚）。</span>
+  </div>
+
+  <!-- 第一部分：通知形态 -->
+  <div class="strong mb12" style="font-size:14px">① 整理完成后的通知（两种形态：聊天内卡片 / 系统轻提示）</div>
+  <div class="grid2" style="align-items:start">
+    <div class="done-card">
+      <div class="row">
+        <span style="font-size:16px">✨</span>
+        <b style="font-size:14px" class="grow">整理完成（v43）</b>
+        <span class="badge">已应用</span>
+      </div>
+      <div class="done-row mt12">
+        <span>📦 搬家 <b style="color:var(--text)">61</b> 条</span>
+        <span>🔀 合并 <b style="color:var(--text)">2</b> 组</span>
+        <span>✏️ 改名 <b style="color:var(--text)">3</b> 个目录</span>
+      </div>
+      <p class="hint mt6">另发现 5 条适合归档的旧书签——<b style="color:var(--text)">没有动它们</b>，在下面等你一句话。</p>
+      <div class="row mt12">
+        <button class="btn btn-p btn-s">↩ 撤销这次整理</button>
+        <button class="btn btn-o btn-s">看看改了什么</button>
+      </div>
+      <div class="hint mt6">导航站已同步更新 · 历史版本永久保留</div>
+    </div>
+    <div>
+      <div class="toast">✨ 已整理：搬家 61 · 合并 2 组<span class="hint">v43</span><button class="btn btn-o btn-xs">撤销</button><button class="btn btn-o btn-xs">详情</button></div>
+      <p class="hint mt12">轻提示出现在侧栏 / 管理台角落，不阻塞任何操作；点「详情」展开下方只读明细。</p>
+    </div>
+  </div>
+
+  <div class="flow-connect" style="color:var(--text-3);font-size:16px;text-align:center;padding:8px 0">↓ 点「看看改了什么」后（只读，不是确认）</div>
+
+  <!-- 第二部分：只读明细 -->
+  <div class="diffwrap">
+    <div class="row">
+      <span class="ro-tag">只读</span>
+      <b style="font-size:14px" class="grow">这次整理改了什么（v43）</b>
+      <button class="btn btn-p btn-s">↩ 撤销全部</button>
+    </div>
+
+    <div class="diff-g" data-fold>
+      <div class="diff-g-h">📂 前端 → <b>Rust</b>（新聚合目录）<span class="badge">28 条</span><span class="right hint">▾</span></div>
+      <div class="diff-r">
+        <span class="op badge op-move">搬家</span>
+        <div class="bm-cell grow"><span class="fav fav-s fc-1">A</span><span class="ellip">Asynchronous Programming in Rust</span></div>
+        <span class="flow-arrow">→</span>
+        <span class="badge nowrap">开发工具 / Rust</span>
+      </div>
+      <div class="diff-r">
+        <span class="op badge op-move">搬家</span>
+        <div class="bm-cell grow"><span class="fav fav-s fc-1">T</span><span class="ellip">Tokio 官方教程 · 异步运行时</span></div>
+        <span class="flow-arrow">→</span>
+        <span class="badge nowrap">开发工具 / Rust</span>
+      </div>
+      <div class="diff-r">
+        <span class="op badge op-move">搬家</span>
+        <div class="bm-cell grow"><span class="fav fav-s fc-2">W</span><span class="ellip">WebAssembly 手册</span></div>
+        <span class="flow-arrow">→</span>
+        <span class="badge nowrap">开发工具 / Rust</span>
+      </div>
+    </div>
+
+    <div class="diff-g" data-fold>
+      <div class="diff-g-h">📂 老工具书签 → 运维与部署<span class="badge">19 条</span><span class="right hint">▸</span></div>
+    </div>
+
+    <div class="diff-g" data-fold>
+      <div class="diff-g-h">🔀 合并重复组 ×2（每组保留最早收藏）<span class="right hint">▸</span></div>
+      <div class="diff-r">
+        <span class="op badge op-merge">合并</span>
+        <div class="grow">
+          <div class="bm-cell"><span class="fav fav-s fc-4">V</span><span class="ellip strong">Vue Router 官方文档（3 条 → 1 条）</span></div>
+          <div class="hint mt6" style="margin-left:28px">重复副本已移除 · 7 天内可从版本 v43 一键恢复</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 归档建议：永不自动执行 -->
+    <div class="del-card">
+      <div class="row">
+        <b style="font-size:13px">🗄 归档建议清单（5 条）</b>
+        <span class="badge">没有自动执行</span>
+        <button class="btn btn-p btn-xs right">一键全部归档</button>
+      </div>
+      <div class="diff-r mt6">
+        <span class="op badge op-del">建议归档</span>
+        <div class="bm-cell grow"><span class="ellip">Bootstrap 4 中文文档（2020-05 添加 · 900+ 天未访问）</span></div>
+        <span class="badge">📸 有快照</span>
+        <button class="btn btn-g btn-xs">留着我看</button>
+      </div>
+      <div class="hint mt6">归档 = 移入「已归档」目录，快照保留，随时恢复。<b>彻底删除永远在你手里，AI 永不代删。</b></div>
+    </div>
+
+    <!-- 修正闭环 -->
+    <div class="card">
+      <div class="card-b s">
+        <div class="label" style="margin-bottom:8px">💬 不满意？一句话，AI 马上再整一次（F3.6 · 同样直接生效、可撤销）</div>
+        <div class="row">
+          <input class="input input-s grow" placeholder="例如：WebAssembly 那条不要放 Rust，放到前端 / 编译原理">
+          <button class="btn btn-p btn-s nowrap">让 AI 修正</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="hint" style="text-align:center">撤销入口共三处：通知卡「↩ 撤销」 · 本页「↩ 撤销全部」 · 整理中心版本时间线（可回滚到任意历史版本）</div>
+  </div>
+
+  <details class="talk">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18，记录为 D28）</summary>
+    <div class="talk-b"><ol>
+      <li><b>通知策略（已定）：</b>每次整理都提示；通知方式用户可调——轻提示 toast（默认）/ 通知卡 / 静默仅版本记录，扩展端与管理台各自设置。</li>
+      <li><b>被合并副本（已定）：</b>直接移除，7 天内可从 organize_version 一键恢复。红线③不受影响（锁的是「删除建议」，合并属可撤销整理动作）。</li>
+      <li><b>极谨慎模式（已定）：</b>不留「整理前先问一次」设置项，保持 act + undo 哲学纯粹。</li>
+    </ol></div>
+  </details>
+
+</main>
+<footer class="proto-foot">04 · 整理结果通知与只读明细 · my-favorites 原型 v0.2 · D27（2026-11-18）：移除 F3.4 确认流，安全网 = organize_version 回滚</footer>
+</body>
+</html>

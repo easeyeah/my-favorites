@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>12 · 管理台整理中心 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .admin { display: flex; min-height: 700px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); background: var(--panel); box-shadow: var(--shadow-2); }
+  .ad-nav { width: 190px; background: var(--panel-2); border-right: 1px solid var(--border); padding: 14px 10px; flex: none; }
+  .ad-nav .logo { padding: 6px 12px 16px; font-weight: 800; font-size: 15px; }
+  .ad-nav .ni { display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-radius: 6px; font-size: 13.5px; color: var(--text-2); cursor: pointer; margin-bottom: 2px; }
+  .ad-nav .ni.on { background: var(--primary-soft); color: var(--text); font-weight: 700; }
+  .v-pane { width: 260px; border-right: 1px solid var(--border); padding: 16px; flex: none; background: var(--panel-2); }
+  .chat-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .chat-scroll { flex: 1; overflow-y: auto; padding: 20px 24px; }
+  .cost-chip { font-family: var(--mono); font-size: 11px; color: var(--text-2); background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 5px; padding: 3px 10px; }
+  .task-card { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 12px 14px; }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>12 · 整理中心</b>（管理台 · 直接执行 + 通知撤销 + 版本回滚）</span>
+  <span class="hint right">D27：回滚体系是唯一安全面 · F3.5</span>
+</header>
+
+<main class="wrap">
+
+  <div class="admin">
+    <div class="ad-nav">
+      <div class="logo">⭐ my-favorites</div>
+      <div class="ni">📊 概览</div>
+      <div class="ni">📚 书签库</div>
+      <div class="ni">📥 收纳盒<span class="badge" style="margin-left:auto;background:var(--text);color:var(--primary-fg);border-radius:999px;padding:1px 7px;font-size:10.5px">6</span></div>
+      <div class="ni on">✨ 整理</div>
+      <div class="ni">🌐 导航站</div>
+      <div class="ni">🩺 维护报告</div>
+      <div class="divider"></div>
+      <div class="ni">⚙️ 设置</div>
+    </div>
+
+    <!-- 版本时间线 -->
+    <div class="v-pane">
+      <div class="label">版本历史（organize_version）</div>
+      <div class="timeline mt12">
+        <div class="tl-item on">
+          <div class="strong" style="font-size:13px">v46 · 恢复「Vue Router」组 <span class="badge b-primary">最新</span></div>
+          <div class="hint">刚刚 · 1 项 · 你的一句话修正</div>
+          <button class="btn btn-o btn-xs mt6">回滚</button>
+        </div>
+        <div class="tl-item">
+          <div class="strong" style="font-size:13px">v45 · 全库整理</div>
+          <div class="hint">今天 13:10 · 289 项 · 7 日回滚率 3%</div>
+          <button class="btn btn-o btn-xs mt6">回滚</button>
+        </div>
+        <div class="tl-item">
+          <div class="strong" style="font-size:13px">v44 · 收纳盒自动归位</div>
+          <div class="hint">今天 14:32 · 3 项移动</div>
+          <button class="btn btn-o btn-xs mt6">回滚</button>
+        </div>
+        <div class="tl-item">
+          <div class="strong" style="font-size:13px">v43 · 「开发工具 2023 前」重分类</div>
+          <div class="hint">昨天 · 69 项 · 回滚率 3%</div>
+          <button class="btn btn-o btn-xs mt6">回滚</button>
+        </div>
+        <div class="tl-item">
+          <div class="strong" style="font-size:13px">v40 · 首次导入自动整理</div>
+          <div class="hint">23 天前 · 312 项</div>
+          <button class="btn btn-o btn-xs mt6">回滚</button>
+        </div>
+      </div>
+      <div class="callout c-ok mt16" style="font-size:12px"><span class="ico">🛡</span><div><b>D27 无确认流后，这里是唯一安全面</b>：回滚 = 逆放 diff 生成新版本，历史永不删除；浏览器书签树同步回移（D20）。红线③：删除建议永不自动执行。</div></div>
+      <div class="divider"></div>
+      <div class="label">本月整理成本</div>
+      <div class="row mt6"><span class="cost-chip">≈ ¥0.42 · 6 次会话</span></div>
+      <p class="hint mt6">千级书签走聚类压缩：1,284 条 → 36 簇 → LLM 只做簇命名与边界调整（F3.9）</p>
+    </div>
+
+    <!-- 聊天区 -->
+    <div class="chat-pane">
+      <div class="row" style="padding:12px 20px;border-bottom:1px solid var(--border)">
+        <span class="ai-glow" style="font-size:16px">✦ AI 整理中心</span>
+        <span class="badge right">DeepSeek-V3 · 整理用途</span>
+      </div>
+
+      <div class="chat-scroll">
+        <div class="chat">
+          <div class="msg u">
+            <span class="avatar">柳</span>
+            <div class="bubble">把整个库梳理一遍：重复的合并，两年没动过的给我归档建议</div>
+          </div>
+
+          <div class="msg a">
+            <span class="avatar">✦</span>
+            <div class="bubble" style="width:100%">
+              <div class="task-card">
+                <div class="row">
+                  <span class="spin">⏳</span>
+                  <b style="font-size:13px">全库整理中…</b>
+                  <span class="badge right">1,284 条 → 36 簇</span>
+                </div>
+                <div class="hint mt6">聚类压缩后 LLM 只做簇命名与边界调整 · 预计成本 ≈ ¥0.18 · 完成即生效，随时可撤销</div>
+                <div class="progress ai mt12"><i style="width:72%"></i></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="msg a">
+            <span class="avatar">✦</span>
+            <div class="bubble" style="width:100%">
+              <div class="task-card" style="border-color:var(--text)">
+                <div class="row">
+                  <span style="font-size:15px">✅</span>
+                  <b style="font-size:13px">全库整理完成（v45）</b>
+                  <span class="badge right">已生效 · 乐观锁通过</span>
+                </div>
+                <div class="row mt12" style="gap:16px;font-size:12.5px;color:var(--text-2)">
+                  <span>📦 搬家 <b style="color:var(--text)">214</b></span>
+                  <span>✏️ 改名 <b style="color:var(--text)">5</b> 目录</span>
+                  <span>🔀 合并 <b style="color:var(--text)">23</b> 组</span>
+                </div>
+                <p class="hint mt6">归档建议 47 条<b>没有执行</b>——在「维护报告」等你一键处理。被合并的副本已移除，7 天内可从 v45 一键恢复。</p>
+                <div class="row mt12">
+                  <a class="btn btn-o btn-s" href="../extension/04-整理通知与明细.html">看看改了什么</a>
+                  <button class="btn btn-p btn-s">↩ 撤销 v45</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="msg u">
+            <span class="avatar">柳</span>
+            <div class="bubble">合并 23 组里，Vue Router 那组不要动，我故意存的两个版本</div>
+          </div>
+
+          <div class="msg a">
+            <span class="avatar">✦</span>
+            <div class="bubble">
+              收到——已把这组恢复原位（v46，直接生效，浏览器书签树已同步），并记住偏好：<b>同一文档的多个版本共存时不合并</b>。<span class="badge" style="margin-left:6px">整理偏好记忆 +1</span>
+              <div class="row mt12">
+                <button class="btn btn-o btn-s">↩ 撤销 v46</button>
+                <button class="btn btn-g btn-s">管理我的整理偏好</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="padding:12px 16px;border-top:1px solid var(--border)">
+        <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <span class="chip">整理整个库</span><span class="chip">合并重复</span><span class="chip">建议归档清单</span><span class="chip">把学习目录做快照</span><span class="chip">撤销上次的整理</span><span class="chip">整理偏好管理</span>
+        </div>
+        <div class="chat-input">
+          <textarea rows="1" placeholder="告诉我要怎么整理…"></textarea>
+          <button class="btn btn-p btn-s">发送</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <details class="talk">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18 · D37 收口）——决议清单如下，原始提案保留供追溯</summary>
+    <div class="talk-b"><div class="label" style="margin-bottom:8px">收口决议（按「最简原则」定案）</div><ul style="padding-left:20px;margin-bottom:10px"><li>管理台与扩展侧栏<b>共用统一时间线</b>（确认现状）</li><li>回滚语义 = <b>链式</b>：可回滚到任意历史版本状态</li><li>提供「<b>整理偏好</b>」管理入口（查看 / 删除已记忆规则）</li></ul><div class="divider" style="margin:8px 0"></div><div class="label" style="margin-bottom:6px">原始提案（供追溯）</div><ol>
+      <li><b>管理台与扩展侧栏的关系：</b>两边都能发起整理（共用同一会话与版本体系）。管理台是否要展示扩展发起的会话记录（当前设计：是，统一时间线）？</li>
+      <li><b>回滚粒度：</b>当前「回滚到某版本前」即逆放单个 diff。是否需要「回滚到 3 天前的状态」（链式回滚多个版本）？</li>
+      <li><b>偏好记忆的可见性：</b>AI 记住了「同文档多版本不合并」这类偏好——是否需要「整理偏好」管理页让用户查看/删除已记忆的规则（隐私与掌控感）？</li>
+    </ol></div>
+  </details>
+
+</main>
+<footer class="proto-foot">12 · 整理中心 · my-favorites 原型 v0.2 · 对应 F3.5/F3.8/F3.9 / D27 / §7⑥ / D20</footer>
+</body>
+</html>

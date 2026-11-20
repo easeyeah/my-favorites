@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>08 · 快照查看器 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .viewer { border-radius: var(--radius-container); overflow: hidden; border: 1px solid var(--border); box-shadow: var(--shadow-2); background: var(--panel); }
+  .vh { padding: 14px 18px; border-bottom: 1px solid var(--border); background: var(--panel-2); }
+  .snap-canvas { background: #fff; min-height: 0; padding: 26px 36px; color: #222; }
+  html[data-theme="dark"] .snap-canvas { background: #fff; color: #222; } /* MHTML 保真渲染，不受主题影响 */
+  /* 全屏页统一壳（与 07 设置页同款左侧主菜单） */
+  .opts { display: flex; gap: 0; border-radius: var(--radius-container); overflow: hidden; border: 1px solid var(--border); background: var(--panel); box-shadow: var(--shadow-2); }
+  .opts-nav { width: 190px; background: var(--panel-2); border-right: 1px solid var(--border); padding: 12px 8px; flex: none; }
+  .opts-nav .ni { padding: 8px 12px; border-radius: 6px; font-size: 14px; color: var(--text-2); cursor: pointer; }
+  .opts-nav .ni:hover { background: var(--panel); }
+  .opts-nav .ni.on { background: var(--primary-soft); color: var(--text); font-weight: 700; }
+  .opts-main { flex: 1; padding: 20px 24px; min-width: 0; }
+  .doc-title { font-size: 24px; font-weight: 700; color: #111; }
+  .doc-meta { color: #888; font-size: 12.5px; margin: 10px 0 18px; padding-bottom: 14px; border-bottom: 1px solid #eee; }
+  .doc-p { color: #333; line-height: 1.8; margin-bottom: 12px; }
+  .doc-h2 { font-size: 17px; font-weight: 700; color: #111; margin: 20px 0 10px; }
+  .img-ph { background: linear-gradient(135deg, #e8eef7, #dce8f5); border-radius: 8px; height: 180px; display: flex; align-items: center; justify-content: center; color: #9db4d0; font-size: 13px; margin: 14px 0; }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>08 · 快照查看器</b>（扩展端 · F2.4 一键快照）</span>
+  <span class="hint right">链接失效后的回看出口 · MHTML 浏览器原生保真</span>
+</header>
+
+<main class="wrap">
+
+  <div class="row mb12">
+    <span class="demo-note">🧭 布局骨架统一（D26 配套规则）：扩展端<b>所有「整页打开」的页面共用同一左侧主菜单壳</b>——快照查看器与设置页（07）同壳，就像 Chrome 的设置/历史/下载共用一个壳。窄容器（popup/侧栏）没有侧栏的空间，统一用<b>顶部标签页</b>（见原型 02/06）。</span>
+  </div>
+
+  <div class="opts">
+    <div class="opts-nav">
+      <div class="ni">← 返回</div>
+      <div class="ni on">📸 快照查看</div>
+      <div class="ni">📑 版本历史</div>
+      <div class="ni">🔖 书签详情</div>
+      <div class="divider"></div>
+      <div class="ni">⚙️ 扩展设置</div>
+      <div style="padding:10px 12px" class="hint">旧版 Webpack 中文文档<br>📸 3 个版本 · 2.1MB</div>
+    </div>
+    <div class="opts-main">
+  <div class="viewer">
+    <!-- 顶部信息条 -->
+    <div class="vh">
+      <div class="row">
+        <span class="fav fc-6" style="width:32px;height:32px;font-size:14px">W</span>
+        <div class="grow">
+          <div class="strong" style="font-size:14px">旧版 Webpack 中文文档 <span class="badge b-danger">原页已失效 · HTTP 410</span></div>
+          <div class="mono" style="margin-top:2px">webpack.docs-china.org/guides/（已离线 187 天）</div>
+        </div>
+        <button class="btn btn-g btn-s">🌐 尝试打开原网页</button>
+        <button class="btn btn-o btn-s">📸 重新快照</button>
+      </div>
+      <div class="row mt12" style="gap:14px">
+        <div class="tabs-pill">
+          <span class="tab on">v3 · 2026-08-02（最新）</span>
+          <span class="tab">v2 · 2026-03-15</span>
+          <span class="tab">v1 · 2025-11-02</span>
+        </div>
+        <span class="hint">MHTML · 2.1 MB · 来源：扩展端就地捕获（captureMHTML）</span>
+        <span class="badge right">仅你可见 · 公开导航站永不展示</span>
+      </div>
+    </div>
+
+    <!-- 快照内容（保真渲染区） -->
+    <div style="padding:8px 18px;background:var(--panel-2);border-bottom:1px solid var(--border);font-size:12.5px;color:var(--text-3)">📄 以下为快照原文 · MHTML 保真渲染 —— 这一区域是「当时的原网页」，不是产品界面，样式随原页而定</div>
+    <div class="snap-canvas">
+      <div class="doc-title">Webpack 中文文档 · 指南：资源管理</div>
+      <div class="doc-meta">webpack.docs-china.org · 快照时间 2026-08-02 21:14 · 抓取自浏览器当前页，含完整样式与图片</div>
+
+      <p class="doc-p">从 webpack 4 开始，可以不用引入一份配置文件来打包。然而，webpack 仍然还是高度可配置的，本章节将介绍资源管理相关的配置方式……</p>
+
+      <div class="img-ph">🖼 快照中的原始图片（资源已内联，离线可渲染）</div>
+
+      <div class="panel-2" style="background:#f6f8fa;border:1px solid #e3e8ee;padding:12px 16px;font-family:var(--mono);font-size:12.5px;color:#333;border-radius:8px">
+        npm install --save-dev style-loader css-loader
+      </div>
+      <p class="doc-p" style="margin-top:12px">……（快照完整保留了原页全部内容与样式，此处仅为演示截断）</p>
+    </div>
+  </div>
+
+  <div class="callout c-warn" style="margin-top:16px"><span class="ico">⚖️</span><div><b>边界说明：</b>快照仅用户私有可见（版权红线④）。公开导航站只会显示「有快照」状态标识，永不展示快照内容。隐私域名清单内的页面不会生成快照。</div></div>
+  </div>
+
+  <details class="talk">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18 · D37 收口）——决议清单如下，原始提案保留供追溯</summary>
+    <div class="talk-b"><div class="label" style="margin-bottom:8px">收口决议（按「最简原则」定案）</div><ul style="padding-left:20px;margin-bottom:10px"><li>版本切换形态：<b>顶部 tab</b>（现状确认）；时间轴对比视图进 Later</li><li>失效入口强度：书签库失效书签<b>排序置顶</b> + 行内「查看快照」按钮（加强现状）</li></ul><div class="divider" style="margin:8px 0"></div><div class="label" style="margin-bottom:6px">原始提案（供追溯）</div><ol>
+      <li><b>版本切换形态：</b>顶部 tab 切换版本（当前）vs 左侧时间轴 + 对比视图？多版本对存储配额的压力在云端 Free 档需要限制（保留最近 N 版）。</li>
+      <li><b>失效后的入口强度：</b>书签库里失效书签默认排序是否置顶 + 直接内嵌「查看快照」大按钮（当前：入口在详情）？「失效→有出路」闭环是快照价值的核心叙事。</li>
+    </ol>
+      <div class="divider"></div>
+      <div class="label" style="margin-bottom:8px">附：快照从哪里来（四条触发路径）</div>
+      <div style="font-size:14px;color:var(--text-2)">
+        <div class="row"><span class="badge b-primary">① 收藏瞬间</span><span class="hint">popup 勾选「同时保存快照」，扩展就地生成，零额外抓取</span></div>
+        <div class="row mt6"><span class="badge b-primary">② 手动一键</span><span class="hint">书签详情 / 右键菜单 / 导航卡片上的「快照」按钮</span></div>
+        <div class="row mt6"><span class="badge b-primary">③ 聊天指令</span><span class="hint">「给这个书签拍快照」「把学习目录全部快照」（批量走队列）</span></div>
+        <div class="row mt6"><span class="badge b-primary">④ 失效联动</span><span class="hint">死链判定后，周报与详情页提示「已失效且无快照」→ 引导补拍（有快照则直接给回看入口）</span></div>
+      </div>
+    </div>
+  </details>
+
+</main>
+<footer class="proto-foot">08 · 快照查看器 · my-favorites 原型 v0.1 · 对应 F2.4 / §6.2 / 红线④版权</footer>
+</body>
+</html>

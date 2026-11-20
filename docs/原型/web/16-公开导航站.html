@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>柳的导航站</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  /* 公开导航站按技术方案用轻量原生风格渲染（不走 shadcn），此处保持视觉一致仅作原型 */
+  body { background: var(--bg); }
+  .pub-hero { max-width: 980px; margin: 0 auto; padding: 46px 28px 0; text-align: center; }
+  .pub-title { font-size: 24px; font-weight: 800; letter-spacing: 1px; }
+  .pub-sub { color: var(--text-3); font-size: 12.5px; margin-top: 6px; }
+  .pub-search {
+    max-width: 480px; margin: 22px auto 0;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 999px; padding: 11px 20px;
+    display: flex; align-items: center; gap: 10px;
+    box-shadow: var(--shadow-1); color: var(--text-3); font-size: 13.5px;
+  }
+  .pub-groups { max-width: 980px; margin: 30px auto 0; padding: 0 28px 30px; }
+  .pub-grp { margin-bottom: 26px; }
+  .pub-grp h2 { font-size: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .pub-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(172px, 1fr)); gap: 12px; }
+  .pub-card {
+    display: flex; gap: 10px; align-items: flex-start;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px;
+    transition: all .15s; position: relative;
+  }
+  .pub-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); border-color: var(--border-2); }
+  .pub-card .tt { font-size: 13px; font-weight: 600; }
+  .pub-card .ds { font-size: 11.5px; color: var(--text-3); margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .pub-foot { text-align: center; padding: 18px 0 34px; color: var(--text-3); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>16 · 公开导航站</b>（/s/:slug · 随机链接公开）</span>
+  <span class="hint right">版权红线：仅元数据 + 摘要 · 永不展示快照内容</span>
+</header>
+
+<main>
+  <div class="browser" style="max-width:1060px;margin:26px auto 0">
+    <div class="browser-bar"><span class="dots"><i></i><i></i><i></i></span><span class="urlbar">🔒 https://nas-home.local:3000/s/Kx7mQp2vRt9w · 不可枚举 slug</span></div>
+
+    <div style="background:var(--bg);min-height:640px">
+      <div class="pub-hero">
+        <div class="pub-title">⭐ 柳的导航站</div>
+        <div class="pub-sub">1,284 个精选收藏 · 持续整理中 · 更新于 3 分钟前</div>
+        <div class="pub-search"><span>🔍</span>搜索这个导航站…</div>
+      </div>
+
+      <div class="pub-groups">
+        <div class="pub-grp">
+          <h2>📌 常用</h2>
+          <div class="pub-grid">
+            <a class="pub-card" href="#"><span class="fav fc-1">G</span><div><div class="tt">GitHub</div><div class="ds">全球最大代码托管平台，我的开源仓库与关注的项目都在这里</div></div></a>
+            <a class="pub-card" href="#"><span class="fav fc-2">M</span><div><div class="tt">MDN Web Docs <span class="badge" style="margin-left:4px">📌 自定义卡</span></div><div class="ds">Web 技术权威文档，HTML/CSS/JS 的第一参考资料</div></div></a>
+            <a class="pub-card" href="#"><span class="fav fc-3">D</span><div><div class="tt">Drizzle ORM</div><div class="ds">轻量 TypeScript ORM，类型安全的 SQL 查询构建器</div></div></a>
+            <a class="pub-card" href="#"><span class="fav fc-5">F</span><div><div class="tt">Figma</div><div class="ds">协作界面设计工具</div></div></a>
+          </div>
+        </div>
+
+        <div class="pub-grp">
+          <h2>📁 开发工具</h2>
+          <div class="pub-grid">
+            <a class="pub-card" href="#"><span class="fav fc-2">V</span><div><div class="tt">Vite</div><div class="ds">下一代前端构建工具，极速冷启动与热更新</div></div></a>
+            <a class="pub-card" href="#"><span class="fav fc-3">T</span><div><div class="tt">Tailwind CSS</div><div class="ds">原子化 CSS 框架</div></div></a>
+            <a class="pub-card" href="#"><span class="fav fc-8">R</span><div><div class="tt">Rust 程序设计语言</div><div class="ds">The Rust Book 官方中文版教程</div></div></a>
+            <a class="pub-card" href="#" style="border-style:dashed">
+              <span class="fav fc-6">W</span>
+              <div><div class="tt">旧版 Webpack 中文文档 <span class="badge b-ai" style="margin-left:4px">📸 有快照</span></div><div class="ds">原页已失效——访客仅能看到「有快照」状态标识，快照内容不公开</div></div>
+            </a>
+          </div>
+        </div>
+
+        <div class="pub-grp">
+          <h2>📁 设计灵感</h2>
+          <div class="pub-grid">
+            <a class="pub-card" href="#"><span class="fav fc-6">D</span><div><div class="tt">Dribbble</div><div class="ds">设计师作品社区，每日灵感来源</div></div></a>
+            <a class="pub-card" href="#"><span class="fav fc-5">M</span><div><div class="tt">Mobbin</div><div class="ds">真实 App 的 UI 截图库，交互设计参考</div></div></a>
+          </div>
+        </div>
+      </div>
+
+      <div class="pub-foot">
+        ⚡ 由 my-favorites 生成 · <a href="#">创建你自己的导航站</a>
+        <div class="mt6" style="font-size:11px;opacity:.7">本页仅展示书签元数据与 AI 摘要 · 内容版权属于原作者</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="max-width:1060px;margin:18px auto 0;padding:0 20px">
+    <div class="callout c-info"><span class="ico">⚖️</span><div>公开边界（评审对照点）：① 死链卡片只出现「📸 有快照」徽章，<b>没有任何快照内容可访问</b>；② slug 为 nanoid 不可枚举、可选密码访问；③ 页脚水印自建端可关（D12），云端 Pro 可关；④ 不做公开检索广场（D5）；⑤ <b>只展示「站点级」入口（D30）</b>——文章 / 详情类书签不出现在公开导航站。</div></div>
+  </div>
+
+  <details class="talk" style="max-width:1060px;margin:22px auto 0">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18 · D37 收口）——决议清单如下，原始提案保留供追溯</summary>
+    <div class="talk-b"><div class="label" style="margin-bottom:8px">收口决议（按「最简原则」定案）</div><ul style="padding-left:20px;margin-bottom:10px"><li>摘要密度不均<b>可接受</b>（无 L1 缓存的书签只显示标题）</li><li>公开页与私有版共用宫格参数；「个人主页」模板 Later 再议</li></ul><div class="divider" style="margin:8px 0"></div><div class="label" style="margin-bottom:6px">原始提案（供追溯）</div><ol>
+      <li><b>卡片信息密度：</b>当前「图标 + 标题 + 两行摘要」。摘要来自 AI（L1 缓存）——没有缓存的书签只显示标题，密度会不均，是否可接受？</li>
+      <li><b>视觉风格：</b>公开页与私有新标签页共用「经典宫格」模板参数（当前）——如果你希望公开页更「作品集化」（大封面、个人介绍头图），那属于 P1「个人主页」模板，M1 先用这套是否可接受？</li>
+    </ol></div>
+  </details>
+
+</main>
+<footer class="proto-foot">16 · 公开导航站 · my-favorites 原型 v0.1 · 对应 F4.2/F4.6/F4.7 / 红线④ / D5 / D12</footer>
+</body>
+</html>

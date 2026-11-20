@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>11 · 管理台书签库 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .admin { display: flex; min-height: 700px; border-radius: 14px; overflow: hidden; border: 1px solid var(--border); background: var(--panel); box-shadow: var(--shadow-2); }
+  .ad-nav { width: 190px; background: var(--panel-2); border-right: 1px solid var(--border); padding: 14px 10px; flex: none; }
+  .ad-nav .logo { padding: 6px 12px 16px; font-weight: 800; font-size: 15px; }
+  .ad-nav .ni { display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-radius: 9px; font-size: 13.5px; color: var(--text-2); cursor: pointer; margin-bottom: 2px; }
+  .ad-nav .ni.on { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+  .ad-tree { width: 240px; border-right: 1px solid var(--border); padding: 12px 8px; overflow-y: auto; flex: none; }
+  .ad-main { flex: 1; display: flex; min-width: 0; }
+  .list-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .toolbar { display: flex; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
+  .drawer { width: 340px; border-left: 1px solid var(--border); background: var(--panel-2); padding: 18px; overflow-y: auto; flex: none; }
+  .row-selected td { background: var(--primary-soft) !important; }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>11 · 书签库</b>（管理台）</span>
+  <span class="hint right">演示状态：从概览「死链 17」钻取进入（死链筛选激活）</span>
+</header>
+
+<main class="wrap">
+
+  <div class="admin">
+    <div class="ad-nav">
+      <div class="logo">⭐ my-favorites</div>
+      <div class="ni">📊 概览</div>
+      <div class="ni on">📚 书签库</div>
+      <div class="ni">📥 收纳盒<span class="badge" style="margin-left:auto;background:var(--danger);color:#fff;border-radius:999px;padding:1px 7px;font-size:10.5px">6</span></div>
+      <div class="ni">✨ 整理</div>
+      <div class="ni">🌐 导航站</div>
+      <div class="ni">🩺 维护报告</div>
+      <div class="divider"></div>
+      <div class="ni">⚙️ 设置</div>
+    </div>
+
+    <div class="ad-main">
+      <!-- 目录树 -->
+      <div class="ad-tree">
+        <div class="search"><input class="input input-s" placeholder="搜索书签…"></div>
+        <div class="tree mt12">
+          <div class="tree-row">📁 全部书签 <span class="cnt">1,284</span></div>
+          <div class="tree-row on">📁 开发工具 <span class="cnt">412</span></div>
+          <div class="tree-kids">
+            <div class="tree-row">前端 <span class="cnt">186</span></div>
+            <div class="tree-row">Rust <span class="cnt">54</span></div>
+            <div class="tree-row">运维与部署 <span class="cnt">91</span></div>
+          </div>
+          <div class="tree-row">📁 设计灵感 <span class="cnt">78</span></div>
+          <div class="tree-row">📁 学习资料 <span class="cnt">203</span></div>
+          <div class="tree-row">📁 生活 <span class="cnt">156</span></div>
+          <div class="tree-row" style="opacity:.7">🗄 已归档 <span class="cnt">47</span></div>
+          <div class="tree-row" style="color:var(--primary);font-weight:600">📥 收纳盒 <span class="cnt">6</span></div>
+        </div>
+        <div class="divider"></div>
+        <button class="btn btn-g btn-xs" style="width:100%">＋ 新建目录</button>
+      </div>
+
+      <!-- 列表 -->
+      <div class="list-pane">
+        <div class="toolbar">
+          <b style="font-size:14px">开发工具</b>
+          <span class="chip on" style="color:var(--danger-deep);background:var(--danger-soft);border-color:var(--danger)">● 已失效 4</span>
+          <span class="chip">● 疑似 1</span>
+          <span class="chip">● 正常 407</span>
+          <span class="chip">🗄 已归档 0</span>
+          <span class="chip">📸 有快照</span>
+          <span class="chip">🛠 官网·工具 217</span>
+          <span class="chip">📚 资料站 84</span>
+          <span class="chip">📄 内容页 111</span>
+          <div class="right row">
+            <select class="select" style="width:auto;padding:5px 8px;font-size:12px"><option>按添加时间 ↓</option><option>按状态</option><option>按目录</option></select>
+            <button class="btn btn-g btn-s">☑ 批量操作</button>
+            <button class="btn btn-o btn-s">＋ 手动添加书签</button>
+          </div>
+        </div>
+
+        <table class="table">
+          <thead><tr><th style="width:38px"></th><th>书签</th><th style="width:150px">目录</th><th style="width:96px">状态</th><th style="width:70px">快照</th><th style="width:92px">添加时间</th><th style="width:60px"></th></tr></thead>
+          <tbody>
+            <tr class="row-selected">
+              <td><span class="fav fav-s fc-6">W</span></td>
+              <td><div class="strong">旧版 Webpack 中文文档</div><div class="mono ellip">webpack.docs-china.org/guides</div></td>
+              <td>开发工具 / 前端</td>
+              <td><span class="badge b-danger">● 失效 410</span></td>
+              <td><span class="badge b-ai">📸 3 版</span></td>
+              <td class="num">2023-11-02</td>
+              <td><button class="icon-btn" title="详情">›</button></td>
+            </tr>
+            <tr>
+              <td><span class="fav fav-s fc-4">A</span></td>
+              <td><div>某电商价格监控 · 比价页</div><div class="mono ellip">monitor.example.com/item/8821</div></td>
+              <td>开发工具</td>
+              <td><span class="badge b-warn">● 疑似 · 反爬 403</span></td>
+              <td><span class="hint">—</span></td>
+              <td class="num">2024-06-18</td>
+              <td><button class="icon-btn">›</button></td>
+            </tr>
+            <tr>
+              <td><span class="fav fav-s fc-1">G</span></td>
+              <td><div>GitHub · tikv/raft-rs</div><div class="mono ellip">github.com/tikv/raft-rs</div></td>
+              <td>开发工具 / Rust</td>
+              <td><span class="badge b-ok">● 正常</span></td>
+              <td><span class="hint">—</span></td>
+              <td class="num">2023-02-14</td>
+              <td><button class="icon-btn">›</button></td>
+            </tr>
+            <tr>
+              <td><span class="fav fav-s fc-2">D</span></td>
+              <td><div>Drizzle ORM 文档</div><div class="mono ellip">orm.drizzle.team/docs</div></td>
+              <td>开发工具</td>
+              <td><span class="badge b-ok">● 正常</span></td>
+              <td><span class="badge">📸 1 版</span></td>
+              <td class="num">2025-04-03</td>
+              <td><button class="icon-btn">›</button></td>
+            </tr>
+            <tr style="opacity:.85">
+              <td><span class="fav fav-s fc-6">💳</span></td>
+              <td><div>招商银行 · 一网通登录 <span class="badge b-priv">🛡 隐私域名 · 仅元数据</span></div><div class="mono ellip">www.cmbchina.com/login</div></td>
+              <td>生活</td>
+              <td><span class="badge b-ok">● 正常</span></td>
+              <td><span class="hint">永不快照</span></td>
+              <td class="num">2024-01-09</td>
+              <td><button class="icon-btn">›</button></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="row" style="padding:10px 16px">
+          <span class="hint">筛选结果 4 条（目录：开发工具 · 状态：已失效）</span>
+          <button class="btn btn-g btn-xs right">清空筛选 ✕</button>
+        </div>
+      </div>
+
+      <!-- 详情抽屉 -->
+      <div class="drawer">
+        <div class="row">
+          <span class="fav fc-6" style="width:34px;height:34px;font-size:15px">W</span>
+          <div class="grow">
+            <div class="strong" style="font-size:14px">旧版 Webpack 中文文档</div>
+            <div class="mono ellip">webpack.docs-china.org/guides</div>
+          </div>
+          <button class="icon-btn" title="关闭">✕</button>
+        </div>
+        <div class="row mt12">
+          <span class="badge b-danger">● 已失效 · HTTP 410</span>
+          <span class="hint">上次检测 今天 03:12</span>
+        </div>
+
+        <div class="label mt20">AI 摘要（L1 缓存）</div>
+        <p style="font-size:13px;color:var(--text-2)">Webpack 4+ 中文指南页，讲解资源管理（loader 加载 CSS/图片/字体）与常用配置。内容已稳定不再更新，新版迁移至 webpack.js.org。</p>
+        <div class="row mt6" style="flex-wrap:wrap"><span class="chip">构建工具</span><span class="chip">前端</span><span class="chip">中文文档</span></div>
+
+        <div class="row mt12">
+          <span class="badge">来源：扩展端捕获</span><span class="badge">正文 18KB</span><span class="badge">lang: zh</span>
+        </div>
+
+        <div class="label mt20">快照（3 个版本）</div>
+        <div class="panel" style="padding:6px 10px;font-size:12.5px">
+          <div class="row mt6"><span class="badge b-ai">v3 最新</span><span class="grow">2026-08-02 · 2.1MB</span><button class="btn btn-g btn-xs">查看</button></div>
+          <div class="divider" style="margin:8px 0"></div>
+          <div class="row"><span class="badge">v2</span><span class="grow">2026-03-15 · 2.0MB</span><button class="btn btn-g btn-xs">查看</button></div>
+        </div>
+
+        <div class="label mt20">操作</div>
+        <div class="col" style="gap:8px">
+          <button class="btn btn-o btn-s">📸 立即快照（需原页可达 · 失效页仅可重试探测）</button>
+          <button class="btn btn-o btn-s">📁 移动到…</button>
+          <button class="btn btn-o btn-s">🗄 归档（可回滚）</button>
+          <button class="btn btn-d btn-s">删除（手动 · 二次确认）</button>
+        </div>
+        <div class="callout c-ai mt16"><span class="ico">✦</span><div>原页已失效但有快照——<b>失效≠丢失</b>。也可以在整理中心让 AI 推荐替代站点（P2）。</div></div>
+      </div>
+    </div>
+  </div>
+
+  <details class="talk">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18 · D37 收口）——决议清单如下，原始提案保留供追溯</summary>
+    <div class="talk-b"><div class="label" style="margin-bottom:8px">收口决议（按「最简原则」定案）</div><ul style="padding-left:20px;margin-bottom:10px"><li>默认视图 = <b>全部书签 + 目录树</b>（「需要处理」类入口在概览行动条）</li><li>缓存来源 / 访问频率：收进<b>详情抽屉</b>，列表保持 7 列</li><li>提供<b>多选批量</b>（移动 / 归档 / 快照）</li><li>隐私条目不做共享屏 URL 隐藏（本就不上公开页）；保持 🛡 徽章</li></ul><div class="divider" style="margin:8px 0"></div><div class="label" style="margin-bottom:6px">原始提案（供追溯）</div><ol>
+      <li><b>默认视图：</b>进入书签库默认「全部/树形浏览」（当前为钻取态：死链筛选激活）。日常默认视图你更想看到什么——目录树？全部？还是「需要处理的」（死链+收纳盒）？</li>
+      <li><b>列表列密度：</b>当前 7 列。要不要「缓存来源 / 访问频率」也上列？还是收进详情抽屉保持清爽？</li>
+      <li><b>批量操作：</b>是否需要多选批量（批量快照/移动/归档）？P1 批量快照时需要。</li>
+      <li><b>私密/隐私条目的展示：</b>隐私域名条目在列表里显示「🛡 仅元数据」徽章（当前）——它的 URL 对共享屏幕场景是否也要可隐藏？</li>
+    </ol></div>
+  </details>
+
+</main>
+<footer class="proto-foot">11 · 书签库 · my-favorites 原型 v0.1 · 对应 F1.3 / F7.1 / F2.5 隐私清单 / 红线②</footer>
+</body>
+</html>

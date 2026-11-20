@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 · 侧栏 AI 聊天整理 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .sidepanel {
+    width: 420px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: var(--radius-container);
+    box-shadow: var(--shadow-2); overflow: hidden;
+    margin: 0 auto; display: flex; flex-direction: column; height: 640px;
+  }
+  .sp-h { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  .sp-chat { flex: 1; overflow-y: auto; padding: 16px; }
+  .sp-f { padding: 12px 14px; background: var(--panel); border-top: 1px solid var(--border); }
+  .task-card { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 12px 14px; }
+  .quick-cmd { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .qc { font-size: 11.5px; padding: 4px 10px; border-radius: 6px; border: 1px dashed var(--border-2); color: var(--text-2); cursor: pointer; }
+  .qc:hover { border-color: var(--text); color: var(--text); }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>03 · 侧栏聊天整理</b>（扩展端 · 楔子功能）</span>
+  <span class="hint right">D27：指令即执行，完成即通知，随时撤销</span>
+</header>
+
+<main class="wrap">
+
+  <div class="row mb12">
+    <span class="demo-note">场景串：用户一句话 → AI 直接整理（不先请求批准）→ 完成通知可撤销 → 阶段2 精修通知 → 收纳盒歧义询问。自上而下即真实时间线。</span>
+  </div>
+
+  <div class="sidepanel">
+    <div class="sp-h">
+      <div class="row">
+        <span style="font-size:17px" class="ai-glow">✦ AI 整理</span>
+        <span class="badge right">DeepSeek-V3</span>
+        <button class="icon-btn" title="历史会话">🕘</button>
+      </div>
+      <div class="hint mt6">当前库：1,284 条 · 上次整理：今天 14:32（v43）</div>
+    </div>
+
+    <div class="sp-chat">
+      <div class="chat">
+        <!-- 用户指令 -->
+        <div class="msg u">
+          <span class="avatar">柳</span>
+          <div class="bubble">把开发工具文件夹里 2023 年以前添加的链接，按网页内容重新分类一下</div>
+        </div>
+
+        <!-- AI 直接开工 -->
+        <div class="msg a">
+          <span class="avatar">✦</span>
+          <div class="bubble">
+            好的。范围：<b>开发工具</b> 目录下 2023-01-01 前添加的共 <b>96 条</b>。<br><br>
+            我直接开始：读取正文缓存 → 聚类压缩为约 10 簇 → 只对簇命名与边界调 LLM → <b>整理直接生效</b>（移动 + 改名 + 合并）。<b>不会删除任何东西</b>，完成后告诉你，不满意一句话修正或一键撤销。
+            <div class="hint mt6">预计成本 ≈ ¥0.04 · 约 2 分钟</div>
+          </div>
+        </div>
+
+        <!-- 进行中任务卡 -->
+        <div class="msg a">
+          <span class="avatar">✦</span>
+          <div class="bubble" style="width:100%">
+            <div class="task-card">
+              <div class="row">
+                <span class="spin">⏳</span>
+                <b style="font-size:13px">正在整理「开发工具 / 2023 前」…</b>
+                <span class="badge right">进行中</span>
+              </div>
+              <div class="mt12">
+                <div class="row" style="justify-content:space-between"><span class="hint">① 内容缓存 71+25 条</span><span class="hint">96/96 ✓</span></div>
+                <div class="progress ok mt6"><i style="width:100%"></i></div>
+              </div>
+              <div class="mt6">
+                <div class="row" style="justify-content:space-between"><span class="hint">② 聚类与命名</span><span class="hint">7/10 簇</span></div>
+                <div class="progress ai mt6"><i style="width:70%"></i></div>
+              </div>
+              <div class="mt6">
+                <div class="row" style="justify-content:space-between"><span class="hint">③ 逐条归属判定</span><span class="hint">62/96</span></div>
+                <div class="progress mt6"><i style="width:65%"></i></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 完成通知（可撤销） -->
+        <div class="msg a">
+          <span class="avatar">✦</span>
+          <div class="bubble" style="width:100%">
+            <div class="task-card" style="border-color:var(--text)">
+              <div class="row">
+                <span style="font-size:15px">✅</span>
+                <b style="font-size:13px">整理完成（v43）</b>
+                <span class="badge right">已生效</span>
+              </div>
+              <div class="row mt12" style="gap:16px;font-size:12.5px;color:var(--text-2)">
+                <span>📦 搬家 <b style="color:var(--text)">61</b></span>
+                <span>✏️ 改名 <b style="color:var(--text)">3</b></span>
+                <span>🔀 合并 <b style="color:var(--text)">2</b> 组</span>
+              </div>
+              <p class="hint mt6">另发现 5 条适合归档的旧书签——<b style="color:var(--text)">没有动它们</b>，等你在明细里处理。</p>
+              <div class="row mt12">
+                <a class="btn btn-o btn-s" href="04-整理通知与明细.html">看看改了什么</a>
+                <button class="btn btn-p btn-s">↩ 撤销这次整理</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 阶段2 精修通知（二次惊喜） -->
+        <div class="msg a">
+          <span class="avatar">✦</span>
+          <div class="bubble" style="width:100%">
+            <div class="task-card" style="background:var(--ai-soft)">
+              <div class="row">
+                <span style="font-size:15px">✦</span>
+                <div class="grow">
+                  <b style="font-size:13px">AI 已按网页内容精修 43 条分类</b>
+                  <div class="hint mt6">阶段 2 后台完成——这是在规则整理基础上的内容级修正，同样直接生效、可撤销。</div>
+                </div>
+              </div>
+              <div class="row mt12">
+                <a class="btn btn-o btn-s" href="04-整理通知与明细.html">看看改了什么</a>
+                <button class="btn btn-g btn-s">不用管了</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 歧义询问 -->
+        <div class="msg a">
+          <span class="avatar">✦</span>
+          <div class="bubble" style="width:100%">
+            <b style="font-size:13px">另外，收纳盒里有 2 条我不太确定，先留在那里，想问下你：</b>
+            <div class="panel-2 mt12" style="padding:10px 12px">
+              <div class="row" style="align-items:flex-start">
+                <span class="fav fc-7">W</span>
+                <div class="grow">
+                  <div class="ellip strong">「西湖区精装两居 整租 6500」</div>
+                  <div class="hint">更像哪个分类？</div>
+                  <div class="row mt6" style="flex-wrap:wrap">
+                    <span class="chip">📁 生活 / 租房</span>
+                    <span class="chip">📁 生活 / 临时</span>
+                    <span class="chip">先留在收纳盒</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sp-f">
+      <div class="quick-cmd">
+        <span class="qc">整理整个库</span>
+        <span class="qc">合并重复</span>
+        <span class="qc">整理 开发 文件夹</span>
+        <span class="qc">给学习目录拍快照</span>
+        <span class="qc">撤销上次的整理</span>
+      </div>
+      <div class="chat-input">
+        <textarea rows="1" placeholder="告诉我要怎么整理…"></textarea>
+        <button class="btn btn-p btn-s">发送</button>
+      </div>
+    </div>
+  </div>
+
+  <details class="talk" style="max-width:460px;margin-left:auto;margin-right:auto">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18 · D37 收口）——决议清单如下，原始提案保留供追溯</summary>
+    <div class="talk-b"><div class="label" style="margin-bottom:8px">收口决议（按「最简原则」定案）</div><ul style="padding-left:20px;margin-bottom:10px"><li>大动作例外：预计成本 &gt;¥1 的整理，执行前<b>提示一次</b>（BYOK 花的是真钱）；变更项数不拦（可撤销）</li><li>执行中打断：<b>新指令替换旧指令</b>并取消未完成执行（乐观锁保证一致性）</li></ul><div class="divider" style="margin:8px 0"></div><div class="label" style="margin-bottom:6px">原始提案（供追溯）</div><ol>
+      <li><b>大动作例外：</b>D27 下指令即执行。若预计成本超过阈值（如全库整理 &gt;¥1）或变更项数超大（&gt;500 项），是否例外出一次「这次动作很大，确认？」？<span class="opt">建议</span>：仅成本超阈值时提示（BYOK 用户花的是真钱），项数不拦（反正可撤销）。</li>
+      <li><b>执行中的打断：</b>整理进行 2 分钟内用户又发新指令，是排队、合并、还是取消前一次？<span class="opt">建议</span>：新指令替换旧指令并取消未完成的执行（乐观锁保证一致性）。</li>
+    </ol></div>
+  </details>
+
+</main>
+<footer class="proto-foot">03 · 侧栏聊天整理 · my-favorites 原型 v0.2 · 对应 F3.1–F3.9 / D27（无确认流） / F1.5 歧义询问</footer>
+</body>
+</html>

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>14 · 管理台维护报告 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .admin { display: flex; min-height: 700px; border-radius: 14px; overflow: hidden; border: 1px solid var(--border); background: var(--panel); box-shadow: var(--shadow-2); }
+  .ad-nav { width: 190px; background: var(--panel-2); border-right: 1px solid var(--border); padding: 14px 10px; flex: none; }
+  .ad-nav .logo { padding: 6px 12px 16px; font-weight: 800; font-size: 15px; }
+  .ad-nav .ni { display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-radius: 9px; font-size: 13.5px; color: var(--text-2); cursor: pointer; margin-bottom: 2px; }
+  .ad-nav .ni.on { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+  .dup-group { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>14 · 维护报告</b>（死链周报 + 查重 · F5）</span>
+  <span class="hint right">留存钩子④ · 三级保守判定 · 措辞用「建议」</span>
+</header>
+
+<main class="wrap">
+
+  <div class="admin">
+    <div class="ad-nav">
+      <div class="logo">⭐ my-favorites</div>
+      <div class="ni">📊 概览</div>
+      <div class="ni">📚 书签库</div>
+      <div class="ni">📥 收纳盒<span class="badge" style="margin-left:auto;background:var(--danger);color:#fff;border-radius:999px;padding:1px 7px;font-size:10.5px">6</span></div>
+      <div class="ni">✨ 整理</div>
+      <div class="ni">🌐 导航站</div>
+      <div class="ni on">🩺 维护报告</div>
+      <div class="divider"></div>
+      <div class="ni">⚙️ 设置</div>
+    </div>
+
+    <div style="flex:1;padding:20px 24px;min-width:0">
+      <div class="row">
+        <div>
+          <div style="font-size:18px;font-weight:700">第 46 周 · 维护报告</div>
+          <div class="hint mt6">检测运行于 周日 03:00 · 1,284 条 · 分层探测耗时 5 分 48 秒 · 节省约 80% 请求量</div>
+        </div>
+        <div class="right row">
+          <button class="btn btn-o btn-s">🕘 历史报告</button>
+          <button class="btn btn-o btn-s">📋 复制本周摘要</button>
+          <button class="btn btn-p btn-s">▶ 立即重新检测</button>
+        </div>
+      </div>
+
+      <div class="grid4 mt16" style="gap:12px">
+        <div class="stat"><div class="v bad">17</div><div class="l">确认失效</div></div>
+        <div class="stat"><div class="v warn">9</div><div class="l">疑似失效（仅标注）</div></div>
+        <div class="stat"><div class="v">23</div><div class="l">重复组</div></div>
+        <div class="stat"><div class="v">3</div><div class="l">内容变更已刷新摘要</div></div>
+      </div>
+
+      <div class="legend mt12">
+        <span><i style="background:var(--danger)"></i>确认失效：DNS 失败 / 410 / 持续 5xx</span>
+        <span><i style="background:var(--warn)"></i>疑似失效：反爬 403/429 · 可能误判，只标注不处理</span>
+        <span><i style="background:var(--ok)"></i>正常：HEAD 2xx/3xx，异常才 GET 复验</span>
+      </div>
+
+      <!-- 死链明细 -->
+      <div class="card mt20">
+        <div class="card-h">
+          <span class="t">确认失效明细（17）——哪些链接坏了、为什么访问不了</span>
+          <div class="right row">
+            <span class="badge b-ai">12 条有快照 · 直接回看</span>
+            <span class="badge b-danger">5 条无快照</span>
+          </div>
+        </div>
+        <table class="table">
+          <thead><tr><th>书签</th><th style="width:150px">目录</th><th style="width:150px">失败原因</th><th style="width:200px">建议（永不自动执行）</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><div class="strong">旧版 Webpack 中文文档</div><div class="mono ellip">webpack.docs-china.org/guides</div></td>
+              <td>开发工具 / 前端</td>
+              <td><span class="badge b-danger">HTTP 410 · 187 天</span></td>
+              <td><div class="row"><span class="badge b-ai">📸 查看快照</span><button class="btn btn-g btn-xs">归档</button><button class="btn btn-g btn-xs">✦ 推荐替代站</button></div></td>
+            </tr>
+            <tr>
+              <td><div>2019 前端大会活动页</div><div class="mono ellip">fe-summit-2019.example.com</div></td>
+              <td>学习资料</td>
+              <td><span class="badge b-danger">DNS 解析失败 · 域名已过期</span></td>
+              <td><div class="row"><span class="badge b-danger">⚠️ 无快照</span><button class="btn btn-g btn-xs">归档</button><button class="btn btn-g btn-xs">删除建议</button></div></td>
+            </tr>
+            <tr>
+              <td><div>某框架 v1 文档站</div><div class="mono ellip">v1.framework-example.dev</div></td>
+              <td>开发工具</td>
+              <td><span class="badge b-danger">持续 5xx · 3 次复验</span></td>
+              <td><div class="row"><span class="badge b-ai">📸 查看快照</span><button class="btn btn-g btn-xs">归档</button></div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 疑似失效 -->
+      <div class="card mt16">
+        <div class="card-h"><span class="t">疑似失效（9）——反爬拦截，仅标注观察</span><span class="hint right">连续 2 个周期仍拦截才升级为「确认失效」候选</span></div>
+        <div class="card-b s" style="padding:0">
+          <div class="lrow"><span class="fav fav-s fc-4">A</span><div class="grow">某电商价格监控 · 比价页 <span class="mono">HTTP 403</span></div><span class="badge b-warn">疑似 · 第 1 周期</span><button class="btn btn-g btn-xs">改用手动验证</button></div>
+          <div class="lrow"><span class="fav fav-s fc-2">S</span><div class="grow">某社交平台个人主页 <span class="mono">HTTP 429</span></div><span class="badge b-warn">疑似 · 第 3 周期</span><button class="btn btn-g btn-xs">手动验证</button></div>
+        </div>
+      </div>
+
+      <!-- 重复组 -->
+      <div class="card mt16">
+        <div class="card-h"><span class="t">重复组明细（23 组 · 同域名同标题 / 规范 URL 撞车）</span><button class="btn btn-p btn-s right">一键合并全部（直接生效 · 7 天内可撤销）</button></div>
+        <div class="card-b s">
+          <div class="dup-group" data-fold>
+            <div class="diff-g-h">Vue Router 官方文档 <span class="badge">3 条 · 相似度 96%</span><span class="right hint">▾</span></div>
+            <div class="diff-r">
+              <span class="badge b-ok">保留</span>
+              <div class="grow"><div class="ellip">vue-router.vuejs.org（2022-03-12 收藏 · 最早）</div></div>
+            </div>
+            <div class="diff-r">
+              <span class="badge op-merge">合并</span>
+              <div class="grow"><div class="ellip">router.vuejs.org/zh/（2023-08-01 · URL 规范化后撞车）</div></div>
+            </div>
+            <div class="diff-r">
+              <span class="badge op-merge">合并</span>
+              <div class="grow"><div class="ellip">Vue Router 4 文档 · 中文（2024-01-15 · 标题相似）</div></div>
+            </div>
+            <div class="lrow" style="background:var(--warn-soft)">
+              <span class="hint">💡 你在整理中心记忆过偏好：「同一文档的多个版本共存时不合并」——AI 已在提案中跳过此组</span>
+              <button class="btn btn-o btn-xs right">仍要合并</button>
+            </div>
+          </div>
+          <div class="dup-group mt12" data-fold>
+            <div class="diff-g-h">Tailwind CSS 文档 <span class="badge">2 条</span><span class="right hint">▸</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 内容变更 -->
+      <div class="card mt16">
+        <div class="card-h"><span class="t">内容变更与摘要刷新（3）</span></div>
+        <div class="card-b s" style="padding:0">
+          <div class="lrow"><span class="fav fav-s fc-3">D</span><div class="grow">Drizzle ORM 文档 · 检测到正文变化（v0.44 → v0.45 发布说明）</div><span class="badge b-ok">摘要已刷新</span><button class="btn btn-g btn-xs">查看 diff</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <details class="talk">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18 · D37 收口）——决议清单如下，原始提案保留供追溯</summary>
+    <div class="talk-b"><div class="label" style="margin-bottom:8px">收口决议（按「最简原则」定案）</div><ul style="padding-left:20px;margin-bottom:10px"><li>周报触达：提供「<b>复制本周摘要</b>」按钮；不自建邮件推送</li><li>失效处理动线：报告<b>行内快捷动作</b>（确认现状，不跳页）</li><li>检测频率：<b>每周 + 手动</b>；不做高频模式（NAS 负载克制）</li></ul><div class="divider" style="margin:8px 0"></div><div class="label" style="margin-bottom:6px">原始提案（供追溯）</div><ol>
+      <li><b>周报触达：</b>自建端无推送渠道，当前触达 = 管理台 + 扩展角标。要不要在报告页顶部提供「复制本周摘要」生成一段可贴给家人的文本？（或坚持纯站内）</li>
+      <li><b>失效处理动线：</b>当前在报告行内给「查看快照/归档/删除建议」快捷动作（一条处理完不用跳页）vs 全部收进书签详情？前者效率高、后者动线统一。</li>
+      <li><b>检测频率：</b>每周（当前）+ 手动触发。要不要提供「高频模式（每天）」给重度用户？成本与 NAS 负载需权衡。</li>
+    </ol></div>
+  </details>
+
+</main>
+<footer class="proto-foot">14 · 维护报告 · my-favorites 原型 v0.1 · 对应 F5.1–F5.5 / D3 三级判定 / 红线③</footer>
+</body>
+</html>

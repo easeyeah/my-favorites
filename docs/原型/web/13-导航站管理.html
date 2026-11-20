@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>13 · 管理台导航站管理 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .admin { display: flex; min-height: 700px; border-radius: 14px; overflow: hidden; border: 1px solid var(--border); background: var(--panel); box-shadow: var(--shadow-2); }
+  .ad-nav { width: 190px; background: var(--panel-2); border-right: 1px solid var(--border); padding: 14px 10px; flex: none; }
+  .ad-nav .logo { padding: 6px 12px 16px; font-weight: 800; font-size: 15px; }
+  .ad-nav .ni { display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-radius: 9px; font-size: 13.5px; color: var(--text-2); cursor: pointer; margin-bottom: 2px; }
+  .ad-nav .ni.on { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+  .tpl-card { border: 1.5px solid var(--border-2); border-radius: 12px; overflow: hidden; cursor: pointer; }
+  .tpl-card.on, .tpl-card:hover { border-color: var(--primary); }
+  .tpl-thumb { height: 86px; background: var(--panel-2); padding: 10px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+  .tpl-thumb i { border-radius: 4px; background: var(--border); display: flex; align-items: center; justify-content: center; font-size: 9px; color: var(--text-3); }
+  .sw { width: 26px; height: 26px; border-radius: 8px; cursor: pointer; border: 2px solid transparent; }
+  .sw.on { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-ring); }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>13 · 导航站管理</b>（模板 / 主题 / 发布控制）</span>
+  <span class="hint right">F4 · 改完实时预览 · 发布走随机 slug</span>
+</header>
+
+<main class="wrap">
+
+  <div class="admin">
+    <div class="ad-nav">
+      <div class="logo">⭐ my-favorites</div>
+      <div class="ni">📊 概览</div>
+      <div class="ni">📚 书签库</div>
+      <div class="ni">📥 收纳盒<span class="badge" style="margin-left:auto;background:var(--danger);color:#fff;border-radius:999px;padding:1px 7px;font-size:10.5px">6</span></div>
+      <div class="ni">✨ 整理</div>
+      <div class="ni on">🌐 导航站</div>
+      <div class="ni">🩺 维护报告</div>
+      <div class="divider"></div>
+      <div class="ni">⚙️ 设置</div>
+    </div>
+
+    <div style="flex:1;padding:20px 24px;display:flex;gap:22px;min-width:0">
+      <!-- 配置区 -->
+      <div style="width:400px;flex:none">
+        <div style="font-size:17px;font-weight:700;margin-bottom:14px">导航站设置</div>
+
+        <div class="label">模板（M1 上线 1 套，P1 扩至 4 套）</div>
+        <div class="grid2" style="gap:10px">
+          <div class="tpl-card on">
+            <div class="tpl-thumb"><i>▲</i><i>▲</i><i>▲</i><i>▲</i><i>▲</i><i>▲</i><i>▲</i><i>▲</i></div>
+            <div class="row" style="padding:8px 12px"><b style="font-size:13px">经典宫格</b><span class="badge b-primary right">使用中</span></div>
+          </div>
+          <div class="tpl-card" style="opacity:.6">
+            <div class="tpl-thumb" style="grid-template-columns:1fr"><i>≡ 极简清单</i><i>≡</i><i>≡</i></div>
+            <div class="row" style="padding:8px 12px"><span style="font-size:13px">极简清单</span><span class="badge right">P1</span></div>
+          </div>
+          <div class="tpl-card" style="opacity:.6">
+            <div class="tpl-thumb"><i>▄</i><i>▄</i><i>▄</i><i>▄</i><i>▄</i><i>▄</i></div>
+            <div class="row" style="padding:8px 12px"><span style="font-size:13px">卡片瀑布流</span><span class="badge right">P1</span></div>
+          </div>
+          <div class="tpl-card" style="opacity:.6">
+            <div class="tpl-thumb" style="grid-template-columns:1fr 2fr"><i>🙂</i><i></i><i></i></div>
+            <div class="row" style="padding:8px 12px"><span style="font-size:13px">个人主页</span><span class="badge right">P1</span></div>
+          </div>
+        </div>
+
+        <div class="label mt20">站点标题</div>
+        <input class="input" value="柳的导航站">
+
+        <div class="label mt12">主题色</div>
+        <div class="row">
+          <span class="sw on" style="background:#4f46e5"></span>
+          <span class="sw" style="background:#0e9384"></span>
+          <span class="sw" style="background:#f79009"></span>
+          <span class="sw" style="background:#e5484d"></span>
+          <span class="sw" style="background:#1a1d29"></span>
+          <span class="hint">跟随系统深浅色 <label class="switch" style="margin-left:4px"><input type="checkbox" checked><i></i></label></span>
+        </div>
+
+        <div class="label mt12">搜索框</div>
+        <div class="row">
+          <select class="select" style="max-width:200px"><option>本地书签搜索</option><option>+ 百度</option><option>+ 必应</option></select>
+          <span class="hint">可多选外部引擎，Tab 切换</span>
+        </div>
+
+        <div class="label mt12">显示选项</div>
+        <div class="col" style="gap:8px;font-size:13px">
+          <label class="row"><input type="checkbox" checked style="accent-color:var(--primary)">显示书签摘要（仅 L1 摘要，<b>永不展示快照内容</b>）</label>
+          <label class="row"><input type="checkbox" checked style="accent-color:var(--primary)">失效书签显示「📸 快照可用」标识</label>
+          <label class="row"><input type="checkbox" checked style="accent-color:var(--primary)">分组可折叠，记住展开状态</label>
+        </div>
+      </div>
+
+      <!-- 发布 + 预览 -->
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:16px">
+        <!-- 站点化分析（D30） -->
+        <div class="card">
+          <div class="card-h"><span class="t">🏛 站点化分析（D30 · 导航站只收站点入口）</span><span class="badge right">上次分析 3 分钟前</span></div>
+          <div class="card-b s" style="padding:0">
+            <div class="lrow"><span class="badge b-primary">402</span><div class="grow"><b>官网 / 工具 / 服务类站点</b>（首页 · 主页面）→ 进入导航站</div><button class="btn btn-g btn-xs">看名单</button></div>
+            <div class="lrow"><span class="badge">84</span><div class="grow"><b>资料类站点</b>（文档 / wiki / 教程首页，如 MDN、Rust Book）→ 默认<b>不入导航</b>（D31），保留在书签库</div><button class="btn btn-g btn-xs">看名单</button></div>
+            <div class="lrow"><span class="badge">132</span><div class="grow">同域文章归并：多篇内容页 → 一个站点卡（点击直达首页）</div><button class="btn btn-g btn-xs">看明细</button></div>
+            <div class="lrow"><span class="badge">54</span><div class="grow">只收藏过文章、没有首页 → 域名根升级为站点卡（默认开启 · 可撤销）</div><button class="btn btn-g btn-xs">看名单</button></div>
+            <div class="lrow"><span class="badge">798</span><div class="grow">内容级书签（文章 / 详情 / 商品）→ 保留在书签库，不进导航</div><button class="btn btn-g btn-xs">在书签库筛选</button></div>
+            <div class="lrow" style="background:var(--panel-2)">
+              <span class="hint grow">识别 = 规则信号（URL 路径深度 / 文章路径模式 / 域名映射表分类）+ AI 信号（L1 摘要判断三类：官网·工具 / 资料站 / 内容页）。分析是<b>投影</b>，不改书签数据（D16），可随时重建。</span>
+              <button class="btn btn-o btn-xs">↻ 重新分析</button>
+            </div>
+            <div class="lrow">
+              <span class="grow" style="font-size:13px">包含资料类站点（文档 / wiki / 教程首页）</span>
+              <span class="hint">默认关 · 开启后资料站以独立「📚 资料」分组沉底显示，不占主宫格</span>
+              <label class="switch"><input type="checkbox"><i></i></label>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="t">发布控制</span><span class="badge b-ok right">已发布</span></div>
+          <div class="card-b">
+            <div class="col" style="gap:10px;font-size:13px">
+              <label class="row"><input type="radio" name="vis" style="accent-color:var(--primary)">🔒 私有 —— 仅扩展内使用（新标签页 / 侧栏）</label>
+              <label class="row"><input type="radio" name="vis" checked style="accent-color:var(--primary)">🔗 随机链接公开 —— 不可枚举 slug，仅元数据+摘要（D5：无公开广场）</label>
+              <label class="row"><input type="radio" name="vis" style="accent-color:var(--primary)">🔑 密码访问 —— 分享链接 + 密码（P1）</label>
+            </div>
+            <div class="row mt12">
+              <input class="input mono grow" readonly value="https://nas-home.local:3000/s/Kx7mQp2vRt9w">
+              <button class="btn btn-o btn-s">📋 复制</button>
+              <button class="btn btn-o btn-s">↻ 重新生成（旧链接立即失效）</button>
+            </div>
+            <div class="callout c-info mt12"><span class="ico">⚖️</span><div>公开页永久红线：<b>不展示快照内容、不做公开检索、敏感词过滤 + 举报入口</b>（§9）。页脚水印「⚡ 由 my-favorites 生成」——自建端可自由关闭（D12 全功能开放）。</div></div>
+            <div class="row mt12" style="font-size:13px">
+              <span class="hint grow">页脚水印</span>
+              <label class="switch"><input type="checkbox" checked><i></i></label>
+            </div>
+          </div>
+        </div>
+
+        <!-- 实时预览 -->
+        <div class="card grow">
+          <div class="card-h">
+            <span class="t">实时预览</span>
+            <span class="hint">改动即生效（站内自动同步，无需手动发布）</span>
+            <button class="btn btn-o btn-xs right">在新标签打开 ↗</button>
+          </div>
+          <div class="card-b" style="background:var(--bg)">
+            <div class="panel" style="padding:18px 20px;max-width:520px">
+              <div class="row"><b style="font-size:15px">柳的导航站</b><span class="hint">46 周五 · 更新于 3 分钟前</span></div>
+              <div class="panel-2 mt12" style="padding:8px 12px;font-size:12px;color:var(--text-3)">🔍 搜索你的书签…</div>
+              <div class="strong mt12" style="font-size:12px;color:var(--text-2)">📌 常用</div>
+              <div class="grid5 mt6" style="gap:8px">
+                <div class="tile" style="padding:10px 6px"><span class="fav fc-1" style="width:28px;height:28px">G</span><span class="nm">GitHub</span></div>
+                <div class="tile" style="padding:10px 6px"><span class="fav fc-2" style="width:28px;height:28px">M</span><span class="nm">MDN</span></div>
+                <div class="tile" style="padding:10px 6px"><span class="fav fc-3" style="width:28px;height:28px">D</span><span class="nm">Drizzle</span></div>
+                <div class="tile" style="padding:10px 6px"><span class="fav fc-5" style="width:28px;height:28px">F</span><span class="nm">Figma</span></div>
+                <div class="tile" style="padding:10px 6px"><span class="flag badge b-ai" style="font-size:9px;padding:1px 5px">📸</span><span class="fav fc-6" style="width:28px;height:28px">W</span><span class="nm">Webpack旧版</span></div>
+              </div>
+              <div class="strong mt12" style="font-size:12px;color:var(--text-2)">📁 设计灵感</div>
+              <div class="grid5 mt6" style="gap:8px">
+                <div class="tile" style="padding:10px 6px"><span class="fav fc-6" style="width:28px;height:28px">D</span><span class="nm">Dribbble</span></div>
+                <div class="tile" style="padding:10px 6px"><span class="fav fc-5" style="width:28px;height:28px">M</span><span class="nm">Mobbin</span></div>
+              </div>
+              <div class="row mt16" style="justify-content:center">
+                <span class="hint">⚡ 由 my-favorites 生成</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <details class="talk">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18 · D37 收口）——决议清单如下，原始提案保留供追溯</summary>
+    <div class="talk-b"><div class="label" style="margin-bottom:8px">收口决议（按「最简原则」定案）</div><ul style="padding-left:20px;margin-bottom:10px"><li>公开站摘要两行固定；分组范围可独立微调——与 D23 显式发布集合<b>同一机制</b>，无需新功能</li><li>模板优先级：先做<b>极简清单</b>（成本低）</li><li>站点化严格度已定（D31）：默认严格首页 + 自定义卡例外</li><li>无首页域名升级：<b>默认开启 + 通知说明</b></li></ul><div class="divider" style="margin:8px 0"></div><div class="label" style="margin-bottom:6px">原始提案（供追溯）</div><ol>
+      <li><b>新标签页与公开站的关系（D29 已定配置各自独立）：</b>公开站的摘要长度（两行）与分组范围是否允许独立于私有版微调？</li>
+      <li><b>发布内容范围：</b>公开链接是否支持「只发布部分分组」（如只公开开发工具组，隐藏生活组）？涉及隐私细粒度控制。</li>
+      <li><b>模板优先级：</b>4 套模板中，M1 之后先做哪套——极简清单（成本低）还是个人主页（对 P2 人群吸引力大）？</li>
+      <li><b>站点化的严格度（D30 衍生）：</b>AI 分析默认严格首页；「自定义卡片」是唯一允许任意 URL（含深链）的手动例外。高频深链（点击 ≥N 次）要不要自动获得直达卡？<span class="opt">建议</span>：不自动，只弹提示引导建自定义卡。</li>
+      <li><b>无首页域名升级：</b>只收藏过文章的域名自动升级为站点卡（上表 54 条）——默认开启 + 通知说明（当前设计）vs 先列清单让用户逐个确认？</li>
+    </ol></div>
+  </details>
+
+</main>
+<footer class="proto-foot">13 · 导航站管理 · my-favorites 原型 v0.1 · 对应 F4.1/F4.3/F4.6/F4.7 / 红线④ / D5 / D12</footer>
+</body>
+</html>

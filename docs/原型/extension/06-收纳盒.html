@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>06 · 自动收纳（懒人模式） — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .bm-bar { display: flex; gap: 2px; padding: 5px 10px; background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: 12px; align-items: center; }
+  .bm-bar .bm { padding: 4px 9px; border-radius: 6px; color: var(--text-2); white-space: nowrap; }
+  .bm-bar .bm:hover { background: var(--panel); }
+  .bm-bar .bm.inbox-b { background: var(--primary-soft); color: var(--primary); font-weight: 700; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 35%, transparent); }
+  .inbox-panel { width: 620px; margin: 0 auto; }
+  .conf-bar { display: flex; align-items: center; gap: 8px; }
+  .conf-bar .progress { width: 90px; }
+  .item-state { width: 200px; flex: none; }
+  /* popup 顶部标签页（窄容器的统一导航语法） */
+  .ptabs { display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-bottom: 0; border-radius: 10px 10px 0 0; padding: 8px 10px 0; align-items: center; }
+  .ptab { padding: 8px 14px; font-size: 13.5px; color: var(--text-2); border-radius: 8px 8px 0 0; cursor: pointer; border-bottom: 2px solid transparent; font-weight: 600; }
+  .ptab.on { color: var(--text); border-bottom-color: var(--text); }
+  .ptab.right { margin-left: auto; }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>06 · 自动收纳</b>（懒人模式 · F1.5）</span>
+  <span class="hint right">收纳盒永不丢书签 · 全部移动可回滚（D20 镜像模式）</span>
+</header>
+
+<main class="wrap">
+
+  <!-- 1. 书签栏语境 -->
+  <div class="mb12"><span class="demo-note">🧭 本页三个区块分属三层，样式不同是<b>刻意分层</b>：<b>浏览器原生 UI</b>（投递口文件夹——样式由浏览器决定，我们只能创建和监听）/ <b>页面注入 toast</b>（注入到网页里的轻提示）/ <b>产品管理面板</b>（popup，与 07 设置页同一套设计系统）。只有第三层是我们的风格。</span></div>
+  <div class="mb12"><span class="demo-note">① <b>投递口</b>：书签栏上的系统文件夹「📥 收纳盒」——拖拽 / 右键收藏进去即可，AI 自动归位到真实目录。<b>技术约束（已确认）</b>：浏览器原生文件夹下拉无法被扩展拦截或替换，文件夹上也不能加角标——所以文件夹只是物理投递口，<b>管理界面的真正入口是扩展工具栏图标（角标 = 待处理数）</b>，见 ③。</span></div>
+  <div class="browser">
+    <div class="browser-bar">
+      <span class="dots"><i></i><i></i><i></i></span><span class="urlbar">🔑 随便一个网页</span>
+      <span style="position:relative;margin-left:6px;cursor:pointer" title="my-favorites · 收纳盒待处理 2">
+        <span style="display:inline-flex;width:22px;height:22px;border-radius:6px;background:var(--text);color:var(--primary-fg);align-items:center;justify-content:center;font-size:12px">⭐</span>
+        <span style="position:absolute;top:-7px;right:-9px;background:var(--text);color:var(--primary-fg);border-radius:999px;font-size:9.5px;padding:0 5px;font-weight:700">2</span>
+      </span>
+    </div>
+    <div class="bm-bar">
+      <span class="bm">⭐ 常用</span><span class="bm">📁 开发工具</span><span class="bm">📁 设计</span>
+      <span class="bm inbox-b">📥 收纳盒</span>
+      <span class="bm">📁 学习资料</span><span class="bm">📁 生活</span>
+      <span class="hint" style="margin-left:auto;font-size:11px">文件夹无角标（原生限制）· 待处理数看右上工具栏图标</span>
+    </div>
+    <div class="browser-body" style="padding:60px;text-align:center;color:var(--text-3)">（当前网页内容区）</div>
+  </div>
+
+  <!-- 2. 归位 toast -->
+  <div style="margin-top:30px"><span class="demo-note">② 归位后的轻提示（全自动默认形态：一闪而过，可点撤销；确认模式下才停留等待点击）</span></div>
+  <div class="row mt12" style="gap:16px">
+    <div class="toast">✦ 已归位 3 条<span class="hint">版本 v44 · 随时可撤销</span><button class="btn btn-o btn-xs">看看归到哪了</button><button class="btn btn-o btn-xs">撤销</button></div>
+    <span class="hint">↖ 全自动模式（默认）：每次归位都轻提示 · 通知方式可在设置调整（轻提示 / 通知卡 / 静默）</span>
+  </div>
+
+  <!-- 3. 收纳盒面板 -->
+  <div style="margin-top:34px"><span class="demo-note">③ 管理面板（真正的管理入口：点扩展工具栏图标 → popup）。窄容器没有放左侧菜单的空间——popup 统一用<b>顶部标签页</b>导航：「📥 收纳盒」（本页）／「⭐ 快速收藏」（原型 02）／「✦ AI 整理」（跳侧栏 03）。</span></div>
+  <div class="inbox-panel mt12">
+    <div class="ptabs">
+      <span class="ptab on">📥 收纳盒</span>
+      <span class="ptab">⭐ 快速收藏</span>
+      <span class="ptab">✦ AI 整理</span>
+      <span class="ptab">🕘 历史</span>
+      <span class="ptab right">⚙️</span>
+    </div>
+    <div class="card" style="border-top-left-radius:0;border-top-right-radius:0">
+    <div class="card-h">
+      <span class="t">📥 收纳盒</span>
+      <span class="badge">6 条</span>
+      <div class="right row">
+        <span class="hint">确认模式（设置项）</span>
+        <label class="switch" title="全自动模式：静默归位（默认）"><input type="checkbox" checked><i></i></label>
+        <span class="hint">全自动（默认 · D27）</span>
+      </div>
+    </div>
+    <div class="card-b s" style="padding:0">
+
+      <!-- 处理中 -->
+      <div class="lrow">
+        <span class="fav fc-7">W</span>
+        <div class="grow">
+          <div class="ellip strong">Winter 2026 新款冲锋衣选购指南</div>
+          <div class="hint">刚刚 · 通道A 内容已捕获（4.2KB 正文）</div>
+        </div>
+        <div class="item-state row">
+          <span class="pulse">✦</span><span class="hint">AI 内容级分类中…</span>
+        </div>
+        <button class="btn btn-g btn-xs">手动选目录</button>
+      </div>
+
+      <!-- 已自动归位 -->
+      <div class="lrow" style="background:var(--panel-2)">
+        <span class="fav fc-1">R</span>
+        <div class="grow">
+          <div class="ellip strong">Rust 异步编程指南（rust-lang.github.io）</div>
+          <div class="conf-bar mt6">
+            <span class="badge">已自动归位</span><span class="badge b-primary">开发工具 / Rust</span>
+            <span class="hint">置信 92% · 版本 v44</span>
+          </div>
+        </div>
+        <div class="item-state row" style="justify-content:flex-end">
+          <button class="btn btn-o btn-xs">改目录</button>
+          <button class="btn btn-o btn-xs">撤销</button>
+        </div>
+      </div>
+
+      <!-- 歧义滞留 -->
+      <div class="lrow" style="background:var(--warn-soft)">
+        <span class="fav fc-4">山</span>
+        <div class="grow">
+          <div class="ellip strong">武功山徒步全攻略 · 露营路线与装备清单</div>
+          <div class="conf-bar mt6">
+            <span class="badge b-warn">歧义 · 置信 41%</span>
+            <span class="hint">「生活 / 户外」和「学习资料 / 攻略」都很接近 —— <b>不强行移动，等你一句话</b></span>
+          </div>
+          <div class="row mt6" style="flex-wrap:wrap">
+            <span class="chip">📁 生活 / 户外</span>
+            <span class="chip">📁 学习资料 / 攻略</span>
+            <span class="chip">＋ 新建目录「旅行」</span>
+            <span class="chip">先留在收纳盒</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 隐私域名 -->
+      <div class="lrow">
+        <span class="fav fc-6">💳</span>
+        <div class="grow">
+          <div class="ellip strong">招商银行 · 一网通登录</div>
+          <div class="row mt6">
+            <span class="badge b-priv">🛡 隐私域名 · 仅存 URL</span>
+            <span class="hint">不抓内容 / 不送 AI / 不快照 · 需手动选目录</span>
+          </div>
+        </div>
+        <div class="item-state row" style="justify-content:flex-end">
+          <button class="btn btn-o btn-xs">手动选目录</button>
+        </div>
+      </div>
+
+      <!-- 失败重试 -->
+      <div class="lrow">
+        <span class="fav fc-2">A</span>
+        <div class="grow">
+          <div class="ellip strong">某论坛帖子 · 标题截断的示例链接…</div>
+          <div class="hint mt6">AI 服务暂时不可用（llm_unavailable）· 已排入重试队列 · <span class="badge b-warn">第 2/5 次</span></div>
+        </div>
+        <div class="item-state row" style="justify-content:flex-end">
+          <button class="btn btn-g btn-xs">立即重试</button>
+          <button class="btn btn-g btn-xs">手动处理</button>
+        </div>
+      </div>
+
+      <!-- 定时清扫 -->
+      <div class="lrow" style="background:var(--panel-2)">
+        <span>🕒</span>
+        <div class="grow hint">每小时定时清扫兜底：离线期间堆积的收纳盒书签会在服务端/本地批量处理（浏览器事件 + 定时兜底双保险）</div>
+        <span class="badge">上次清扫 14:00</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. 归位历史 -->
+  <div style="margin-top:30px"><span class="demo-note">④ 归位历史（可回滚）：所有自动移动写入 organize_version，与聊天整理共用回滚体系</span></div>
+  <div class="inbox-panel card mt12">
+    <div class="card-h"><span class="t">归位历史</span><span class="hint right">最近 7 天 · 共自动归位 21 条 · 撤销 2 条</span></div>
+    <div class="card-b s" style="padding:0">
+      <div class="lrow">
+        <span class="badge b-primary">v44 · 14:32</span>
+        <div class="grow" style="font-size:13px">自动归位 3 条：Rust 异步指南 → 开发/Rust · TypeScript 手册 → 开发/前端 · …</div>
+        <button class="btn btn-o btn-xs">撤销此版本</button>
+      </div>
+      <div class="lrow">
+        <span class="badge b-primary">v41 · 昨天</span>
+        <div class="grow" style="font-size:13px">自动归位 5 条（含你手动从收纳盒移出的 1 条 → 已标记「用户已确认」，AI 永不再动）</div>
+        <button class="btn btn-o btn-xs">撤销此版本</button>
+      </div>
+    </div>
+  </div>
+
+  <details class="talk" style="max-width:660px;margin-left:auto;margin-right:auto">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18 · D37 收口）——决议清单如下，原始提案保留供追溯</summary>
+    <div class="talk-b"><div class="label" style="margin-bottom:8px">收口决议（按「最简原则」定案）</div><ul style="padding-left:20px;margin-bottom:10px"><li>入口：投递口/管理口分离（工具栏角标）；文件夹位置默认<b>书签栏</b>（可在原型 07 设置改）</li><li>歧义阈值：<b>80% 起步</b>，按实际回滚率调整（D28）</li><li>歧义集中询问：攒 <b>≥3 条</b>触发（侧栏聊天 / popup 收纳盒页）</li><li>隐私条目：支持「<b>按域名记忆</b>」本地规则自动归位（不走 AI，不出网）</li></ul><div class="divider" style="margin:8px 0"></div><div class="label" style="margin-bottom:6px">原始提案（供追溯）</div><ol>
+      <li><b>入口的技术现实（已修正 2026-11-18）：</b>浏览器原生文件夹下拉不可定制、文件夹无法加角标——文件夹只做<b>物理投递口</b>，管理界面入口 = <b>扩展工具栏图标（角标 = 待处理数）</b> → popup 收纳盒区；书签右键可加「立即归位 / 查看建议」菜单项（contextMenus 支持书签上下文）。<span class="opt">遗留小问题</span>：文件夹放书签栏（投递可见易拖，当前设计）还是收进「其他书签」下（不占栏位）？<b>建议</b>：书签栏。</li>
+      <li><b>默认模式（已定 D27）：</b>全自动为默认——静默归位 + 版本兜底 + 轻提示可撤销；确认模式降为设置项，给不放心的人。</li>
+      <li><b>歧义阈值：</b>全自动下，置信度低于多少算「歧义」而留下询问？阈值越低 AI 越敢动、询问越少。<span class="opt">建议</span>：80% 起步，按实际回滚率调整。</li>
+      <li><b>歧义上限：</b>歧义条目攒几条后集中询问？当前在侧栏聊天里问（03 原型）；管理台是否也要一个「待确认」区块？</li>
+      <li><b>隐私条目交互：</b>隐私域名条目不允许 AI 碰，只能手动选目录（当前）——是否提供「按域名记忆，下次同域名自动进 XX 目录」的本地规则（不走 AI）？</li>
+    </ol></div>
+  </details>
+
+</main>
+<footer class="proto-foot">06 · 自动收纳 · my-favorites 原型 v0.1 · 对应 F1.5 / §6.1 / D20 镜像模式 / 红线③（用户数据安全）</footer>
+</body>
+</html>

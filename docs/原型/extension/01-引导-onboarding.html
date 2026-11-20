@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 · 安装引导四步 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .flow-connect { text-align: center; color: var(--text-3); font-size: 20px; padding: 6px 0; }
+  .step-label { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; }
+  .step-label .ln { font-weight: 700; font-size: 15px; }
+  .step-label .tm { font-size: 12px; color: var(--ok-deep); background: var(--ok-soft); border-radius: 999px; padding: 2px 10px; font-weight: 600; }
+  .big-opt { flex: 1; border: 1.5px solid var(--border-2); border-radius: 14px; padding: 20px; cursor: pointer; background: var(--panel); transition: all .15s; }
+  .big-opt:hover, .big-opt.rec { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-ring); }
+  .big-opt .em { font-size: 26px; }
+  .ntp-hero { background: var(--ai-grad); border-radius: 12px; color: #fff; padding: 18px 20px; }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>01 · 安装引导</b>（扩展端 · Aha Moment 流程）</span>
+  <span class="hint right">目标：导入后 <b style="color:var(--ok-deep)">60 秒内</b>看到整理结果 + 导航站</span>
+</header>
+
+<main class="wrap">
+
+  <!-- 步骤条 -->
+  <div class="row" style="margin-bottom:26px">
+    <div class="steps grow">
+      <div class="step done"><span class="n">✓</span>安装扩展</div><span class="step-line"></span>
+      <div class="step on"><span class="n">1</span>选择导入方式</div><span class="step-line"></span>
+      <div class="step on"><span class="n">2</span>一键导入</div><span class="step-line"></span>
+      <div class="step on"><span class="n">3</span>快整理结果</div><span class="step-line"></span>
+      <div class="step on"><span class="n">4</span>设为新标签页</div>
+    </div>
+    <span class="demo-note">以下 4 屏为同一流程的连续画面，自上而下串看</span>
+  </div>
+
+  <!-- 第 1 步 -->
+  <div class="step-label"><span class="ln">第 1 步 · 欢迎 + 选择导入方式</span><span class="hint">注册 / BYOK 都不在这屏 —— 必须放在 Aha 之后（文档 §3.2）</span></div>
+  <div class="browser">
+    <div class="browser-bar"><span class="dots"><i></i><i></i><i></i></span><span class="urlbar">🔒 chrome-extension://my-favorites/welcome.html</span></div>
+    <div class="browser-body" style="padding:44px 48px">
+      <div style="text-align:center;margin-bottom:30px">
+        <div style="font-size:44px">⭐</div>
+        <h2 style="font-size:22px;margin:10px 0 6px">欢迎使用 my-favorites</h2>
+        <p style="color:var(--text-2);font-size:13.5px">把失控的书签堆，变成你每天使用的个人导航主页。全程约 1 分钟。</p>
+      </div>
+      <div class="row" style="gap:16px;align-items:stretch">
+        <div class="big-opt rec">
+          <div class="em">⚡</div>
+          <div class="strong mt6" style="font-size:15px">直接读取浏览器书签 <span class="badge b-primary" style="margin-left:6px">推荐</span></div>
+          <p class="hint mt6">检测到本机书签 <b style="color:var(--text)">1,347 条</b>，完整保留目录结构与添加时间。一键完成，无需导出文件。</p>
+        </div>
+        <div class="big-opt">
+          <div class="em">📄</div>
+          <div class="strong mt6" style="font-size:15px">导入 Netscape HTML 文件</div>
+          <p class="hint mt6">从 Firefox / Safari 导出后拖入；或不希望授权「bookmarks」权限时的兜底方式。</p>
+        </div>
+      </div>
+      <div class="callout c-priv c-info mt20"><span class="ico">🛡</span><div>隐私保护已内置：银行 / 内网段等 <b>23 个常见敏感域名</b> 在导入时只保存 URL——不抓取正文、不送 AI、不做快照。稍后可在设置中自定义清单。</div></div>
+    </div>
+  </div>
+
+  <div class="flow-connect">↓ 选择「直接读取」后</div>
+
+  <!-- 第 2 步 -->
+  <div class="step-label"><span class="ln">第 2 步 · 一键导入进度</span><span class="hint">千级书签分批上行（100 条/批）+ 进度条，中断可续传（幂等）</span></div>
+  <div class="browser">
+    <div class="browser-bar"><span class="dots"><i></i><i></i><i></i></span><span class="urlbar">🔒 chrome-extension://my-favorites/importing.html</span></div>
+    <div class="browser-body" style="padding:44px 48px">
+      <div class="row">
+        <div class="grow">
+          <div class="strong" style="font-size:16px">正在导入书签…</div>
+          <p class="hint mt6">已读取浏览器书签树 · 正在分批上行（第 <b>7 / 14</b> 批）</p>
+        </div>
+        <div style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums">52%</div>
+      </div>
+      <div class="progress mt12"><i style="width:52%"></i></div>
+      <div class="row mt6" style="justify-content:space-between">
+        <span class="hint">700 / 1,347 条 · 预计还需 12 秒</span>
+        <span class="hint">去重：已跳过 41 条重复 URL</span>
+      </div>
+      <div class="panel-2 mt20" style="padding:12px 16px">
+        <div class="row"><span class="badge b-ok dot">完成</span><span>读取书签树（1,347 条）</span></div>
+        <div class="row mt6"><span class="badge b-ok dot">完成</span><span>URL 规范化 + 隐私域名筛查（命中 12 条 → 仅存 URL）</span></div>
+        <div class="row mt6"><span class="badge dot" style="color:var(--info-deep);background:var(--info-soft)">进行中</span><span>分批上行与去重…</span></div>
+        <div class="row mt6" style="opacity:.55"><span class="badge dot">待执行</span><span>阶段 1「快整理」规则引擎</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-connect">↓ 导入完成，自动进入（导入结果：新增 1,284 · 重复跳过 63 · 隐私保护 12）</div>
+
+  <!-- 第 3 步 -->
+  <div class="step-label"><span class="ln">第 3 步 · AI 已经帮你整理好了 ★ Aha Moment</span><span class="badge b-ok">15 秒内</span><span class="hint">D27 无确认流：整理直接生效 · 不满意一键恢复原样 · 本步为规则引擎，零 LLM 成本</span></div>
+  <div class="browser">
+    <div class="browser-bar"><span class="dots"><i></i><i></i><i></i></span><span class="urlbar">🔒 chrome-extension://my-favorites/stage1-result.html</span></div>
+    <div class="browser-body" style="padding:36px 44px">
+      <div class="row">
+        <div class="grow">
+          <h2 style="font-size:19px">✨ 已经帮你整理好了</h2>
+          <p class="hint mt6">1,284 条书签已重新组织，导航站同步生成——<b style="color:var(--text)">不满意随时一键恢复原样</b>。</p>
+        </div>
+        <button class="btn btn-o">看看它改了什么</button>
+        <button class="btn btn-p">设为新标签页 →</button>
+      </div>
+
+      <div class="grid4 mt20">
+        <div class="stat"><div class="v">1,284</div><div class="l">书签完成归类</div></div>
+        <div class="stat"><div class="v">312</div><div class="l">已移动位置 · 可撤销</div></div>
+        <div class="stat"><div class="v">2 组</div><div class="l">已合并重复 · 可拆回</div></div>
+        <div class="stat"><div class="v" style="color:var(--warn-deep)">5</div><div class="l">建议归档清单<span class="arrow">（不自动删）</span></div></div>
+      </div>
+
+      <div class="grid2 mt20" style="align-items:stretch">
+        <div class="panel">
+          <div class="card-h"><span class="t">整理后的目录树（预览）</span><span class="badge b-ai">✦ 规则引擎 · 0 token</span></div>
+          <div style="padding:12px">
+            <div class="tree">
+              <div class="tree-row on">📁 开发工具 <span class="cnt">412</span></div>
+              <div class="tree-kids">
+                <div class="tree-row">📁 前端 <span class="cnt">186</span></div>
+                <div class="tree-row">📁 Rust（AI 新聚合）<span class="badge b-ai" style="margin-left:6px">新</span><span class="cnt">54</span></div>
+                <div class="tree-row">📁 运维与部署 <span class="cnt">91</span></div>
+              </div>
+              <div class="tree-row">📁 设计灵感 <span class="cnt">78</span></div>
+              <div class="tree-row">📁 学习资料 <span class="cnt">203</span></div>
+              <div class="tree-row">📁 生活与购物 <span class="cnt">156</span></div>
+              <div class="tree-row" style="opacity:.65">🗄 已归档建议（5）<span class="cnt">2019 年后未访问</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel" style="display:flex;flex-direction:column">
+          <div class="card-h"><span class="t">导航站实时预览</span><span class="hint">只显示网站入口（D30 站点化）</span><a class="hint right" href="05-新标签页-导航主页.html">完整原型 →</a></div>
+          <div style="padding:16px;flex:1;background:var(--bg)">
+            <div class="grid5" style="gap:10px">
+              <div class="tile"><span class="fav fc-1">G</span><span class="nm">GitHub</span></div>
+              <div class="tile"><span class="fav fc-2">V</span><span class="nm">Vite</span></div>
+              <div class="tile"><span class="fav fc-3">D</span><span class="nm">Drizzle</span></div>
+              <div class="tile"><span class="fav fc-5">F</span><span class="nm">Figma</span></div>
+              <div class="tile"><span class="fav fc-4">M</span><span class="nm">MDN</span></div>
+            </div>
+            <div class="grid5 mt12" style="gap:10px">
+              <div class="tile"><span class="fav fc-6">S</span><span class="nm">StackBlitz</span></div>
+              <div class="tile"><span class="flag badge b-ai">📸</span><span class="fav fc-8">W</span><span class="nm">旧版Webpack文档</span></div>
+              <div class="tile"><span class="fav fc-7">R</span><span class="nm">React</span></div>
+              <div class="tile"><span class="fav fc-4">C</span><span class="nm">caniuse</span></div>
+              <div class="tile"><span class="fav fc-2">T</span><span class="nm">Tailwind</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout c-ai mt20"><span class="ico">✦</span><div><b>这只是 15 秒的快速版。</b>AI 正在后台读取网页内容做「阶段 2 精修」（按正文而非标题重新理解每条书签），完成后会提示你——届时一键查看变更，随时可整体撤销。</div></div>
+    </div>
+  </div>
+
+  <div class="flow-connect">↓ 「看看它改了什么」打开只读明细（原型 04）· 满意则进入第 4 步</div>
+
+  <!-- 第 4 步 -->
+  <div class="step-label"><span class="ln">第 4 步 · 设为新标签页 + 使用引导</span><span class="hint">留存钩子③ · 文档目标：Aha 用户中 ≥25% 设为新标签页</span></div>
+  <div class="browser">
+    <div class="browser-bar"><span class="dots"><i></i><i></i><i></i></span><span class="urlbar">🔒 chrome-extension://my-favorites/done.html</span></div>
+    <div class="browser-body" style="padding:44px 48px">
+      <div class="ntp-hero">
+        <div class="row">
+          <div class="grow">
+            <div style="font-size:17px;font-weight:700">🎉 整理完成！你的导航站已就绪</div>
+            <p style="opacity:.9;font-size:13px;margin-top:4px">每次打开新标签页，都是一次整齐的开始。</p>
+          </div>
+          <button class="btn" style="background:#fff;color:#4f46e5;font-weight:700;border:0">设为新标签页 →</button>
+        </div>
+      </div>
+
+      <div class="grid3 mt20">
+        <div class="panel" style="padding:16px">
+          <div style="font-size:20px">📌</div>
+          <div class="strong mt6">随手收藏</div>
+          <p class="hint mt6">按 <span class="kbd">Ctrl+Shift+S</span> 或右键收藏当前页，AI 即时建议归位，还能顺手拍快照。</p>
+        </div>
+        <div class="panel" style="padding:16px">
+          <div style="font-size:20px">📥</div>
+          <div class="strong mt6">懒人模式</div>
+          <p class="hint mt6">把任何书签丢进「📥 收纳盒」文件夹，AI 自动归位，歧义时才会问你。</p>
+        </div>
+        <div class="panel" style="padding:16px">
+          <div style="font-size:20px">💬</div>
+          <div class="strong mt6">聊天整理</div>
+          <p class="hint mt6">侧栏里说一句「把 2023 年前的开发链接按内容重新分类」，AI 出提案你确认。</p>
+        </div>
+      </div>
+
+      <div class="callout c-info mt20"><span class="ico">ℹ️</span><div>现在不需要配置任何 AI Key——你可以先用规则整理 + 免费额度体验。<b>想要更强效果时</b>，在设置中添加自己的模型供应商（DeepSeek / 智谱 / Ollama 均可）。</div></div>
+    </div>
+  </div>
+
+  <!-- 讨论点 -->
+  <details class="talk">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18 · D37 收口）——决议清单如下，原始提案保留供追溯</summary>
+    <div class="talk-b"><div class="label" style="margin-bottom:8px">收口决议（按「最简原则」定案）</div><ul style="padding-left:20px;margin-bottom:10px"><li>流程长度：保留 4 步，第 2 步导入进度完成后<b>自动进入</b>第 3 步（不停等）</li><li>归档建议时机：首次引导只做分类；归档建议从<b>第一次周报</b>开始给</li><li>导航站预览：引导内用<b>迷你预览</b>（轻量），完整体验在原型 05</li></ul><div class="divider" style="margin:8px 0"></div><div class="label" style="margin-bottom:6px">原始提案（供追溯）</div><ol>
+      <li><b>流程长度：</b>当前为 4 步。是否压缩为 2 步（导入 → 结果）？<span class="opt">建议</span>：保留 4 步但第 2 步自动跳过（进度完成后自动进入第 3 步）。</li>
+      <li><b>无确认流的边界（已定 D27）：</b>AI 整理直接生效。是否额外给「极谨慎模式」设置项（整理前先问一次）？<span class="opt">建议</span>：不做——保持产品哲学纯粹，回滚兜底已足够；有用户反馈再议。</li>
+      <li><b>归档建议的出现时机：</b>阶段 1 就展示「建议归档 5 条」是否太早？<span class="opt">备选</span>：首次引导只做分类，归档建议放到第一次周报。</li>
+      <li><b>导航站预览的保真度：</b>第 3 步中的迷你预览 vs 直接嵌入真实渲染的完整导航站？后者更震撼但引导页变重。</li>
+    </ol></div>
+  </details>
+
+</main>
+<footer class="proto-foot">01 · 安装引导 · my-favorites 原型 v0.1 · 对应 F1.1 / F4.5 / §3.2 Aha 定义</footer>
+</body>
+</html>

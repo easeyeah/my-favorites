@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>15 · 管理台设置 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .admin { display: flex; min-height: 700px; border-radius: 14px; overflow: hidden; border: 1px solid var(--border); background: var(--panel); box-shadow: var(--shadow-2); }
+  .ad-nav { width: 190px; background: var(--panel-2); border-right: 1px solid var(--border); padding: 14px 10px; flex: none; }
+  .ad-nav .logo { padding: 6px 12px 16px; font-weight: 800; font-size: 15px; }
+  .ad-nav .ni { display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-radius: 9px; font-size: 13.5px; color: var(--text-2); cursor: pointer; margin-bottom: 2px; }
+  .ad-nav .ni.on { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+  .ad-main { flex: 1; padding: 20px 26px; min-width: 0; }
+  .pill-radio { display: inline-flex; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 3px; }
+  .pill-radio span { padding: 6px 16px; border-radius: 7px; font-size: 12.5px; cursor: pointer; color: var(--text-2); }
+  .pill-radio span.on { background: var(--panel); color: var(--text); font-weight: 700; box-shadow: var(--shadow-1); }
+  .domain-row { display: flex; align-items: center; gap: 10px; padding: 7px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
+  .domain-row:last-child { border-bottom: 0; }
+  .prov-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 6px; cursor: pointer; font-size: 13.5px; }
+  .prov-row:hover { background: var(--panel-2); }
+  .prov-row.on { background: var(--primary-soft); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .sd-ok { background: var(--ok); } .sd-unknown { background: var(--warn); } .sd-fail { background: var(--danger); }
+  .preset-chip { padding: 5px 10px; border: 1px solid var(--border-2); border-radius: 6px; font-size: 12.5px; cursor: pointer; }
+  .preset-chip:hover, .preset-chip.on { border-color: var(--text); color: var(--text); background: var(--panel-2); }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>15 · 管理台设置</b>（自建端专属）</span>
+  <span class="hint right">LLM 三档切换 / 隐私清单 / 备份 / 安全 / 数据</span>
+</header>
+
+<main class="wrap">
+
+  <div class="admin">
+    <div class="ad-nav">
+      <div class="logo">⭐ my-favorites</div>
+      <div class="ni">📊 概览</div>
+      <div class="ni">📚 书签库</div>
+      <div class="ni">📥 收纳盒<span class="badge" style="margin-left:auto;background:var(--danger);color:#fff;border-radius:999px;padding:1px 7px;font-size:10.5px">6</span></div>
+      <div class="ni">✨ 整理</div>
+      <div class="ni">🌐 导航站</div>
+      <div class="ni">🩺 维护报告</div>
+      <div class="divider"></div>
+      <div class="ni on">⚙️ 设置</div>
+    </div>
+
+    <div class="ad-main">
+      <div style="font-size:18px;font-weight:700;margin-bottom:16px">设置</div>
+
+      <!-- LLM -->
+      <div class="card">
+        <div class="card-h"><span class="t">🤖 AI 模型 · BYOK 管理主场（D35）</span><span class="hint">LLM 三档切换只改 LLM_BASE_URL，不改代码</span><span class="badge b-ok dot right">当前：Ollama 连接正常</span></div>
+        <div class="card-b">
+          <div class="pill-radio">
+            <span class="on">💻 Ollama（本机 · 全离线）</span>
+            <span>☁️ 云端 API</span>
+            <span>🧪 llm-mock（测试）</span>
+          </div>
+          <div class="grid2 mt16" style="gap:14px">
+            <div class="field" style="margin:0">
+              <span class="label">BaseURL</span>
+              <input class="input mono" value="http://host.docker.internal:11434/v1">
+            </div>
+            <div class="field" style="margin:0">
+              <span class="label">默认对话模型</span>
+              <select class="select"><option>qwen3:14b</option><option>llama3.1:8b</option></select>
+            </div>
+          </div>
+          <div class="row mt12">
+            <button class="btn btn-o btn-s">🔌 测试连接</button>
+            <span class="badge b-ok dot">通过 · 0.4s</span>
+          </div>
+
+          <div class="divider"></div>
+          <div class="label">供应商管理（Key 加密落库 · 服务端统一调用 · 扩展端不持有 Key）</div>
+          <div class="grid2 mt12" style="gap:20px;align-items:start">
+            <div>
+              <div class="panel-2" style="padding:6px">
+                <div class="prov-row on"><span class="status-dot sd-ok"></span><span class="grow"><b>Ollama（本机）</b><span class="hint"> · qwen3:14b</span></span><span class="badge b-primary">默认</span></div>
+                <div class="prov-row"><span class="status-dot sd-ok"></span><span class="grow"><b>DeepSeek</b><span class="hint"> · deepseek-chat</span></span></div>
+                <div class="prov-row"><span class="status-dot sd-unknown"></span><span class="grow"><b>智谱 BigModel</b><span class="hint"> · 未验证</span></span></div>
+                <div class="prov-row"><span class="status-dot sd-fail"></span><span class="grow" style="color:var(--text-2)">OpenAI <span class="hint">· 最近失败 401</span></span><button class="btn btn-g btn-xs">修复</button></div>
+              </div>
+              <div class="mt16">
+                <div class="field"><span class="label">整理用途（分类 / 改名 / 合并建议）</span><select class="select"><option>Ollama · qwen3:14b</option><option>DeepSeek · deepseek-chat</option></select></div>
+                <div class="field"><span class="label">摘要 / 标签（L1）</span><select class="select"><option>Ollama · qwen3:14b</option><option>DeepSeek · deepseek-chat</option></select></div>
+                <div class="field" style="margin:0"><span class="label">Embedding（聚类 / 语义检索前置）</span><select class="select"><option>Ollama · bge-m3</option><option>智谱 · embedding-3</option></select><p class="hint mt6">⚠️ embedding 必须用专门模型，不能复用对话模型——聚类与域名缓存依赖它</p></div>
+              </div>
+            </div>
+            <div>
+              <div class="label">添加供应商（providers.json 预设注册表 · BaseURL 按官方文档预填）</div>
+              <div class="row mt6" style="flex-wrap:wrap;gap:6px">
+                <span class="preset-chip on">DeepSeek</span>
+                <span class="preset-chip">智谱 BigModel</span>
+                <span class="preset-chip">阿里云百炼</span>
+                <span class="preset-chip">Kimi</span>
+                <span class="preset-chip">MiniMax</span>
+                <span class="preset-chip">火山方舟</span>
+                <span class="preset-chip">腾讯 TokenHub</span>
+                <span class="preset-chip">小米 MiMo</span>
+                <span class="preset-chip">Ollama</span>
+                <span class="preset-chip">OpenAI / Anthropic</span>
+                <span class="preset-chip">＋ 自定义端点</span>
+              </div>
+              <div class="panel-2 mt12" style="padding:14px">
+                <div class="field"><span class="label">BaseURL</span><input class="input mono" value="https://api.deepseek.com/v1"></div>
+                <div class="field"><span class="label">API Key <a class="hint" href="#">↗ 前往获取（platform.deepseek.com）</a></span><input class="input mono" type="password" value="sk-••••••••••••••••3f2a"></div>
+                <div class="field"><span class="label">模型</span>
+                  <div class="row">
+                    <select class="select grow"><option>deepseek-chat（在线拉取 ✓）</option><option>deepseek-reasoner</option></select>
+                    <button class="btn btn-o btn-s nowrap">↻ 拉取模型列表</button>
+                  </div>
+                </div>
+                <div class="row"><button class="btn btn-o btn-s">🔌 测试连接</button><span class="badge b-ok dot">通过 · 1.2s</span></div>
+              </div>
+              <div class="row mt12" style="justify-content:flex-end">
+                <button class="btn btn-g btn-s">取消</button>
+                <button class="btn btn-p btn-s">保存供应商</button>
+              </div>
+            </div>
+          </div>
+          <div class="callout c-ai mt16"><span class="ico">✦</span><div>全部流量只发往你填写的端点。隐私域名清单内的书签在<b>发送 AI 之前</b>就会被拦截（架构上不可绕过，校验在分类引擎内部）。<b>D35</b>：服务端模式下 Key 只存这里（加密落库），扩展端不持有 Key。</div></div>
+        </div>
+      </div>
+
+      <!-- 通知 -->
+      <div class="card mt16">
+        <div class="card-h"><span class="t">🔔 通知偏好（每次整理都会通知 · 方式可调 · D28）</span></div>
+        <div class="card-b s">
+          <div class="row" style="flex-wrap:wrap;gap:8px">
+            <span class="chip on">轻提示 toast（默认）</span>
+            <span class="chip">通知卡（含明细入口）</span>
+            <span class="chip">静默 · 仅版本记录</span>
+          </div>
+          <p class="hint mt6">覆盖：AI 整理完成 / 收纳盒自动归位 / 合并清理。扩展端与管理台各自设置；维护周报触达在「报告」页另控。</p>
+        </div>
+      </div>
+
+      <!-- 集成 -->
+      <div class="card mt16">
+        <div class="card-h"><span class="t">🔌 集成与 Webhook（D33 · 自建端生态 · P2 规划）</span><span class="badge right">规划中</span></div>
+        <div class="card-b s" style="padding:0">
+          <div class="lrow">
+            <span class="badge b-ok dot">启用</span>
+            <div class="grow"><div class="strong">yt-dlp @ NAS</div><div class="hint">触发：收藏类型=视频 → POST http://192.168.0.10:8123/hook · 仅元数据 · HMAC 已配置</div></div>
+            <button class="btn btn-g btn-xs">编辑</button><button class="btn btn-g btn-xs">测试</button>
+          </div>
+          <div class="lrow">
+            <span class="badge">暂停</span>
+            <div class="grow"><div class="strong">n8n 工作流</div><div class="hint">触发：死链确认 → POST https://… · 元数据+正文+分类结果</div></div>
+            <button class="btn btn-g btn-xs">编辑</button>
+          </div>
+          <div class="lrow" style="background:var(--panel-2)">
+            <span class="hint grow">🛡 硬护栏：隐私域名清单命中<b>永不外发</b>；产品不内置任何下载器预设模板——工具用户自备、责任自负；内网目标默认拦截，显式白名单后才放行（SSRF 防护）。</span>
+            <button class="btn btn-o btn-xs">＋ 新建 Hook</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 隐私域名 -->
+      <div class="card mt16">
+        <div class="card-h"><span class="t">🛡 隐私域名清单（内置 23 条 + 自定义 4 条）</span><button class="btn btn-o btn-s right">＋ 添加域名/通配符</button></div>
+        <div class="card-b s" style="padding:0">
+          <div class="domain-row"><span class="badge b-priv">内置</span><span class="mono grow">*.cmbchina.com</span><span class="hint">银行</span><button class="btn btn-g btn-xs" disabled>内置不可删</button></div>
+          <div class="domain-row"><span class="badge b-priv">内置</span><span class="mono grow">*.icbc.com.cn</span><span class="hint">银行</span><button class="btn btn-g btn-xs" disabled>内置不可删</button></div>
+          <div class="domain-row"><span class="badge b-priv">内置</span><span class="mono grow">192.168.*.* / 10.*.*.*</span><span class="hint">内网段</span><button class="btn btn-g btn-xs" disabled>内置不可删</button></div>
+          <div class="domain-row"><span class="badge">自定义</span><span class="mono grow">*.corp-intranet.example.com</span><span class="hint">公司内网</span><button class="btn btn-g btn-xs">移除</button></div>
+          <div class="domain-row" style="background:var(--panel-2)">
+            <span class="hint grow">清单内行为：只存 URL · 不抓正文 · 不送 AI · 不生成快照 · 不出现在公开导航站</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 备份 -->
+      <div class="card mt16">
+        <div class="card-h"><span class="t">💾 备份（VACUUM INTO）</span><span class="badge right">策略可配置：频率 每日 · 保留 14 份（D37）</span><button class="btn btn-p btn-s right">立即备份</button></div>
+        <div class="card-b s" style="padding:0">
+          <div class="lrow"><span class="badge b-ok dot">今日</span><span class="mono grow">mf-backup-2026-11-18-0400.db</span><span class="hint">38.2 MB · 一致性校验 ✓</span><button class="btn btn-g btn-xs">下载</button><button class="btn btn-g btn-xs">恢复演练</button></div>
+          <div class="lrow"><span class="badge">昨天</span><span class="mono grow">mf-backup-2026-11-17-0400.db</span><span class="hint">38.0 MB</span><button class="btn btn-g btn-xs">下载</button><button class="btn btn-g btn-xs">恢复</button></div>
+          <div class="lrow"><span class="badge">3 天前</span><span class="mono grow">mf-backup-2026-11-15-0400.db</span><span class="hint">37.6 MB</span><button class="btn btn-g btn-xs">下载</button><button class="btn btn-g btn-xs">恢复</button></div>
+          <div class="lrow" style="background:var(--panel-2)"><span class="hint grow">DB 迁移只前进不回滚；迁移前自动备份（VACUUM INTO，WAL 活跃下安全）。恢复 = 停容器 + 换文件 + 起旧镜像，永远可退回；<b>恢复操作需二次输入管理员密码 + 醒目警告（D37）</b>。</span></div>
+        </div>
+      </div>
+
+      <!-- 安全 -->
+      <div class="card mt16">
+        <div class="card-h"><span class="t">🔐 安全</span></div>
+        <div class="card-b s">
+          <div class="row"><span class="hint" style="width:130px">登录限速</span><span class="grow" style="font-size:13px">连续 5 次失败锁定 15 分钟（已启用）· 当前锁定数 0</span><span class="badge b-ok">启用</span></div>
+          <div class="divider" style="margin:10px 0"></div>
+          <div class="row"><span class="hint" style="width:130px">访问令牌</span>
+            <div class="grow" style="font-size:13px">
+              <div>📱 MacBook-Chrome <span class="hint">创建于 23 天前 · 最近使用 今天 14:30</span></div>
+              <div class="mt6">🖥 NAS-Docker <span class="hint">创建于 23 天前 · 最近使用 今天 03:00（定时任务）</span></div>
+            </div>
+            <button class="btn btn-d btn-s">撤销所选</button>
+          </div>
+          <div class="divider" style="margin:10px 0"></div>
+          <div class="row"><span class="hint" style="width:130px">Provider Key 加密</span><span class="grow" style="font-size:13px">已启用 · master key 存于环境变量，密文落库</span><span class="badge b-ok">启用</span></div>
+        </div>
+      </div>
+
+      <!-- 数据 -->
+      <div class="card mt16">
+        <div class="card-h"><span class="t">📦 数据（可迁移承诺）</span></div>
+        <div class="card-b">
+          <div class="row">
+            <button class="btn btn-o btn-s">导出 JSON 全量备份</button>
+            <button class="btn btn-o btn-s">导出 Netscape HTML（浏览器可再导入）</button>
+            <button class="btn btn-o btn-s">导入 JSON / Netscape</button>
+            <span class="hint right">云端 ↔ 自建迁移走同一份 JSON 格式</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 存储 -->
+      <div class="card mt16">
+        <div class="card-h"><span class="t">📊 存储用量（/data）</span></div>
+        <div class="card-b">
+          <div class="row" style="font-size:13px"><span class="hint" style="width:110px">SQLite 数据库</span><div class="progress grow" style="max-width:420px"><i style="width:36%"></i></div><span>38 MB</span></div>
+          <div class="row mt6" style="font-size:13px"><span class="hint" style="width:110px">快照（86 份）</span><div class="progress grow" style="max-width:420px"><i style="width:41%;background:var(--ai)"></i></div><span>412 MB</span></div>
+          <div class="row mt6" style="font-size:13px"><span class="hint" style="width:110px">图标缓存</span><div class="progress grow" style="max-width:420px"><i style="width:8%;background:var(--info)"></i></div><span>21 MB</span></div>
+          <div class="row mt6" style="font-size:13px"><span class="hint" style="width:110px">备份（14 份）</span><div class="progress grow" style="max-width:420px"><i style="width:14%;background:var(--ok)"></i></div><span>534 MB</span></div>
+          <p class="hint mt12">自建端存储不设上限（D12 全功能开放）；容器运行内存 <300MB / 镜像 ≤250MB 为硬性红线，可在概览侧栏查看实时内存。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <details class="talk">
+    <summary>✅ 本页讨论点已全部决议（2026-11-18 · D37 收口）——决议清单如下，原始提案保留供追溯</summary>
+    <div class="talk-b"><div class="label" style="margin-bottom:8px">收口决议（按「最简原则」定案）</div><ul style="padding-left:20px;margin-bottom:10px"><li>备份<b>频率 / 份数暴露为设置项</b>（默认每日 · 14 份）</li><li>恢复操作需<b>二次输入管理员密码</b> + 醒目警告</li></ul><div class="divider" style="margin:8px 0"></div><div class="label" style="margin-bottom:6px">原始提案（供追溯）</div><ol>
+      <li><b>备份保留策略可配置吗：</b>当前硬编码每日 04:00 保留 14 份。要不要暴露为设置项（频率/份数）？NAS 用户通常有自己的备份体系（群晖 Hyper Backup 直接同步 /data/backups 即可）。</li>
+      <li><b>恢复操作的安全级别：</b>「恢复」按钮是否要求二次输入管理员密码 + 显示醒目警告（覆盖当前数据）？</li>
+    </ol></div>
+  </details>
+
+</main>
+<footer class="proto-foot">15 · 管理台设置 · my-favorites 原型 v0.1 · 对应 F6.2 / 红线①② / v0.3.1 安全默认值 / §8 备份</footer>
+</body>
+</html>

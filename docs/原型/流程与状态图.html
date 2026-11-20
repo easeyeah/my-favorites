@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>my-favorites · 流程图与状态机（Mermaid）</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<link rel="stylesheet" href="_shared.css?v=031">
+<style>
+  body { background: var(--bg); }
+  .mm-wrap { max-width: 1080px; margin: 26px auto 70px; padding: 0 20px; }
+  h2 { margin: 40px 0 6px; font-size: 17px; padding-top: 10px; }
+  .desc { color: var(--text-2); font-size: 13px; margin-bottom: 12px; }
+  .quote { color: var(--text-3); font-size: 12.5px; }
+  pre.mermaid { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 24px; box-shadow: var(--shadow-1); display: flex; justify-content: center; overflow-x: auto; }
+  .toc { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin: 18px 0 8px; }
+  .toc-item { display: flex; gap: 10px; align-items: center; padding: 9px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); font-size: 13px; text-decoration: none; }
+  .toc-item:hover { border-color: var(--text); text-decoration: none; }
+  .toc-item .n { color: var(--text-2); font-family: var(--mono); font-size: 12px; min-width: 20px; }
+</style>
+</head>
+<body>
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="index.html">原型总览</a> / <b>流程图与状态机</b>（Mermaid · 15 张 · 含 D27–D33/D36 修订）</span>
+  <span class="hint right">源文件：<a href="流程与状态图.md">流程与状态图.md</a> · 需联网加载 mermaid 渲染</span>
+</header>
+<div class="mm-wrap">
+  <div class="toc"><a href="#d1" class="toc-item"><span class="n">·</span>目录</a>
+<a href="#d2" class="toc-item"><span class="n">1</span>1. 产品全景与三形态架构</a>
+<a href="#d3" class="toc-item"><span class="n">2</span>2. 四钩子留存闭环</a>
+<a href="#d4" class="toc-item"><span class="n">3</span>3. 收藏即时归位（&lt;50ms 缓存路径）</a>
+<a href="#d5" class="toc-item"><span class="n">4</span>4. 收纳盒自动归位流水线（D20 镜像模式）</a>
+<a href="#d6" class="toc-item"><span class="n">5</span>5. 收纳盒条目状态机</a>
+<a href="#d7" class="toc-item"><span class="n">6</span>6. 两阶段整理（导入 → Aha）</a>
+<a href="#d8" class="toc-item"><span class="n">7</span>7. 整理会话与版本状态机</a>
+<a href="#d9" class="toc-item"><span class="n">8</span>8. 整理应用 → 通知 → 回滚（时序与乐观锁 · D27）</a>
+<a href="#d10" class="toc-item"><span class="n">9</span>9. 一键快照生成与降级链</a>
+<a href="#d11" class="toc-item"><span class="n">10</span>10. 死链分层探测与三级判定</a>
+<a href="#d12" class="toc-item"><span class="n">11</span>11. 书签状态流转</a>
+<a href="#d13" class="toc-item"><span class="n">12</span>12. 导入双通道（去重/幂等/隐私联动）</a>
+<a href="#d14" class="toc-item"><span class="n">13</span>13. 自建端单容器部署架构</a>
+<a href="#d15" class="toc-item"><span class="n">14</span>14. 导航站生成（站点化分析投影 · D30）</a>
+<a href="#d16" class="toc-item"><span class="n">15</span>15. 收藏事件与集成 Hook（出站 Webhook + 入站 API · D33 · P2）</a>
+<a href="#d17" class="toc-item"><span class="n">·</span>附：图 ↔ 决策/红线对照</a></div>
+  <p class="desc"># my-favorites 流程图与状态流转图（Mermaid 源文件）</p>
+<p class="quote">配套：`docs/原型/index.html`（原型总览）。浏览器渲染版见同目录 `流程与状态图.html`。</p>
+<p class="quote">依据：功能文档 v0.3.1（D1–D21）+ 技术方案 v0.2（§5–§9）。图与决策记录一一对应，评审改动后需回写本文档。</p>
+<h2 id="d1">目录</h2>
+<p class="desc">1. [产品全景与三形态架构](#1-产品全景与三形态架构)</p>
+<p class="desc">2. [四钩子留存闭环](#2-四钩子留存闭环)</p>
+<p class="desc">3. [收藏即时归位（&lt;50ms 缓存路径）](#3-收藏即时归位50ms-缓存路径)</p>
+<p class="desc">4. [收纳盒自动归位流水线（D20 镜像模式）](#4-收纳盒自动归位流水线d20-镜像模式)</p>
+<p class="desc">5. [收纳盒条目状态机](#5-收纳盒条目状态机)</p>
+<p class="desc">6. [两阶段整理（导入 → Aha）](#6-两阶段整理导入--aha)</p>
+<p class="desc">7. [整理会话与版本状态机](#7-整理会话与版本状态机)</p>
+<p class="desc">8. [整理应用 → 通知 → 回滚（时序与乐观锁 · D27）](#8-整理应用--通知--回滚时序与乐观锁--d23)</p>
+<p class="desc">9. [一键快照生成与降级链](#9-一键快照生成与降级链)</p>
+<p class="desc">10. [死链分层探测与三级判定](#10-死链分层探测与三级判定)</p>
+<p class="desc">11. [书签状态流转](#11-书签状态流转)</p>
+<p class="desc">12. [导入双通道（去重/幂等/隐私联动）](#12-导入双通道去重幂等隐私联动)</p>
+<p class="desc">13. [自建端单容器部署架构](#13-自建端单容器部署架构)</p>
+<p class="desc">14. [导航站生成（站点化分析投影 · D30）](#14-导航站生成站点化分析投影--d26)</p>
+<p class="desc">15. [收藏事件与集成 Hook（出站 Webhook + 入站 API · D33 · P2）](#15-收藏事件与集成-hook出站-webhook--入站-api--d29--p2)</p>
+<h2 id="d2">1. 产品全景与三形态架构</h2>
+<p class="desc">一套代码三种形态（D15：本轮只打磨「扩展 + 单用户 Docker 自建端」）。</p>
+<pre class="mermaid">
+flowchart TB
+  EXT[&quot;🌐 浏览器扩展&lt;br/&gt;popup 收藏 · sidepanel 聊天整理&lt;br/&gt;newtab 导航站 · options 设置&quot;]
+  ADMIN[&quot;🖥 Web 管理台（自建端）&quot;]
+  EXT -- &quot;同一套 API /api/v1&quot; --&gt; ROUTE{&quot;后端形态&quot;}
+  ADMIN -- &quot;Bearer 令牌&quot; --&gt; ROUTE
+
+  ROUTE -- &quot;形态A 官方云 SaaS（M2）&quot; --&gt; SAAS
+  ROUTE -- &quot;形态B 自建 Docker（本轮交付）&quot; --&gt; SELF
+  ROUTE -- &quot;形态C 纯本地（本地模式）&quot; --&gt; LOCAL
+
+  subgraph SAAS[&quot;形态A · 官方云（预留）&quot;]
+    CAPI[&quot;Hono API 多副本&quot;] --- PG[(&quot;PostgreSQL&quot;)]
+    CAPI --- S3[(&quot;对象存储 S3&quot;)]
+    CAPI --- PB[&quot;pgboss 队列&quot;]
+    CW[&quot;抓取/维护 Worker（独立扩容）&quot;]
+  end
+
+  subgraph SELF[&quot;形态B · 自建单容器&quot;]
+    SAPI[&quot;Hono API + 进程内队列 + Worker&lt;br/&gt;esbuild bundle 交付&quot;]
+    SAPI --- SQL[(&quot;SQLite 单文件 · WAL&quot;)]
+    SAPI --- FS[&quot;/data：快照 · 图标 · 备份&quot;]
+  end
+
+  subgraph LOCAL[&quot;形态C · 纯本地&quot;]
+    IDB[&quot;扩展 IndexedDB/OPFS&lt;br/&gt;规则引擎 + BYOK 直连&lt;br/&gt;导航站静态导出&quot;]
+  end
+
+  SAAS --&gt; AI[&quot;🧠 LLM 统一出口 packages/ai&lt;br/&gt;OpenAI 兼容 + providers.json 注册表&quot;]
+  SELF --&gt; AI
+  LOCAL --&gt; AI
+  AI --&gt; P1[&quot;DeepSeek / 智谱 / 百炼 / Kimi / Ollama …&quot;]
+</pre>
+<h2 id="d3">2. 四钩子留存闭环</h2>
+<p class="desc">覆盖书签全部流入路径与两类回访理由（功能文档 §4）。</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph FLOW[&quot;书签流入（全覆盖）&quot;]
+    A[&quot;① 主动收藏钩子&lt;br/&gt;一键收藏 · 即时建议归位&lt;br/&gt;缓存命中 &lt;50ms 零AI成本&quot;]
+    B[&quot;② 被动堆积钩子&lt;br/&gt;📥 收纳盒&lt;br/&gt;随手一丢 · AI归位&quot;]
+  end
+  subgraph RETURN[&quot;回访理由&quot;]
+    C[&quot;③ 每日入口&lt;br/&gt;新标签页 = 导航站&lt;br/&gt;天然日活曝光&quot;]
+    D[&quot;④ 每周维护&lt;br/&gt;死链/重复/归档周报&lt;br/&gt;点进处理 → 再体验AI&quot;]
+  end
+  A --&gt; LIB[(&quot;应用书签库&lt;br/&gt;app 为主数据 · D16&quot;)]
+  B --&gt; LIB
+  LIB --&gt; C
+  LIB --&gt; D
+  D -- &quot;处理动作（查看快照/合并/归档）&quot; --&gt; LIB
+  C -- &quot;搜索/打开/编辑&quot; --&gt; LIB
+  LIB -. &quot;正文缓存 · L1摘要 · 整理偏好积累&quot; .-&gt; FLY[&quot;🧠 数据资产复利&lt;br/&gt;越用越准 · 切换成本&quot;]
+</pre>
+<h2 id="d4">3. 收藏即时归位（&lt;50ms 缓存路径）</h2>
+<p class="desc">技术方案 §7①。隐私校验是架构级强制步骤，不是可选（红线②）。</p>
+<pre class="mermaid">
+flowchart TD
+  TRG[&quot;触发：popup 一键收藏&lt;br/&gt;快捷键 Ctrl+Shift+S / 右键菜单&quot;] --&gt; PRV{&quot;🛡 隐私域名清单校验&lt;br/&gt;（分类引擎内部·强制）&quot;}
+  PRV -- &quot;命中&quot; --&gt; ONLY[&quot;仅存 URL&lt;br/&gt;不抓内容 / 不送AI / 不快照&lt;br/&gt;提示用户手动选目录&quot;]
+  PRV -- &quot;未命中&quot; --&gt; CAN[&quot;url_canonical 规范化&lt;br/&gt;去 tracking 参数 · 统一 https&quot;]
+  CAN --&gt; DC{&quot;domain_cache 命中？&quot;}
+  DC -- &quot;命中（高频用户 90%+）&quot; --&gt; FAST[&quot;返回目标目录建议&lt;br/&gt;⏱ &lt;50ms · 零 AI 成本&quot;]
+  DC -- &quot;未命中&quot; --&gt; INBX[&quot;先落 📥 收纳盒&lt;br/&gt;popup 显示『AI 分类中』&quot;]
+  INBX --&gt; ASYNC[&quot;异步流水线：&lt;br/&gt;通道A内容捕获 → AI 内容级分类&lt;br/&gt;→ 写回 domain_cache → 通知可撤销&quot;]
+  FAST --&gt; USER{&quot;用户操作&quot;}
+  USER -- &quot;✓ 收藏到这里&quot; --&gt; SAVE[&quot;落库 + 异步内容捕获&quot;]
+  USER -- &quot;改目录&quot; --&gt; SAVE2[&quot;按用户指定落库&lt;br/&gt;（AI 学习该覆盖）&quot;]
+  SAVE --&gt; SNAP{&quot;勾选『同时保存快照』？&quot;}
+  SAVE2 --&gt; SNAP
+  SNAP -- &quot;是&quot; --&gt; CAP[&quot;chrome.pageCapture.captureMHTML&lt;br/&gt;就地生成（见流程9）&quot;]
+  SNAP -- &quot;否&quot; --&gt; DONE[&quot;✅ 收藏完成 · 页面内轻提示&quot;]
+  CAP --&gt; DONE
+</pre>
+<h2 id="d5">4. 收纳盒自动归位流水线（D20 镜像模式）</h2>
+<p class="desc">技术方案 §7② + D20（界面说「归位」，浏览器书签必须真的移动）。</p>
+<pre class="mermaid">
+flowchart TD
+  EV[&quot;bookmarks.onCreated / onMoved&lt;br/&gt;（事件可靠唤醒 Service Worker）&quot;] --&gt; DEB[&quot;SW 防抖聚合&quot;]
+  CRON[&quot;⏰ 每小时定时清扫兜底&lt;br/&gt;（覆盖离线堆积 · 双保险）&quot;] --&gt; DEB
+  DEB --&gt; API[&quot;POST /inbox/process&lt;br/&gt;（Idempotency-Key 幂等）&quot;]
+  API --&gt; PRV{&quot;🛡 隐私域名校验（强制）&quot;}
+  PRV -- &quot;命中&quot; --&gt; MANUAL[&quot;仅存 URL · 人工选目录&lt;br/&gt;（本地域名规则可记忆，不走AI）&quot;]
+  PRV -- &quot;未命中&quot; --&gt; RULE[&quot;域名规则即时初判&lt;br/&gt;domain_cache&quot;]
+  RULE -- &quot;高置信命中&quot; --&gt; MOVE
+  RULE -- &quot;未命中&quot; --&gt; CAP[&quot;内容捕获（通道A优先）&lt;br/&gt;无缓存则服务端补抓（限速·robots）&quot;]
+  CAP --&gt; AIC[&quot;AI 内容级分类&lt;br/&gt;（正文上下文，非仅标题）&quot;]
+  AIC --&gt; CONF{&quot;置信度 ≥ 阈值？&quot;}
+  CONF -- &quot;是&quot; --&gt; MOVE[&quot;自动归位：移动到目标目录&lt;br/&gt;写 organize_version（v+1）&quot;]
+  MOVE --&gt; MIRROR[&quot;🔀 镜像模式（D20 正式实现）：&lt;br/&gt;持久待执行队列同步移动浏览器书签节点&lt;br/&gt;不与数据库事务耦合，失败可重放&quot;]
+  MIRROR --&gt; NOTI[&quot;默认全自动（D27）：静默归位&lt;br/&gt;轻提示一闪而过 · 可撤销&lt;br/&gt;确认模式降为设置项&quot;]
+  CONF -- &quot;否（多类目相近）&quot; --&gt; STAY[&quot;留在收纳盒 · 永不强移&lt;br/&gt;（收纳盒永不丢书签）&quot;]
+  STAY --&gt; ASK[&quot;聚合进下次整理会话&lt;br/&gt;一次性向用户询问&quot;]
+  AIC -- &quot;LLM 异常 llm_unavailable&quot; --&gt; RETRY[&quot;持久重试队列&lt;br/&gt;指数退避 · 最多 5 次 → 转人工&quot;]
+  RETRY -- &quot;恢复后&quot; --&gt; AIC
+  NOTI --&gt; RB[&quot;用户撤销 = 回滚该版本&lt;br/&gt;浏览器节点同步回移&quot;]
+</pre>
+<h2 id="d6">5. 收纳盒条目状态机</h2>
+<p class="desc">对应原型 06 的四种典型条目（处理中 / 已归位 / 歧义滞留 / 隐私）+ 失败重试。</p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --&gt; pending: 书签进入收纳盒（拖拽/右键/收藏默认）
+  pending --&gt; classifying: 流水线触发（事件或定时清扫）
+  pending --&gt; privacy_hold: 🛡 命中隐私域名清单
+  classifying --&gt; placed: 置信度≥阈值 → 自动归位（写版本）
+  classifying --&gt; ambiguous: 置信度不足 → 留箱不强移
+  classifying --&gt; retry: LLM 异常 / 抓取失败
+  retry --&gt; classifying: 重试（≤5次）
+  retry --&gt; ambiguous: 超过重试上限 → 转人工
+  placed --&gt; reverted: 用户撤销 → 回滚版本（浏览器同步回移）
+  reverted --&gt; pending: 重新进入待处理
+  ambiguous --&gt; placed: 用户选择目录 / 整理会话询问后归位
+  ambiguous --&gt; user_confirmed: 用户手动移出收纳盒
+  privacy_hold --&gt; user_confirmed: 手动选目录
+  user_confirmed --&gt; [*]: ⭐ AI 永不再动它（用户已确认）
+  placed --&gt; [*]: 归位完成（版本可回滚）
+
+  note right of placed
+    镜像模式：浏览器书签节点已同步移动
+    撤销 = 逆放 organize_version
+  end note
+  note left of privacy_hold
+    仅存 URL：不抓取 / 不送AI / 不快照
+    可按域名记本地规则，后续自动归位
+  end note
+</pre>
+<h2 id="d7">6. 两阶段整理（导入 → Aha）</h2>
+<p class="desc">阶段1 确定性规则引擎（零 LLM、零延迟）抢出 Aha；阶段2 是二次惊喜不是等待门槛（§5.2）。</p>
+<pre class="mermaid">
+flowchart TD
+  IN[&quot;导入 N 条（双通道，见流程12）&lt;br/&gt;直接落映射目录 · 不进收纳盒（红线⑤）&quot;] --&gt; S1
+
+  subgraph S1[&quot;阶段1 · 快整理 &lt;15s · 零LLM零成本&quot;]
+    R1[&quot;目录结构语义&quot;] --&gt; RE[&quot;确定性规则引擎&quot;]
+    R2[&quot;URL 域名模式&quot;] --&gt; RE
+    R3[&quot;标题关键词&quot;] --&gt; RE
+    R4[&quot;添加时间分布&quot;] --&gt; RE
+  end
+
+  RE --&gt; APPLY[&quot;AI 直接应用 → organize_version v1&lt;br/&gt;（D27 无确认流 · act + undo）&quot;]
+  APPLY --&gt; USER[&quot;⭐ Aha Moment：&lt;br/&gt;整理结果 + 导航站即刻可见&lt;br/&gt;不满意随时一键恢复原样&lt;br/&gt;（注册/BYOK 都在 Aha 之后）&quot;]
+  APPLY --&gt; S2
+
+  subgraph S2[&quot;阶段2 · 内容级精修（后台）&quot;]
+    CAP[&quot;补抓正文（限速·robots·失败降级仅元数据）&quot;] --&gt; EMB[&quot;embedding 聚类 k≈√n&quot;]
+    EMB --&gt; LLM[&quot;LLM 仅做簇命名与边界调整&lt;br/&gt;（千级书签成本 &lt; ¥0.5 · F3.9）&quot;]
+    LLM --&gt; ASSIGN[&quot;逐条归属判定&quot;]
+  end
+
+  ASSIGN --&gt; NOTI[&quot;🔔 通知：『AI 已按网页内容精修 43 条』&lt;br/&gt;→ 查看 diff（复用同一确认流）&quot;]
+  NOTI --&gt; APPLY2[&quot;不满意一句话修正（F3.6）→ 追加版本 · 或一键回滚&quot;]
+</pre>
+<h2 id="d8">7. 整理会话与版本状态机</h2>
+<p class="desc">聊天整理与收纳盒自动归位共用同一版本体系（F3.5），不另建回滚体系。</p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --&gt; planning: 用户下达自然语言指令
+  planning --&gt; applying: 编排完成（聚类压缩→归属判定）
+  planning --&gt; failed: 结构化错误（llm_unavailable 等）
+  failed --&gt; planning: 重试 / 引导配置 BYOK
+  applying --&gt; applied: 乐观锁校验通过 → 直接落库（D27 无确认）
+  applying --&gt; failed: 版本漂移 409 → 基于新版本自动重试
+  applied --&gt; applied: 收纳盒自动归位追加版本
+  applied --&gt; revising: 「哪里不满意」一句话（F3.6）
+  revising --&gt; applying: 重新整理（同样直接生效）
+  applied --&gt; reverted: 一键回滚 = 逆放 diff
+  reverted --&gt; applying: 调整后再次应用
+
+  note right of applied
+    每次应用生成 organize_version：
+    diff 全量记录旧状态 · 历史永不删除
+    浏览器书签树镜像移动（D20 持久待执行）
+    回滚生成新版本号（非删除历史）
+    红线③：删除建议永不自动执行
+    合并副本：直接移除 · 7 天内可从版本恢复（D28）
+  end note
+</pre>
+<h2 id="d9">8. 整理应用 → 通知 → 回滚（时序与乐观锁 · D27）</h2>
+<p class="desc">技术方案 §7⑥（D27 修订）：乐观锁保留、确认流移除——整理直接应用，通知可撤销；镜像移动不与数据库事务共用。</p>
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as 用户
+  participant UI as 扩展侧栏 / 管理台
+  participant API as 服务端（Hono）
+  participant L as LLM（packages/ai）
+  participant BK as 浏览器书签树（镜像）
+
+  U-&gt;&gt;UI: 自然语言整理指令
+  UI-&gt;&gt;API: POST /organize/sessions
+  API-&gt;&gt;L: 编排（千级→聚类压缩→簇命名→逐条归属）
+  L--&gt;&gt;API: 变更集 diff（移动/改名/合并/归档建议）
+  API-&gt;&gt;API: 乐观锁校验（base_version=v42）
+
+  alt 校验通过
+    API-&gt;&gt;API: 事务落库 + 写入 organize_version v43
+    API-&gt;&gt;BK: 写入镜像待执行队列（移动节点）
+    BK--&gt;&gt;API: 移动完成（失败保留队列重放）
+    API--&gt;&gt;UI: SSE：v43 已应用
+    UI--&gt;&gt;U: 通知卡：搬家61 · 合并2 · 归档建议5（未执行）&lt;br/&gt;[撤销] [看看改了什么]
+  else 版本漂移（期间库已被修改）
+    API-&gt;&gt;API: 409 → 基于新版本自动重整一次
+    API--&gt;&gt;UI: 通知卡（同上）
+  end
+
+  U-&gt;&gt;UI: 一句话修正（F3.6）或 回滚 v43
+  UI-&gt;&gt;API: POST /rollback
+  API-&gt;&gt;API: 逆放 diff → 生成 v44（历史保留）
+  API-&gt;&gt;BK: 镜像回移节点
+  API--&gt;&gt;UI: ✅ 已回滚至 v44
+</pre>
+<h2 id="d10">9. 一键快照生成与降级链</h2>
+<p class="desc">技术方案 §7④；隐私域名永不快照；公开导航站永不展示快照内容（红线④）。</p>
+<pre class="mermaid">
+flowchart TD
+  T1[&quot;① 收藏瞬间（popup 勾选·全局开关）&quot;] &amp; T2[&quot;② 手动一键&lt;br/&gt;详情页/右键/导航卡片&quot;] &amp; T3[&quot;③ 聊天指令&lt;br/&gt;单个或批量（批量走队列 P1）&quot;] &amp; T4[&quot;④ 失效联动&lt;br/&gt;死链判定后提示补拍&quot;] --&gt; PRV{&quot;🛡 隐私域名？&quot;}
+  PRV -- &quot;是&quot; --&gt; NO[&quot;不生成快照&lt;br/&gt;仅元数据&quot;]
+  PRV -- &quot;否&quot; --&gt; CAP{&quot;当前标签页可捕获？&lt;br/&gt;（chrome:// 页等不可用）&quot;}
+  CAP -- &quot;是&quot; --&gt; MHTML[&quot;通道A：captureMHTML&lt;br/&gt;MHTML 单文件 · 浏览器原生保真&quot;]
+  CAP -- &quot;否 / 失败&quot; --&gt; CLEAN[&quot;降级：offscreen 净化 HTML&lt;br/&gt;（SingleFile 式资源内联）&quot;]
+  CLEAN -- &quot;再失败&quot; --&gt; META[&quot;降级：仅元数据 + 标记 fail_reason&quot;]
+  MHTML --&gt; STORE{&quot;存储形态&quot;}
+  CLEAN --&gt; STORE
+  STORE -- &quot;本地模式&quot; --&gt; OPFS[&quot;扩展 IndexedDB/OPFS&lt;br/&gt;随设备容量&quot;]
+  STORE -- &quot;自建端&quot; --&gt; DISK[&quot;本地磁盘 /data&lt;br/&gt;不限量 · 含历史版本&quot;]
+  STORE -- &quot;云端&quot; --&gt; S3[&quot;对象存储&lt;br/&gt;Free 小配额 / Pro 2GB&quot;]
+  MHTML --&gt; VIEW[&quot;快照查看器（新标签）&lt;br/&gt;版本切换 · 仅用户私有可见&quot;]
+  META --&gt; DEADLINK[&quot;死链判定后周报提示：&lt;br/&gt;『已失效且无快照』→ 引导原页可达时补拍&quot;]
+</pre>
+<h2 id="d11">10. 死链分层探测与三级判定</h2>
+<p class="desc">技术方案 §7⑤；D3 保守判定：疑似只标注，误判不可逆所以宁可漏判。</p>
+<pre class="mermaid">
+flowchart TD
+  JOB[&quot;⏰ 每周定时任务（自建端内置 cron）&lt;br/&gt;或手动触发&quot;] --&gt; LOOP[&quot;逐条分层探测（省约 80% 请求）&quot;]
+  LOOP --&gt; DNS{&quot;① DNS 解析&quot;}
+  DNS -- &quot;失败&quot; --&gt; DEAD[&quot;确认失效：域名不可达&quot;]
+  DNS -- &quot;成功&quot; --&gt; HEAD{&quot;② HEAD 请求&quot;}
+  HEAD -- &quot;2xx / 3xx&quot; --&gt; OK[&quot;✅ 正常&lt;br/&gt;更新 last_checked_at&quot;]
+  HEAD -- &quot;403 / 429（反爬特征）&quot; --&gt; SUS[&quot;⚠️ 疑似失效：仅标注观察&lt;br/&gt;连续 2 周期仍拦截 → 升级确认候选&quot;]
+  HEAD -- &quot;其他异常&quot; --&gt; GET{&quot;③ GET 复验&quot;}
+  GET -- &quot;2xx&quot; --&gt; OK
+  GET -- &quot;410 / 持续 5xx&quot; --&gt; DEAD
+  GET -- &quot;超时/网络抖动&quot; --&gt; R[&quot;重试 ×3（退避）&quot;]
+  R --&gt; GET
+  DEAD --&gt; W1[&quot;写入 status=dead&lt;br/&gt;联动快照：有 → 周报给『查看快照』入口&lt;br/&gt;无 → 提示『已失效且无快照』&quot;]
+  SUS --&gt; W2[&quot;写入 status=suspect&lt;br/&gt;周报标注 · 不做任何处理动作&quot;]
+  OK --&gt; W3[&quot;status=normal&quot;]
+  W1 &amp; W2 &amp; W3 --&gt; REPORT[&quot;聚合维护周报&lt;br/&gt;（死链+3 · 疑似+2 · 归档42 · 重复23组）&quot;]
+  REPORT --&gt; HOOK[&quot;④ 周报钩子：扩展角标 + 管理台&lt;br/&gt;点进处理 → 再体验 AI&quot;]
+</pre>
+<h2 id="d12">11. 书签状态流转</h2>
+<p class="desc">数据模型 `bookmark.status`（技术方案 §4）+ 快照/隐私联动。</p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --&gt; normal: 导入 / 收藏落库
+  normal --&gt; normal: 内容变更检测 → 摘要刷新（L1）
+  normal --&gt; suspect: 反爬 403/429（第 1 周期）
+  suspect --&gt; normal: 下一周期检测通过
+  suspect --&gt; dead: 连续 2 周期 → 确认候选 + 复验通过
+  normal --&gt; dead: DNS 失败 / HTTP 410 / 持续 5xx
+  dead --&gt; normal: 复活检测（复验恢复）
+  normal --&gt; archived: 归档建议被采纳 / AI 整理归档
+  archived --&gt; normal: 用户恢复 / 版本回滚
+  archived --&gt; dead: 归档期间检测失效
+  dead --&gt; [*]: 用户手动删除（唯一删除路径 · 二次确认）
+
+  note right of dead
+    📸 有快照 → 卡片/详情显示「有快照」
+    点击进快照查看器（失效≠丢失）
+    无快照 → 周报提示，引导补拍
+  end note
+  note left of normal
+    🛡 隐私域名书签：任何状态都
+    仅存 URL（抓取/AI/快照前置拦截）
+  end note
+</pre>
+<h2 id="d13">12. 导入双通道（去重/幂等/隐私联动）</h2>
+<p class="desc">技术方案 §7⑦；红线⑤：导入直接落映射目录，**不进收纳盒**。</p>
+<pre class="mermaid">
+flowchart TD
+  WEL[&quot;安装引导页选择导入方式&quot;] --&gt; C1
+  C1[&quot;通道1（主）：chrome.bookmarks.getTree&lt;br/&gt;一键读取全树 · 保留层级/added_at/sort&lt;br/&gt;bookmarks 权限仅用于导入，不监控&quot;]
+  WEL --&gt; C2
+  C2[&quot;通道2（兜底）：Netscape HTML 文件&lt;br/&gt;Firefox/Safari 导出 · 或拒绝授权时&lt;br/&gt;解析器在 packages/shared 共用&quot;]
+  C1 --&gt; TREE[&quot;树形映射：浏览器目录 1:1 → folder 树&lt;br/&gt;is_system_inbox 系统收纳盒除外&quot;]
+  C2 --&gt; TREE
+  TREE --&gt; NORM[&quot;逐条 url_canonical 规范化&lt;br/&gt;去 utm_* 等 tracking · 统一协议/斜杠/小写域名&quot;]
+  NORM --&gt; PRIV{&quot;🛡 隐私域名清单（导入时即校验）&quot;}
+  PRIV -- &quot;命中&quot; --&gt; PONLY[&quot;仅存 URL · 不触发任何捕获&quot;]
+  PRIV -- &quot;未命中&quot; --&gt; DUP{&quot;url_canonical 与库内撞车？&quot;}
+  DUP -- &quot;是&quot; --&gt; SKIP[&quot;默认跳过&lt;br/&gt;预览页显示：新增N/重复M&lt;br/&gt;可勾选『仍导入为副本』（默认不勾）&quot;]
+  DUP -- &quot;否&quot; --&gt; BATCH
+  PONLY --&gt; BATCH[&quot;分批上行（100 条/批）&lt;br/&gt;Idempotency-Key 幂等（SW 重试不重复导入）&lt;br/&gt;单批失败可续传 · SSE 进度&quot;]
+  SKIP --&gt; BATCH
+  BATCH --&gt; INGEST[&quot;落映射目录&lt;br/&gt;⛔ 不进收纳盒（红线⑤）&quot;]
+  INGEST --&gt; STAGE[&quot;自动触发两阶段整理（见流程6）&quot;]
+</pre>
+<h2 id="d14">13. 自建端单容器部署架构</h2>
+<p class="desc">技术方案 §3 形态B + §8；红线①：内存 &lt;300MB · 镜像 ≤250MB · SQLite 单文件 · ARM64。</p>
+<pre class="mermaid">
+flowchart TB
+  subgraph DOCKER[&quot;单容器（node:22-alpine · esbuild bundle 85KB · 运行层无 node_modules）&quot;]
+    HONO[&quot;Hono API&lt;br/&gt;/api/v1 · SSE · 静态托管管理台&quot;]
+    Q[&quot;进程内任务队列&lt;br/&gt;（SQLite 表实现 · 无 Redis）&quot;]
+    WK[&quot;Worker（进程内）&lt;br/&gt;抓取补漏 · 死链周检 · 收纳盒清扫 · 批量快照&quot;]
+    MIG[&quot;有序迁移器 migrate.ts&lt;br/&gt;版本化 · 迁移前 VACUUM INTO 备份&quot;]
+  end
+
+  EXT[&quot;🌐 扩展&quot;] -- &quot;HTTP + Bearer 长期令牌&quot; --&gt; HONO
+  ADM[&quot;🖥 管理台&quot;] -- &quot;同源&quot; --&gt; HONO
+  PUB[&quot;🌍 公开导航站 /s/:slug&quot;] --&gt; HONO
+
+  HONO --&gt; DB[(&quot;SQLite 单文件 · WAL&lt;br/&gt;书签/目录/缓存/版本/队列/报告&quot;)]
+  WK --&gt; DB
+  Q --&gt; WK
+  HONO --&gt; Q
+  WK --&gt; LLMX[&quot;LLM 端点（三档切换只改 LLM_BASE_URL）：&lt;br/&gt;llm-mock / Ollama 全离线 / 云端 API&quot;]
+  WK --&gt; FS[(&quot;/data 磁盘：快照 · 图标 · 备份&lt;br/&gt;NAS 可再同步到 Hyper Backup&quot;)]
+  MIG --&gt; DB
+  MIG --&gt; FS
+</pre>
+<h2 id="d15">14. 导航站生成（站点化分析投影 · D30）</h2>
+<p class="desc">导航的价值在「站点入口」：文章 / 详情类书签不占导航位；资料类站点（文档 / wiki / 教程首页）同样默认不入（D31）——资料是&quot;去读的&quot;，不是&quot;每天点进去的&quot;。分析是**投影**——不改书签数据（D16 应用库是主数据），可随时重建。</p>
+<pre class="mermaid">
+flowchart TD
+  LIB[(&quot;应用书签库（全量 · D16 主数据）&quot;)] --&gt; RULE[&quot;① 站点识别 · 规则信号（零成本先行）&lt;br/&gt;URL 路径深度 · 文章路径模式（/p/123、日期路径、长ID）&lt;br/&gt;域名映射表站点白名单&quot;]
+  LIB --&gt; AIS[&quot;② 站点识别 · AI 信号（有 L1 缓存时）&lt;br/&gt;摘要判断三类：官网·工具 / 资料站（文档·wiki·教程） / 内容页（文章·商品）&quot;]
+  RULE --&gt; MG{&quot;③ 同站归并&quot;}
+  AIS --&gt; MG
+  MG -- &quot;官网 / 工具 / 服务类站点首页&quot; --&gt; KEEP[&quot;成为站点卡 → 进入导航&quot;]
+  MG -- &quot;资料类站点（文档 / wiki / 教程首页）&quot; --&gt; REF[&quot;默认不入导航（D31）&lt;br/&gt;书签库保留 · 管理台开关 / 自定义卡可加回&quot;]
+  MG -- &quot;同域名多篇内容页&quot; --&gt; UP[&quot;归并为一个站点卡&lt;br/&gt;首页直达 + AI 起站名 + 首页 favicon&quot;]
+  MG -- &quot;只收藏过文章、没有首页&quot; --&gt; UPG[&quot;域名根升级为站点卡&lt;br/&gt;（默认开启 · 可撤销 · 通知说明）&lt;br/&gt;原文章仍保留在书签库&quot;]
+  KEEP --&gt; SET[&quot;站点集（导航投影 · 不改书签数据）&quot;]
+  UP --&gt; SET
+  UPG --&gt; SET
+  SET --&gt; RANK[&quot;④ 个性化排序&lt;br/&gt;应用内点击频次（D29 数据源）+ 分组权重 + 最近使用&quot;]
+  RANK --&gt; RENDER[&quot;⑤ 按模板渲染：新标签页（三档）/ 公开导航站&quot;]
+  RENDER --&gt; DEAD[&quot;死链站点卡 → 「📸 有快照」可回看标识&quot;]
+  LIB -. &quot;内容级书签（文章/详情）保留在书签库目录&lt;br/&gt;可按 🏛 站点 / 📄 内容页 筛选&quot; .-&gt; LIB
+  USERDEF[&quot;⚙️ 自定义卡片&lt;br/&gt;唯一允许任意 URL 的手动例外&quot;] --&gt; SET
+</pre>
+<h2 id="d16">15. 收藏事件与集成 Hook（出站 Webhook + 入站 API · D33 · P2）</h2>
+<p class="desc">产品不内置高风险能力（D32：不做媒体下载），但提供中立管道——用户自备工具，我们负责把「收藏那一刻」的结构化数据可靠地送过去。定位：P3 极客 / NAS 生态口碑能力，M1/M2 不做，API 契约预留。</p>
+<pre class="mermaid">
+flowchart TD
+  EVT[&quot;服务端事件：收藏 / 整理完成 / 死链确认&quot;] --&gt; PRIV{&quot;🛡 隐私域名清单（强制前置 · 红线②延伸）&quot;}
+  PRIV -- &quot;命中&quot; --&gt; SKIP[&quot;永不外发 · 仅本地记录&quot;]
+  PRIV -- &quot;未命中&quot; --&gt; CFG{&quot;已配置匹配的 Hook？&quot;}
+  CFG -- &quot;否&quot; --&gt; DONE[&quot;正常流程继续&quot;]
+  CFG -- &quot;是&quot; --&gt; PAY[&quot;组装 payload（粒度由 Hook 配置：&lt;br/&gt;仅元数据 / 元数据+正文+分类结果）&lt;br/&gt;HMAC-SHA256 签名头&quot;]
+  PAY --&gt; NET{&quot;目标地址校验（SSRF 防护）&quot;}
+  NET -- &quot;内网地址 且 未开启白名单&quot; --&gt; BLOCK[&quot;拦截并记录&quot;]
+  NET -- &quot;公网 https / 已显式允许内网&quot; --&gt; POST[&quot;POST → 用户自有工具&lt;br/&gt;例：NAS 上的 yt-dlp / n8n / Home Assistant&quot;]
+  POST --&gt; RET[&quot;失败退避重试 ×3&lt;br/&gt;产物不自动回流&lt;br/&gt;工具结果如需入库 → 走入站收藏 API&quot;]
+  IN[&quot;外部工具 → 入站收藏&lt;br/&gt;POST /api/v1/bookmarks（Idempotency-Key）&quot;] --&gt; PIPE[&quot;📥 收纳盒流水线（见流程 4）&quot;]
+</pre>
+<h2 id="d17">附：图 ↔ 决策/红线对照</h2>
+<p class="desc">| 图 | 关联决策/红线 |</p>
+<p class="desc">|---|---|</p>
+<p class="desc">| 流程3/4 | 红线②（隐私校验不可绕过）· D20（镜像模式）· F1.4/F1.5 |</p>
+<p class="desc">| 流程6 | §5.2 两阶段 · Aha 60s · F3.9 成本策略 |</p>
+<p class="desc">| 流程7/8 | D27（无确认流 act+undo）· F3.5/F3.6 · 乐观锁 · organize_version |</p>
+<p class="desc">| 流程9 | D10（快照一等公民）· 红线④ · D4（云端不存 L3） |</p>
+<p class="desc">| 流程10/11 | D3（三级保守判定）· F5.1 |</p>
+<p class="desc">| 流程12 | 红线⑤（导入不进收纳盒）· F1.1 · 幂等 |</p>
+<p class="desc">| 流程13 | 红线①（NAS 资源）· D12（开源免费）· D15（本轮范围） |</p>
+<p class="desc">| 流程14 | D30（站点投影）+ D31（资料站默认不入导航）· D16（库是主数据）· D29（点击数据源）· 红线④（公开站不展示快照内容） |</p>
+<p class="desc">| 流程15 | D33（中立管道）· D32（不做媒体下载）· 红线②（隐私前置拦截） |</p>
+</div>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", flowchart: { curve: "basis" }, securityLevel: "loose" });
+</script>
+</body>
+</html>

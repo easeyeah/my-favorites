@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>my-favorites · 高保真原型总览 v0.1</title>
+<link rel="stylesheet" href="_shared.css?v=031">
+<script src="_shared.js?v=031"></script>
+<style>
+  .hero {
+    background: var(--ai-grad);
+    border-radius: 16px; color: #fff;
+    padding: 34px 38px; margin-bottom: 28px;
+    box-shadow: 0 10px 30px rgba(124, 58, 237, 0.3);
+  }
+  .hero h1 { font-size: 26px; margin-bottom: 8px; }
+  .hero p { opacity: 0.92; font-size: 14px; max-width: 720px; }
+  .sec-title { font-size: 17px; font-weight: 700; margin: 34px 0 14px; display: flex; align-items: center; gap: 10px; }
+  .sec-title .n { color: var(--primary); font-size: 13px; background: var(--primary-soft); border-radius: 999px; padding: 2px 10px; }
+  .swatch { border-radius: 10px; height: 54px; display: flex; align-items: flex-end; padding: 6px 9px; color: #fff; font-size: 10.5px; font-weight: 600; }
+  .screen-card {
+    display: flex; gap: 14px; align-items: flex-start;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px;
+    transition: all 0.15s; color: inherit;
+  }
+  .screen-card:hover { border-color: var(--primary); box-shadow: var(--shadow-2); text-decoration: none; transform: translateY(-2px); }
+  .screen-card .ico { font-size: 22px; width: 40px; height: 40px; flex: none; display: flex; align-items: center; justify-content: center; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; }
+  .screen-card h3 { font-size: 14px; margin-bottom: 3px; }
+  .screen-card p { font-size: 12.5px; color: var(--text-2); }
+  .screen-card .meta { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .style-card { border: 1.5px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--panel); }
+  .style-card.sel { border-color: var(--primary); }
+  .style-preview { padding: 18px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><b>my-favorites</b> / 原型总览</span>
+  <span class="hint right">v0.1 · 2026-11-18 · 用于功能与风格评审</span>
+</header>
+
+<main class="wrap">
+
+  <div class="hero">
+    <h1>my-favorites 高保真原型</h1>
+    <p>把失控的书签堆，变成有掌控感、每天使用的个人导航主页。本套原型覆盖<b>扩展端 8 屏 + 自建端管理台 8 屏 + 公开导航站 1 屏</b>，以及全部核心流程的 Mermaid 流程图与状态机。每张原型底部的「💬 讨论点」已于 2026-11-18 <b>全部决议收口（D37）</b>——决议清单在各页可追溯，下一轮进入样式精细化打磨。</p>
+    <div class="row mt12" style="opacity:.95">
+      <span class="badge" style="background:rgba(255,255,255,.18);color:#fff;border-color:transparent">🌓 右上角可切换深浅色</span>
+      <span class="badge" style="background:rgba(255,255,255,.18);color:#fff;border-color:transparent">📐 界面风格：极简黑白（方向 C · 已选定 2026-11-18）</span>
+      <span class="badge" style="background:rgba(255,255,255,.18);color:#fff;border-color:transparent">🗺️ <a href="流程与状态图.html" style="color:#fff;text-decoration:underline">流程图 & 状态机 →</a></span>
+    </div>
+  </div>
+
+  <!-- 界面风格 -->
+  <div class="sec-title">界面风格：<b>极简黑白（方向 C · 已选定）</b> <span class="n">另两方向保留备查</span></div>
+  <div class="grid3">
+    <div class="style-card">
+      <div class="style-preview">
+        <b style="font-size:14px">A · 清爽中性（当前默认）</b>
+        <span class="hint">shadcn/ui 同族审美：白卡片、细边框、单主色、克制的圆角。信息密度高，管理台气质。</span>
+        <div class="row">
+          <button class="btn btn-p">主按钮</button>
+          <button class="btn btn-o">次要</button>
+          <span class="badge b-ai">AI 建议</span>
+        </div>
+        <div class="tile" style="width:96px"><span class="fav fc-2">G</span><span class="nm">GitHub</span></div>
+      </div>
+      <div style="padding:10px 18px;border-top:1px solid var(--border);font-size:12px;color:var(--text-3)">备选：偏管理台气质（曾为默认方向 A）</div>
+    </div>
+    <div class="style-card">
+      <div class="style-preview" style="background:#faf7ff">
+        <b style="font-size:14px">B · 明快活力（AI 渐变感）</b>
+        <span class="hint">AI 元素用紫粉渐变突出，卡片带彩色描边、大圆角，导航站更像「个人主页产品」。</span>
+        <div class="row">
+          <span style="background:linear-gradient(135deg,#6366f1,#d946ef);color:#fff;border-radius:12px;padding:8px 16px;font-size:13px;font-weight:600">主按钮</span>
+          <span style="border:1.5px dashed #d946ef;color:#a21caf;border-radius:12px;padding:7px 14px;font-size:13px">次要</span>
+          <span style="background:#f5f3ff;color:#7c3aed;border-radius:999px;padding:3px 10px;font-size:11.5px;font-weight:700">✦ AI</span>
+        </div>
+        <div style="display:flex;gap:8px">
+          <div style="width:92px;border:1.5px solid #e9d5ff;border-radius:16px;padding:12px 6px;text-align:center;background:#fff"><div style="width:34px;height:34px;margin:0 auto 6px;border-radius:12px;background:linear-gradient(135deg,#2e90fa,#7c3aed);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px">G</div><span style="font-size:12px;color:#5f6b7e">GitHub</span></div>
+          <div style="width:92px;border:1.5px solid #e9d5ff;border-radius:16px;padding:12px 6px;text-align:center;background:#fff"><div style="width:34px;height:34px;margin:0 auto 6px;border-radius:12px;background:linear-gradient(135deg,#12b76a,#06aed4);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px">V</div><span style="font-size:12px;color:#5f6b7e">Vite</span></div>
+        </div>
+      </div>
+      <div style="padding:10px 18px;border-top:1px solid var(--border);font-size:12px;color:var(--text-3)">适合：更看重 C 端观感 / P2 效率门户人群</div>
+    </div>
+    <div class="style-card sel">
+      <div class="style-preview">
+        <b style="font-size:14px">C · 极简黑白（内容优先）✅ 已选定</b>
+        <span class="hint">近黑白、无彩色徽章、直角或小圆角，图标站文字为王。像 Arc / Things 的冷静感。</span>
+        <div class="row">
+          <span style="background:#1a1a1a;color:#fff;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:500">主按钮</span>
+          <span style="border:1px solid #d4d4d4;color:#1a1a1a;border-radius:6px;padding:7px 14px;font-size:13px">次要</span>
+          <span style="border:1px solid #d4d4d4;border-radius:999px;padding:2px 10px;font-size:11px;color:#525252">AI</span>
+        </div>
+        <div style="display:flex;gap:8px">
+          <div style="width:92px;border:1px solid #e5e5e5;border-radius:8px;padding:12px 6px;text-align:center;background:#fff"><div style="width:30px;height:30px;margin:0 auto 6px;border-radius:6px;background:#1a1a1a;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px">G</div><span style="font-size:12px;color:#525252">GitHub</span></div>
+          <div style="width:92px;border:1px solid #e5e5e5;border-radius:8px;padding:12px 6px;text-align:center;background:#fff"><div style="width:30px;height:30px;margin:0 auto 6px;border-radius:6px;background:#e5e5e5;color:#1a1a1a;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px">V</div><span style="font-size:12px;color:#525252">Vite</span></div>
+        </div>
+      </div>
+      <div style="padding:10px 18px;border-top:1px solid var(--border);font-size:12px;color:var(--text-3)">✅ 当前全套原型即此风格 · 想切回 A/B 只改 _shared.css</div>
+    </div>
+  </div>
+
+  <!-- 设计规范 -->
+  <div class="sec-title">设计规范（方向 A 落地值） <span class="n">改风格只改 _shared.css</span></div>
+  <div class="card">
+    <div class="card-b">
+      <div class="grid5" style="gap:10px">
+        <div class="swatch" style="background:#171717">主色（近黑）#171717</div>
+        <div class="swatch" style="background:#525252">次级文本 #525252</div>
+        <div class="swatch" style="background:#a1a1a1">弱化 #a1a1a1</div>
+        <div class="swatch" style="background:#e6e6e6;color:#525252">边框 #e6e6e6</div>
+        <div class="swatch" style="background:#f4f4f5;color:#525252">面板底 #f4f4f5</div>
+      </div>
+      <div class="grid5 mt12" style="gap:10px">
+        <div class="swatch" style="background:#fafafa;color:#525252;border:1px solid #e6e6e6">背景 #fafafa</div>
+        <div class="swatch" style="background:#5a7d6f">● 正常点 #5a7d6f</div>
+        <div class="swatch" style="background:#a08b5a">● 疑似点 #a08b5a</div>
+        <div class="swatch" style="background:#a05a54">● 失效点 #a05a54</div>
+        <div class="swatch" style="background:#171717">✦ AI = 实心近黑</div>
+      </div>
+      <p class="hint mt6">极简黑白原则：彩色只出现在 ≤9px 的功能状态点与数字卡下划线上；按钮/徽章的层级用<b>填充 vs 线型（实线/虚线/点线/重线）</b>表达——正常=素色、疑似=虚线框、失效=重实线框、AI/主操作=实心近黑、隐私=点线框+🛡。</p>
+      <div class="row mt20" style="flex-wrap:wrap;gap:14px">
+        <button class="btn btn-p">主要操作</button>
+        <button class="btn btn-o">次要操作</button>
+        <button class="btn btn-g">幽灵按钮</button>
+        <button class="btn btn-ai">✦ AI 整理</button>
+        <button class="btn btn-d">危险操作</button>
+        <span class="badge b-ok">● 正常</span><span class="badge b-warn">● 疑似失效</span>
+        <span class="badge b-danger">● 已失效</span><span class="badge b-priv">🛡 隐私保护</span>
+        <span class="badge b-ai">✦ 快照可用</span>
+        <span class="kbd">J</span><span class="kbd">K</span><span class="kbd">空格</span>
+      </div>
+      <p class="hint mt12">字体：系统栈 + PingFang SC / Noto Sans SC · 正文 15px · 辅助 13px · 数字用 tabular-nums · 圆角 10px（嵌入容器）/ 12px（浮层）/ 8px（卡）/ 6px（控件）· 间距基于 4px 网格 · favicon 一律灰阶，文字为王<br><b>布局骨架（容器 × 导航语法）</b>：管理台全屏页 = 左侧主菜单统一壳；<b>扩展端设置 = 单页分区式（D38，不套壳——扩展要轻，聚焦书签管理）</b>；扩展全屏内容页（快照查看器）= 左侧壳；popup / 侧栏等窄容器 = 顶部标签页；浮层 = 无导航、任务即页面。快照查看器的「原文渲染区」刻意保持原网页样式，是内容不是 UI。</p>
+    </div>
+  </div>
+
+  <!-- 样式调参指南 -->
+  <div class="sec-title">样式精细化调参指南 <span class="n">下一轮：界面风格打磨就改这里</span></div>
+  <div class="card"><div class="card-b" style="font-size:13.5px;color:var(--text-2)">
+    <p>所有视觉参数集中在 <b>_shared.css 顶部「设计令牌」区</b>——改一处，17 屏全局生效：</p>
+    <ul style="padding-left:20px;margin-top:8px">
+      <li><b>颜色</b>：--text / --text-2 / --text-3（三级文字灰度）、--border(-2)（两级边框）、--primary（近黑主色）、--*-soft（浅底色）——想更有温度只动这几个</li>
+      <li><b>密度</b>：.card-b 与 .lrow 的 padding、.grid* 的 gap——改小 = 更紧凑的信息密度</li>
+      <li><b>圆角</b>：--radius（容器 10px）/ --radius-s（控件 6px）——想柔和就调大</li>
+      <li><b>层级手感</b>：--shadow-1/2/3（极简风格阴影很轻，层级主要靠边框深浅）</li>
+      <li><b>字体</b>：--font 字体栈、body font-size（15px）、.hint（13px）——可读性调这里</li>
+      <li><b>favicon 灰阶</b>：.fc-1 ~ .fc-8 八档灰度</li>
+    </ul>
+    <p class="hint mt6">改完刷新即见全部效果（本地预览已启用 no-store 不缓存）。评审时如果某屏「说不出哪里丑但就是丑」，通常是密度/灰度对比问题——先调 --border 与 .lrow padding。</p>
+  </div></div>
+
+  <!-- 屏幕索引 -->
+  <div class="sec-title">全部原型屏幕 <span class="n">17 屏</span></div>
+
+  <div class="sec-title" style="font-size:14px;margin-top:20px">🧩 第一部分 · 首次体验（Aha Moment 流程）</div>
+  <div class="grid2">
+    <a class="screen-card" href="extension/01-引导-onboarding.html">
+      <span class="ico">🚀</span>
+      <div class="grow">
+        <h3>01 · 安装引导四步（导入 → 快整理 → 采纳 → 设为新标签页）</h3>
+        <p>导入后 60 秒内看到整理结果 + 导航站，这是激活率生命线。AI 直接整理到位，随时一键恢复原样（D27）。</p>
+        <div class="meta"><span class="badge b-primary">Aha 流程</span><span class="badge">4 步</span></div>
+      </div>
+    </a>
+  </div>
+
+  <div class="sec-title" style="font-size:14px;margin-top:20px">🧩 第二部分 · 浏览器扩展端（用户唯一日活入口）</div>
+  <div class="grid2">
+    <a class="screen-card" href="extension/02-一键收藏popup.html">
+      <span class="ico">📌</span>
+      <div class="grow">
+        <h3>02 · 一键收藏 Popup</h3>
+        <p>收藏瞬间：AI 即时建议归位（缓存命中 &lt;50ms）、可选同步快照、或丢进收纳盒全懒模式。</p>
+        <div class="meta"><span class="badge b-primary">留存钩子①</span><span class="badge">F1.2/F1.4/F2.4</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="extension/03-侧栏聊天整理.html">
+      <span class="ico">💬</span>
+      <div class="grow">
+        <h3>03 · 侧栏 AI 聊天整理（楔子功能）</h3>
+        <p>自然语言圈定范围整理；AI 直接执行、完成即通知、随时撤销；阶段2 精修通知。</p>
+        <div class="meta"><span class="badge b-primary">核心特色</span><span class="badge">F3</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="extension/04-整理通知与明细.html">
+      <span class="ico">🔔</span>
+      <div class="grow">
+        <h3>04 · 整理结果通知 + 只读明细（D27 无确认流）</h3>
+        <p>AI 整理直接生效：通知卡 + 一键撤销；「看看改了什么」打开只读明细；删除建议永不自动执行。</p>
+        <div class="meta"><span class="badge">D27 新决策</span><span class="badge b-primary">F3.6 修正闭环</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="extension/05-新标签页-导航主页.html">
+      <span class="ico">🏠</span>
+      <div class="grow">
+        <h3>05 · 新标签页 · 默认极简，三档可自定义</h3>
+        <p>默认 = 搜索框 + 最常访问（类浏览器默认页心智）；标准/完整两档渐进加料，逐项开关可配置（D29）。</p>
+        <div class="meta"><span class="badge b-primary">留存钩子③</span><span class="badge">D29 新决策</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="extension/06-收纳盒.html">
+      <span class="ico">📥</span>
+      <div class="grow">
+        <h3>06 · 自动收纳（懒人模式）</h3>
+        <p>随手一丢即归位：归位 toast 可撤销、歧义询问卡（永不丢书签）、隐私条目只存 URL。</p>
+        <div class="meta"><span class="badge b-primary">留存钩子②</span><span class="badge">F1.5</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="extension/07-设置连接.html">
+      <span class="ico">🔑</span>
+      <div class="grow">
+        <h3>07 · 扩展设置 · 服务端连接与端侧偏好</h3>
+        <p>服务端地址 / 令牌 / 连接测试 + 通知偏好、收纳盒投递口位置；BYOK 归自建端管理台（D35），本地模式交付时扩展复用同一选择器规格。</p>
+        <div class="meta"><span class="badge">D35 新决策</span><span class="badge">F6.3 预留</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="extension/08-快照查看器.html">
+      <span class="ico">📸</span>
+      <div class="grow">
+        <h3>08 · 快照查看器</h3>
+        <p>原页失效后的回看入口：与设置页同一左侧主菜单壳（全屏页统一骨架）；MHTML 保真渲染区刻意保持原网页样式、版本列表、隐私边界说明。</p>
+        <div class="meta"><span class="badge b-primary">F2.4 一等公民</span></div>
+      </div>
+    </a>
+  </div>
+
+  <div class="sec-title" style="font-size:14px;margin-top:20px">🧩 第三部分 · 自建端 Web 管理台（Docker · F6.2）</div>
+  <div class="grid2">
+    <a class="screen-card" href="web/09-首启向导与登录.html">
+      <span class="ico">🛠</span>
+      <div class="grow">
+        <h3>09 · 首启安装向导 + 登录</h3>
+        <p>首启强制设凭据（安全默认值）：管理员密码 → LLM 配置 → 完成；登录页含限速提示。</p>
+        <div class="meta"><span class="badge">v0.3.1 安全</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="web/10-概览.html">
+      <span class="ico">📊</span>
+      <div class="grow">
+        <h3>10 · 概览 Dashboard</h3>
+        <p>数字卡全部可钻取（不是死数字）：死链/疑似/重复组/收纳盒/快照；本周报告与队列状态。</p>
+        <div class="meta"><span class="badge">钻取链路</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="web/11-书签库.html">
+      <span class="ico">📚</span>
+      <div class="grow">
+        <h3>11 · 书签库</h3>
+        <p>左树右表 + 状态筛选 + 详情抽屉（摘要/缓存来源/快照版本/历史）；隐私条目仅元数据。</p>
+        <div class="meta"><span class="badge">F1.3/F7</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="web/12-整理中心.html">
+      <span class="ico">✨</span>
+      <div class="grow">
+        <h3>12 · 整理中心（聊天 + Diff + 版本回滚）</h3>
+        <p>管理台版聊天整理：直接执行 + 通知撤销、成本透明（聚类压缩）、organize_version 时间线一键回滚（唯一安全面）。</p>
+        <div class="meta"><span class="badge b-primary">F3.5 回滚体系</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="web/13-导航站管理.html">
+      <span class="ico">🌐</span>
+      <div class="grow">
+        <h3>13 · 导航站管理</h3>
+        <p>模板选择（4 套）、主题色与深浅色、发布控制（私有/随机链接/密码）、水印开关、实时预览。</p>
+        <div class="meta"><span class="badge">F4</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="web/14-维护报告.html">
+      <span class="ico">🩺</span>
+      <div class="grow">
+        <h3>14 · 维护报告（死链周报 + 查重）</h3>
+        <p>哪些链接坏了、为什么访问不了（DNS/410/反爬分级）、建议动作；重复组明细可合并。</p>
+        <div class="meta"><span class="badge b-primary">留存钩子④</span><span class="badge">F5</span></div>
+      </div>
+    </a>
+    <a class="screen-card" href="web/15-设置.html">
+      <span class="ico">⚙️</span>
+      <div class="grow">
+        <h3>15 · 管理台设置</h3>
+        <p>BYOK 供应商管理主场（D35）+ LLM 三档切换、隐私域名清单、集成 Webhook、自动备份、令牌与安全、数据导入导出。</p>
+        <div class="meta"><span class="badge">自建端专属</span></div>
+      </div>
+    </a>
+  </div>
+
+  <div class="sec-title" style="font-size:14px;margin-top:20px">🧩 第四部分 · 公开页</div>
+  <div class="grid2">
+    <a class="screen-card" href="web/16-公开导航站.html">
+      <span class="ico">🌍</span>
+      <div class="grow">
+        <h3>16 · 公开导航站（/s/:slug）</h3>
+        <p>仅元数据 + 摘要（版权红线）：失效书签显示「快照可用」状态但不展示内容；页脚水印。</p>
+        <div class="meta"><span class="badge b-danger">版权红线</span><span class="badge">F4.2/F4.6</span></div>
+      </div>
+    </a>
+  </div>
+
+  <div class="sec-title">流程图与状态机 <span class="n">Mermaid · 13 张</span></div>
+  <div class="card"><div class="card-b">
+    <div class="grid2" style="gap:8px;font-size:13px">
+      <div>① 产品全景与三形态架构</div><div>⑧ 整理应用→通知→回滚时序（乐观锁 · D27）</div>
+      <div>② 四钩子留存闭环</div><div>⑨ 一键快照生成与降级链</div>
+      <div>③ 收藏即时归位（&lt;50ms 缓存路径）</div><div>⑩ 死链分层探测与三级判定</div>
+      <div>④ 收纳盒自动归位流水线（镜像模式 D20）</div><div>⑪ 书签状态流转（含快照/镜像联动）</div>
+      <div>⑤ 收纳盒条目状态机</div><div>⑫ 导入双通道（去重/幂等/隐私联动）</div>
+      <div>⑥ 两阶段整理时序</div><div>⑬ 自建端单容器部署架构</div>
+      <div>⑦ 整理会话与版本状态机</div><div>⑭ 导航站生成 · 站点化分析（D30）</div>
+      <div>⑮ 收藏事件与集成 Hook（D33 · P2）</div><div></div>
+    </div>
+    <div class="row mt12">
+      <a class="btn btn-p" href="流程与状态图.html">📖 浏览器中查看渲染版</a>
+      <a class="btn btn-o" href="流程与状态图.md">📝 Mermaid 源文件（md）</a>
+    </div>
+  </div></div>
+
+  <div class="sec-title">如何评审</div>
+  <div class="card"><div class="card-b" style="font-size:13px;color:var(--text-2)">
+    <p>① 顺序建议：先看 <b>01 引导</b>（核心体验是否是你想要的）→ 扩展端五屏 → 管理台 → 公开页；② 每页右上角 🌐 可切换深浅色；③ 每页底部「💬 本页讨论点」列出该页的功能决策项——<b>界面不喜欢可以直接说，改 _shared.css 一处即可全局换肤</b>；④ 数据均为虚构演示数据。</p>
+  </div></div>
+
+</main>
+<footer class="proto-foot">my-favorites 原型 v0.1 · 评审后决策回写 docs/功能文档 并递增版本</footer>
+</body>
+</html>

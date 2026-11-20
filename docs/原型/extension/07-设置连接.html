@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>07 · 扩展设置 · 单页分区式 — my-favorites 原型</title>
+<link rel="stylesheet" href="../_shared.css?v=031">
+<script src="../_shared.js?v=031"></script>
+<style>
+  .sp { max-width: 520px; margin: 0 auto; }
+  .sec-num { display: inline-flex; width: 22px; height: 22px; border-radius: 50%; background: var(--primary); color: var(--primary-fg); align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+  .sec-h { display: flex; align-items: center; gap: 9px; margin-bottom: 4px; }
+  .sec-h .t { font-weight: 700; font-size: 14.5px; }
+  .dim { opacity: 0.5; }
+</style>
+</head>
+<body>
+
+<header class="proto-top">
+  <span class="proto-tag">PROTOTYPE</span>
+  <span class="crumb"><a href="../index.html">原型总览</a> / <b>07 · 扩展设置</b>（单页分区式 · D38 与实际实现对齐）</span>
+  <span class="hint right">扩展端聚焦书签管理 · BYOK 归管理台（D35）</span>
+</header>
+
+<main class="wrap-n">
+
+  <div class="row mb12">
+    <span class="demo-note"><b>D38 决策</b>：扩展端设置<b>保持单页滚动分区式</b>（①②③④…编号卡片），<b>不套</b>管理台的左侧主菜单壳——扩展要轻，管理台的壳是管理台的。扩展端只做三件事：<b>连接服务端、书签流入（收藏/收纳盒）、端侧偏好</b>；导航站与深度整理留在管理台/侧栏。核心 = 书签管理。</span>
+  </div>
+
+  <div class="sp">
+
+    <div class="sec-h"><span class="sec-num">1</span><span class="t">🛠 服务端连接</span><span class="badge b-ok dot right">已连接 · 12ms</span></div>
+    <div class="card">
+      <div class="card-b">
+        <div class="field">
+          <span class="label">服务端地址</span>
+          <input class="input mono" value="http://192.168.0.227:3000">
+        </div>
+        <div class="row">
+          <button class="btn btn-p btn-s">保存</button>
+          <button class="btn btn-o btn-s">🔌 测试连接</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec-h mt20"><span class="sec-num">2</span><span class="t">🔑 鉴权（可选）</span></div>
+    <div class="card">
+      <div class="card-b">
+        <div class="field">
+          <span class="label">管理员密码（服务端设置了 ADMIN_PASSWORD 才需要）</span>
+          <input class="input" type="password" placeholder="留空表示服务端未启用鉴权">
+        </div>
+        <div class="row">
+          <button class="btn btn-o btn-s">登录获取 token</button>
+          <span class="hint">令牌摘要化存储 · 默认 30 天到期 · 可在管理台「设置 → 安全」撤销</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec-h mt20"><span class="sec-num">3</span><span class="t">📦 数据迁移</span></div>
+    <div class="card">
+      <div class="card-b">
+        <p class="hint" style="margin-bottom:10px">把浏览器现有书签一键导入服务端（文件夹层级自动保留；隐私域名只存 URL）</p>
+        <div class="row" style="flex-wrap:wrap">
+          <button class="btn btn-p btn-s">📥 一键导入浏览器全部书签</button>
+          <button class="btn btn-o btn-s">↔ 反向同步到浏览器</button>
+        </div>
+        <div class="hint mt6">导入幂等（Idempotency-Key）；重复 URL 默认跳过；导入不进收纳盒，直接落映射目录后自动整理</div>
+      </div>
+    </div>
+
+    <div class="sec-h mt20"><span class="sec-num">4</span><span class="t">📥 收纳盒（投递口）</span></div>
+    <div class="card">
+      <div class="card-b">
+        <div class="row">
+          <span class="grow" style="font-size:14px">「📥 收纳盒」文件夹位置</span>
+          <select class="select" style="width:auto;padding:5px 10px;font-size:13px"><option>书签栏（默认 · 投递可见易拖）</option><option>其他书签（不占栏位）</option></select>
+        </div>
+        <div class="hint mt6">文件夹只是物理投递口（原生下拉不可定制）；管理入口 = 工具栏图标角标 → popup「收纳盒」标签</div>
+        <div class="row mt12"><button class="btn btn-o btn-s">立即清扫收纳盒</button><span class="hint">歧义阈值 80% · 攒 ≥3 条集中询问（D37）</span></div>
+      </div>
+    </div>
+
+    <div class="sec-h mt20"><span class="sec-num">5</span><span class="t">🔔 通知偏好</span></div>
+    <div class="card">
+      <div class="card-b">
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <span class="chip on">轻提示 toast（默认）</span>
+          <span class="chip">通知卡（含明细入口）</span>
+          <span class="chip">静默 · 仅版本记录</span>
+        </div>
+        <p class="hint mt6">覆盖：AI 整理完成 / 收纳盒自动归位 / 快照完成（D28）</p>
+      </div>
+    </div>
+
+    <div class="sec-h mt20"><span class="sec-num">6</span><span class="t">💻 本地模式</span><span class="badge dim right">预留 · 后续交付</span></div>
+    <div class="card dim">
+      <div class="card-b">
+        <p class="hint">未连接服务端时：受限本地缓存模式（离线首屏 + 基础搜索，D18）。完整本地模式（含本地 BYOK 直连，复用与自建端相同的供应商选择器）为后续独立交付（D15）。</p>
+      </div>
+    </div>
+
+    <div class="sec-h mt20"><span class="sec-num">7</span><span class="t">ℹ️ 关于</span></div>
+    <div class="card">
+      <div class="card-b" style="font-size:13.5px;color:var(--text-2)">
+        <div class="row"><span class="hint" style="width:96px">版本</span><span class="grow">扩展 v0.3.2 · 服务端 v0.1.0</span></div>
+        <div class="row mt6"><span class="hint" style="width:96px">开源</span><span class="grow"><a href="#">github.com/easeyeah/my-favorites</a> · AGPL-3.0</span></div>
+        <div class="row mt6"><span class="hint" style="width:96px">当前模型</span><span class="grow">✦ qwen3:14b <span class="hint">（管理台配置 · 只读，D37）</span></span></div>
+      </div>
+    </div>
+
+    <div class="callout c-info mt20"><span class="ico">ℹ️</span><div>为什么扩展里没有 AI 供应商配置？Key 在服务端加密落库、调用发生在服务端——扩展配置它没有意义（D35）。</div></div>
+
+  </div>
+
+  <details class="talk" open>
+    <summary>✅ 已定决策（D37/D38）</summary>
+    <div class="talk-b">
+      <ul style="padding-left:20px">
+        <li><b>D38（本页新增）：</b>扩展设置保持<b>单页分区式</b>，不套左侧主菜单壳；扩展端聚焦书签管理（连接 / 书签流入 / 端侧偏好）</li>
+        <li><b>BYOK 归管理台（D35）</b>：扩展不持有 Key；本地模式交付时单页内复用同一选择器规格</li>
+        <li><b>断开重连：</b>缓存保留只读；待执行队列清除前提示</li>
+        <li><b>模型透明度：</b>关于区显示只读模型 badge</li>
+        <li><b>收纳盒投递口位置：</b>书签栏（默认，可改其他书签）</li>
+      </ul>
+    </div>
+  </details>
+
+</main>
+<footer class="proto-foot">07 · 扩展设置 · my-favorites 原型 v0.4 · D38：单页分区式与实际实现对齐 · 对应 F6.3 预留 / D35 / D28 / D36</footer>
+</body>
+</html>
