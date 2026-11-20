@@ -1,9 +1,10 @@
 export * from "./url";
 export * from "./classify-rules";
+export * from "./site-signal";
 export * from "./netscape";
 export * from "./eval-samples";
 export * from "./privacy";
-import { canonicalizeUrl } from "./url";
+export * from "./widgets";
 
 /** 领域类型 —— 技术方案 §4 数据模型的 TS 侧镜像（DB schema 以 server 端 Drizzle 为准） */
 
@@ -18,9 +19,12 @@ export interface Folder {
   sort: number;
   /** imported | ai_created | user */
   source: "imported" | "ai_created" | "user";
-  /** 自动分类收件箱（F1.5）：每个空间至多一个 */
+  /** 自动收纳系统目录（F1.5/D36「收纳盒」）：每个空间至多一个 */
   isSystemInbox: boolean;
 }
+
+/** 系统收纳盒的展示名（D36：UI 文案层一律「收纳盒」；代码层 is_system_inbox、/inbox/* 内部命名保留） */
+export const INBOX_FOLDER_TITLE = "📥 收纳盒";
 
 export interface Bookmark {
   id: string;
@@ -99,14 +103,24 @@ export interface PrivacyDomainList {
   patterns: string[];
 }
 
+/**
+ * 域名级隐私判定。DEV-03 修订：直接解析 host（不经 canonicalizeUrl——查重键规则
+ * 会拒绝非 http(s)，但隐私判定必须覆盖任意 scheme）；解析失败保守按隐私处理。
+ */
 export function isPrivacyDomain(url: string, list: PrivacyDomainList): boolean {
-  const result = canonicalizeUrl(url);
-  if (!result) return false;
-  return list.patterns.some((pattern) => {
+  let host: string;
+  try {
+    host = new URL(url.trim()).hostname.toLowerCase();
+  } catch {
+    return true; // 解析不了的 URL 按隐私处理（保守，不外发）
+  }
+  return list.patterns.some((raw) => {
+    const pattern = raw.trim().toLowerCase(); // 用户可录入大写条目（*.Alipay.COM），须与 host 同口径比较
+    if (!pattern) return false;
     if (pattern.startsWith("*.")) {
-      return result.domain.endsWith(pattern.slice(1));
+      return host.endsWith(pattern.slice(1));
     }
-    return result.domain === pattern || result.domain.endsWith(`.${pattern}`);
+    return host === pattern || host.endsWith(`.${pattern}`);
   });
 }
 

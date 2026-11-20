@@ -23,6 +23,46 @@ export class LlmUnavailableError extends Error {
   }
 }
 
+/** 凭据类请求头（大小写不敏感匹配）——重定向剥离用 */
+const CREDENTIAL_HEADER = /^(authorization|proxy-authorization|x-api-key|cookie)$/i;
+
+/**
+ * DEV-04 模型端点请求：手动跟随重定向——
+ *  - 最多 3 跳，跨主机或协议降级（https→http）重定向剥离凭据头（禁止把 Key 送往其他端点/明文链路）；
+ *  - 信号覆盖整条链路（连接+响应头+响应体）。
+ */
+async function endpointFetch(
+  url: string,
+  init: { method: "POST"; headers: Record<string, string>; body: string; signal: AbortSignal },
+): Promise<Response> {
+  let current = url;
+  let headers = init.headers;
+  const origin = new URL(url);
+  for (let hop = 0; hop < 3; hop++) {
+    const res = await fetch(current, { ...init, headers, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      // 显式释放重定向响应体
+      try {
+        res.body?.cancel();
+      } catch {
+        // 忽略
+      }
+      if (!location) throw new LlmUnavailableError(`redirect ${res.status} without location`);
+      const next = new URL(location, current);
+      const cur = new URL(current);
+      if (next.host !== cur.host || (origin.protocol === "https:" && next.protocol === "http:")) {
+        // 跨主机 / https→http 降级：剥离全部凭据头（不依赖头名大小写）
+        headers = Object.fromEntries(Object.entries(headers).filter(([k]) => !CREDENTIAL_HEADER.test(k)));
+      }
+      current = next.toString();
+      continue;
+    }
+    return res;
+  }
+  throw new LlmUnavailableError("too many redirects");
+}
+
 export class LlmClient {
   constructor(private config: LlmConfig) {}
 
@@ -38,7 +78,7 @@ export class LlmClient {
   async embeddings(input: string, embeddingModel?: string, timeoutMs = 30_000): Promise<number[]> {
     // AbortSignal.timeout：Node 原生类型源，规避 DOM/Node AbortSignal 双类型冲突
     try {
-      const res = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/embeddings`, {
+      const res = await endpointFetch(`${this.config.baseUrl.replace(/\/$/, "")}/embeddings`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -65,7 +105,7 @@ export class LlmClient {
 
   async chat(messages: ChatMessage[], opts?: { json?: boolean; timeoutMs?: number }): Promise<string> {
     try {
-      const res = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      const res = await endpointFetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: {
           "content-type": "application/json",

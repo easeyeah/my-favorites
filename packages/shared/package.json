@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./almanac": "./src/almanac.ts"
   },
   "scripts": {
     "test": "vitest run",
@@ -11,6 +12,7 @@
     "seed": "node scripts/seed.mjs"
   },
   "dependencies": {
+    "lunar-typescript": "^1.8.7",
     "zod": "^4.1.0"
   },
   "devDependencies": {
