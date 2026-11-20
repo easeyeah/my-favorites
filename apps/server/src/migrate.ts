@@ -9,7 +9,9 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync, copyFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
+import { canonicalizeUrl } from "@mf/shared";
 
 /** 迁移步骤：version 单调递增；name 进日志；up 只前进 */
 export interface Migration {
@@ -174,11 +176,215 @@ export const MIGRATION_V3_IDENTITY: Migration = {
   },
 };
 
+/**
+ * 版本 4：DEV-13 保守 URL 查重键（规则 v2）迁移。
+ *  - bookmarks.url_key_version 记录每行键规则版本；
+ *  - 用 raw URL 重算全部存量键；碰撞/无法解析的行保留旧键并出报告（不 DELETE/不覆盖）。
+ */
+export const MIGRATION_V4_URL_KEYS: Migration = {
+  version: 4,
+  name: "conservative_url_keys",
+  up: (db) => {
+    const addColumn = (table: string, column: string, decl: string): void => {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+      }
+    };
+    addColumn("bookmarks", "url_key_version", "INTEGER NOT NULL DEFAULT 1");
+
+    // {canonical URL} → 首个申请该键的书签 id；后续同键行视为碰撞
+    const claimed = new Map<string, string>();
+    const collisions: Array<{ id: string; url_raw: string; keptKey: string; newKey: string }> = [];
+    const invalid: Array<{ id: string; url_raw: string }> = [];
+    const rows = db
+      .prepare("SELECT id, url_raw, url_canonical FROM bookmarks ORDER BY created_at, id")
+      .all() as Array<{ id: string; url_raw: string; url_canonical: string }>;
+    const update = db.prepare("UPDATE bookmarks SET url_canonical = ?, url_key_version = 2 WHERE id = ?");
+    const report: Record<string, unknown> = { scanned: rows.length, recomputed: 0, collisions: [], invalid: [] };
+    for (const r of rows) {
+      let newKey: string | null = null;
+      try {
+        // 直接复用 @mf/shared canonicalizeUrl（同步纯函数，静态 import 即可）——
+        // 迁移产物必须与运行时入库键逐字节一致，内联复制曾与 v2 漂移（缺编码归一）导致静默重复。
+        newKey = canonicalizeUrl(r.url_raw)?.canonical ?? null;
+      } catch {
+        newKey = null;
+      }
+      if (!newKey) {
+        invalid.push({ id: r.id, url_raw: r.url_raw });
+        continue;
+      }
+      if (newKey === r.url_canonical) {
+        update.run(r.url_canonical, r.id); // 键未变，仅补版本标记
+        continue;
+      }
+      const owner = claimed.get(newKey);
+      if (owner !== undefined && owner !== r.id) {
+        // 碰撞：保留全部实体，后到者维持旧键（查重可能漏合并，绝不删除/覆盖）
+        collisions.push({ id: r.id, url_raw: r.url_raw, keptKey: r.url_canonical, newKey });
+        continue;
+      }
+      claimed.set(newKey, r.id);
+      update.run(newKey, r.id);
+      report.recomputed = ((report.recomputed as number) ?? 0) + 1;
+    }
+    report.collisions = collisions;
+    report.invalid = invalid;
+    if (collisions.length > 0 || invalid.length > 0) {
+      db.prepare("INSERT INTO maintenance_report (id, type, findings, created_at) VALUES (?,?,?,?)").run(
+        crypto.randomUUID(),
+        "url_key_migration",
+        JSON.stringify(report),
+        new Date().toISOString(),
+      );
+    }
+  },
+};
+
+/**
+ * 版本 5：DEV-01 导航站显式发布集合。
+ *  - nav_site 增加 published（默认 0：存量站点降级为待确认，不再全库公开）、revision、updated_at；
+ *  - 显式发布集合表（站点 × 目录 / 站点 × 书签），公开页只渲染集合内元数据。
+ */
+export const MIGRATION_V5_NAV_PUBLICATION: Migration = {
+  version: 5,
+  name: "nav_site_publication_scope",
+  up: (db) => {
+    const addColumn = (table: string, column: string, decl: string): void => {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+      }
+    };
+    addColumn("nav_site", "published", "INTEGER NOT NULL DEFAULT 0");
+    addColumn("nav_site", "revision", "INTEGER NOT NULL DEFAULT 1");
+    addColumn("nav_site", "updated_at", "TEXT");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nav_site_folder (
+        slug TEXT NOT NULL, folder_id TEXT NOT NULL, PRIMARY KEY (slug, folder_id)
+      );
+      CREATE TABLE IF NOT EXISTS nav_site_bookmark (
+        slug TEXT NOT NULL, bookmark_id TEXT NOT NULL, PRIMARY KEY (slug, bookmark_id)
+      );
+    `);
+  },
+};
+
+/**
+ * 版本 6：DEV-05 令牌加固。
+ *  - tokens 增加 token_id（非密随机 ID，撤销用）、token_hash（SHA-256 摘要）、
+ *    expires_at / revoked_at / last_used_at；
+ *  - 存量明文 token 迁移为摘要（备份中不再存在可用 bearer 明文）。
+ */
+export const MIGRATION_V6_TOKEN_HARDENING: Migration = {
+  version: 6,
+  name: "token_digest_and_lifecycle",
+  up: (db) => {
+    const addColumn = (table: string, column: string, decl: string): void => {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+      }
+    };
+    addColumn("tokens", "token_id", "TEXT");
+    addColumn("tokens", "token_hash", "TEXT");
+    addColumn("tokens", "expires_at", "TEXT");
+    addColumn("tokens", "revoked_at", "TEXT");
+    addColumn("tokens", "last_used_at", "TEXT");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_tokens_id ON tokens(token_id);");
+    // 存量明文 → 摘要（不可逆；旧 bearer 立即失效，用户需重新登录——升级说明记录）
+    const rows = db
+      .prepare("SELECT token FROM tokens WHERE token_hash IS NULL")
+      .all() as Array<{ token: string }>;
+    const upd = db.prepare("UPDATE tokens SET token_id = ?, token_hash = ?, token = 'migrated' WHERE token = ?");
+    for (const r of rows) {
+      const id = crypto.randomUUID();
+      const digest = createHash("sha256").update(r.token).digest("hex");
+      upd.run(id, digest, r.token);
+    }
+  },
+};
+
+/**
+ * 版本 7：DEV-08 撤销即新版本 + DEV-03 快照清理待办台账。
+ *  - organize_version.reverts_version_id：撤销生成的补偿版本指向原版本（原历史不删除）；
+ *  - pending_snapshot_deletions：文件删除失败保留待清理记录（不"删索引即成功"）。
+ */
+export const MIGRATION_V7_UNDO_AND_PURGE_LEDGER: Migration = {
+  version: 7,
+  name: "undo_version_and_purge_ledger",
+  up: (db) => {
+    const addColumn = (table: string, column: string, decl: string): void => {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+      }
+    };
+    addColumn("organize_version", "reverts_version_id", "TEXT");
+    addColumn("organize_version", "kind", "TEXT NOT NULL DEFAULT 'apply'");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS pending_snapshot_deletions (
+        id TEXT PRIMARY KEY, path TEXT NOT NULL, reason TEXT NOT NULL, attempted_at TEXT NOT NULL
+      );
+    `);
+  },
+};
+
+/**
+ * 版本 8：原型补齐底座（2026-11-20）。
+ *  - bookmarks.site_type：站点化三类（site_tool/site_ref/content，D30/D31，可空=未分析）；
+ *  - bookmarks.suspect_streak / last_fail_reason：疑似失效连续周期与可解释失败原因（原型 14）；
+ *  - nav_site.config：导航站配置 JSON（主题色/搜索引擎/显示选项/水印/自定义卡/包含资料站，原型 13）；
+ *  - hook：集成 Hook（D33 出站 Webhook，事件/HMAC/粒度/启停）；
+ *  - inbox_state：收纳盒条目状态机（pending/classifying/placed/ambiguous/privacy_hold/retry，原型 06）；
+ *  - bookmark_click：应用内点击计数（D29 最常访问数据源）。
+ */
+export const MIGRATION_V8_PROTO_BASE: Migration = {
+  version: 8,
+  name: "proto_feature_base",
+  up: (db) => {
+    const addColumn = (table: string, column: string, decl: string): void => {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+      }
+    };
+    addColumn("bookmarks", "site_type", "TEXT");
+    addColumn("bookmarks", "suspect_streak", "INTEGER NOT NULL DEFAULT 0");
+    addColumn("bookmarks", "last_fail_reason", "TEXT");
+    addColumn("nav_site", "config", "TEXT");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS hook (
+        id TEXT PRIMARY KEY, label TEXT NOT NULL, url TEXT NOT NULL,
+        events TEXT NOT NULL DEFAULT '[]', secret TEXT, granularity TEXT NOT NULL DEFAULT 'meta',
+        enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS inbox_state (
+        bookmark_id TEXT PRIMARY KEY REFERENCES bookmarks(id) ON DELETE CASCADE,
+        state TEXT NOT NULL, confidence REAL, reason TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+        version_id TEXT
+      );
+      CREATE TABLE IF NOT EXISTS bookmark_click (
+        bookmark_id TEXT PRIMARY KEY REFERENCES bookmarks(id) ON DELETE CASCADE,
+        clicks INTEGER NOT NULL DEFAULT 0, last_at TEXT NOT NULL
+      );
+    `);
+  },
+};
+
 /** 全部迁移按版本升序注册（只追加） */
 export const MIGRATIONS: Migration[] = [
   BASELINE_MIGRATION,
   MIGRATION_V2_SOFT_ARCHIVE,
   MIGRATION_V3_IDENTITY,
+  MIGRATION_V4_URL_KEYS,
+  MIGRATION_V5_NAV_PUBLICATION,
+  MIGRATION_V6_TOKEN_HARDENING,
+  MIGRATION_V7_UNDO_AND_PURGE_LEDGER,
+  MIGRATION_V8_PROTO_BASE,
 ];
 
 export function appliedVersions(db: DatabaseSync): Set<number> {

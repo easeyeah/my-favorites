@@ -59,18 +59,25 @@ describe("GET /search（F7.1 全文搜索）", () => {
   });
 });
 
-describe("导航站（F4.1/F4.2）", () => {
-  it("发布生成随机 slug 且渲染宫格 HTML + 水印", async () => {
+describe("导航站（F4.1/F4.2 + DEV-01）", () => {
+  it("发布生成加密随机 slug 且渲染宫格 HTML + 水印", async () => {
     env = makeEnv();
     await seed(env);
+    const folders = (await (await env.app.request("/api/v1/folders")).json()) as Array<{
+      id: string;
+      is_system_inbox: number;
+    }>;
     const pub = (await (
       await env.app.request("/api/v1/nav/publish", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title: "我的导航" }),
+        body: JSON.stringify({
+          title: "我的导航",
+          folderIds: folders.filter((f) => !f.is_system_inbox).map((f) => f.id),
+        }),
       })
     ).json()) as { slug: string };
-    expect(pub.slug).toHaveLength(8);
+    expect(pub.slug).toHaveLength(12); // base64url(9 bytes) = 12 字符（加密随机源）
 
     const page = await env.app.request(`/s/${pub.slug}`);
     const html = await page.text();
@@ -86,19 +93,43 @@ describe("导航站（F4.1/F4.2）", () => {
     expect(res.status).toBe(404);
   });
 
-  it("/nav/data 供 newtab 渲染（收件箱不出现）", async () => {
+  it("DEV-01：存量/撤销发布站点显示未发布占位，不回退全库数据", async () => {
+    env = makeEnv();
+    await seed(env);
+    const folders = (await (await env.app.request("/api/v1/folders")).json()) as Array<{
+      id: string;
+      is_system_inbox: number;
+    }>;
+    const pub = (await (
+      await env.app.request("/api/v1/nav/publish", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "撤下站",
+          folderIds: folders.filter((f) => !f.is_system_inbox).map((f) => f.id),
+        }),
+      })
+    ).json()) as { slug: string };
+    const unpublish = await env.app.request(`/api/v1/nav/sites/${pub.slug}/unpublish`, { method: "POST" });
+    expect(unpublish.status).toBe(200);
+    const html = await (await env.app.request(`/s/${pub.slug}`)).text();
+    expect(html).toContain("暂未发布");
+    expect(html).not.toContain("VS Code 编辑器");
+  });
+
+  it("/nav/data 供 newtab 渲染（收纳盒不出现）", async () => {
     env = makeEnv();
     await seed(env);
     await env.app.request("/api/v1/inbox/setup", { method: "POST" });
     const data = (await (
       await env.app.request("/api/v1/nav/data")
     ).json()) as { groups: Array<{ name: string }> };
-    expect(data.groups.every((g) => g.name !== "📥 自动整理")).toBe(true);
+    expect(data.groups.every((g) => g.name !== "📥 收纳盒")).toBe(true);
   });
 });
 
-describe("快照（F2.4）", () => {
-  it("上传 MHTML → 落盘 → 读回一致", async () => {
+describe("快照（F2.4 + DEV-02 旧直读封堵）", () => {
+  it("上传 MHTML → 落盘 → 受控下载读回一致；旧直读接口 410", async () => {
     env = makeEnv();
     const bm = (await (
       await env.app.request("/api/v1/bookmarks", {
@@ -117,8 +148,15 @@ describe("快照（F2.4）", () => {
     const body = (await up.json()) as { id: string; size: number };
     expect(body.size).toBe(content.length);
 
-    const down = await env.app.request(`/api/v1/snapshots/${body.id}`);
+    // 受控下载（attachment + nosniff）读回一致
+    const down = await env.app.request(`/api/v1/snapshots/${body.id}/download`);
+    expect(down.status).toBe(200);
+    expect(down.headers.get("content-disposition")).toContain("attachment");
     expect(await down.text()).toBe(content);
+
+    // DEV-02：旧直读 /snapshots/:id 封堵为 410（message/rfc822 可内联执行）
+    const legacy = await env.app.request(`/api/v1/snapshots/${body.id}`);
+    expect(legacy.status).toBe(410);
 
     // 埋点计数（snapshot_created 属于扩展上报，此处仅验证接口可用）
     const summary = (await (

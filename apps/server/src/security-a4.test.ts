@@ -1,9 +1,10 @@
 /** A4 安全默认值与快照闭环验收 */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { makeEnv, type TestEnv } from "./test-env";
+import { clearLoginFailures } from "./security";
 import {
   extractHtmlFromMhtml,
   sanitizeSnapshotHtml,
@@ -15,6 +16,9 @@ let env: TestEnv;
 let savedEnv: string | undefined;
 beforeEach(() => {
   savedEnv = process.env.MF_ENV;
+  // 限速器是模块级内存滑窗：清掉跨测试残留（键见 app.ts/security.ts：admin-env:<key> / admin-db:<key>）
+  clearLoginFailures("admin-db:local");
+  clearLoginFailures("admin-env:local");
 });
 afterEach(() => {
   env?.cleanup();
@@ -23,25 +27,53 @@ afterEach(() => {
   delete process.env.MF_SECRET_KEY;
 });
 
-describe("A4-1 非开发部署首启强制凭据", () => {
+describe("A4-1 + DEV-05 非开发部署首启强制凭据与引导流程", () => {
+  /** 触发生成并读取首启引导凭据（dataDir/bootstrap-token.txt）——生产语义 setup 的必备头 */
+  async function bootstrapOf(env: TestEnv): Promise<string> {
+    // 无凭据请求触发生成（返回 403，但引导文件已落盘）
+    await env.app.request("/api/v1/admin/setup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: "a-strong-password-123" }),
+    });
+    return readFileSync(path.join(env.dataDir, "bootstrap-token.txt"), "utf8").trim();
+  }
+
   it("生产语义 + 未初始化：全部 API 503，仅 setup/healthz 放行", async () => {
     process.env.MF_ENV = "production";
-    const dir = mkdtempSync(path.join(os.tmpdir(), "mf-a4-"));
     env = makeEnv(null);
-    rmSync(dir, { recursive: true, force: true }); // 用 makeEnv 自己的目录
 
     const blocked = await env.app.request("/api/v1/bookmarks");
     expect(blocked.status).toBe(503);
     const healthz = await env.app.request("/healthz");
     expect(healthz.status).toBe(200);
 
-    // setup 设置密码
-    const setup = await env.app.request("/api/v1/admin/setup", {
+    // DEV-05：无引导凭据 → 403 setup_token_required（禁止暴露端口后抢先设管理员）
+    const noToken = await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ password: "a-strong-password-123" }),
     });
+    expect(noToken.status).toBe(403);
+
+    // 引导文件已生成（路径可见、凭据不进日志）
+    const bootstrap = await bootstrapOf(env);
+    expect(bootstrap.length).toBeGreaterThanOrEqual(24);
+
+    // 携带引导凭据 setup 成功；引导凭据一次性（已失效）
+    const setup = await env.app.request("/api/v1/admin/setup", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-mf-setup-token": bootstrap },
+      body: JSON.stringify({ password: "a-strong-password-123" }),
+    });
     expect(setup.status).toBe(200);
+    const replay = await env.app.request("/api/v1/admin/setup", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-mf-setup-token": bootstrap },
+      body: JSON.stringify({ password: "another-password-456" }),
+    });
+    expect(replay.status).toBe(400);
+    expect(((await replay.json()) as { error: string }).error).toBe("already_initialized");
 
     // setup 后：未登录仍 401；登录拿 token 后可用
     const still = await env.app.request("/api/v1/bookmarks");
@@ -58,23 +90,29 @@ describe("A4-1 非开发部署首启强制凭据", () => {
     expect(ok.status).toBe(200);
   });
 
-  it("setup 仅一次：重复设置拒绝；弱密码拒绝", async () => {
+  it("setup 仅一次：重复设置拒绝；弱密码拒绝；错误引导凭据拒绝", async () => {
     process.env.MF_ENV = "production";
     env = makeEnv(null);
     const weak = await env.app.request("/api/v1/admin/setup", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-mf-setup-token": await bootstrapOf(env) },
       body: JSON.stringify({ password: "short" }),
     });
     expect(weak.status).toBe(400);
+    const badToken = await env.app.request("/api/v1/admin/setup", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-mf-setup-token": "wrong-token-xxx" },
+      body: JSON.stringify({ password: "a-strong-password-123" }),
+    });
+    expect(badToken.status).toBe(403);
     await env.app.request("/api/v1/admin/setup", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-mf-setup-token": await bootstrapOf(env) },
       body: JSON.stringify({ password: "a-strong-password-123" }),
     });
     const again = await env.app.request("/api/v1/admin/setup", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-mf-setup-token": await bootstrapOf(env) },
       body: JSON.stringify({ password: "another-password-456" }),
     });
     expect(again.status).toBe(400);
@@ -85,7 +123,7 @@ describe("A4-1 非开发部署首启强制凭据", () => {
     env = makeEnv(null);
     await env.app.request("/api/v1/admin/setup", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-mf-setup-token": await bootstrapOf(env) },
       body: JSON.stringify({ password: "a-strong-password-123" }),
     });
     let last = 0;
@@ -100,21 +138,20 @@ describe("A4-1 非开发部署首启强制凭据", () => {
     expect(last).toBe(429);
   });
 
-  it("令牌撤销：logout 后原 token 失效（A4-1）", async () => {
+  it("令牌撤销：logout 后原 token 失效（A4-1）；列表按非密 ID 撤销另一设备", async () => {
     process.env.MF_ENV = "production";
     env = makeEnv(null);
     await env.app.request("/api/v1/admin/setup", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-mf-setup-token": await bootstrapOf(env) },
       body: JSON.stringify({ password: "a-strong-password-123" }),
     });
-    const { token } = (await (
-      await env.app.request("/auth/login", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-forwarded-for": "10.9.9.9" },
-        body: JSON.stringify({ password: "a-strong-password-123" }),
-      })
-    ).json()) as { token: string };
+    const loginBody = {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "10.9.9.9" },
+      body: JSON.stringify({ password: "a-strong-password-123" }),
+    };
+    const { token } = (await (await env.app.request("/auth/login", loginBody)).json()) as { token: string };
     const logout = await env.app.request("/api/v1/auth/logout", {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
@@ -124,6 +161,36 @@ describe("A4-1 非开发部署首启强制凭据", () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(after.status).toBe(401);
+
+    // 两台新设备登录（第一台已被 logout 撤销），其中一台按 ID 撤销另一台
+    const t2 = (await (await env.app.request("/auth/login", loginBody)).json()) as {
+      token: string;
+      tokenId: string;
+    };
+    const t3 = (await (await env.app.request("/auth/login", loginBody)).json()) as {
+      token: string;
+      tokenId: string;
+    };
+    void t3;
+    const list = (await (
+      await env.app.request("/api/v1/auth/tokens", { headers: { authorization: `Bearer ${t2.token}` } })
+    ).json()) as { tokens: Array<{ token_id: string; label: string | null; revoked_at: string | null }> };
+    expect(list.tokens.length).toBeGreaterThanOrEqual(2);
+    // 列表不含任何 token 原值
+    expect(JSON.stringify(list)).not.toContain(t2.token);
+    // 未撤销的行里排除 t2 自己 → 剩余即"其他设备"
+    const other = list.tokens.find((t) => t.revoked_at === null && t.token_id !== t2.tokenId);
+    expect(other).toBeTruthy();
+    const revoke = await env.app.request(`/api/v1/auth/tokens/${other!.token_id}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${t2.token}` },
+    });
+    expect(revoke.status).toBe(200);
+    // 撤销标记落库；t2 本身仍可用
+    const list2 = (await (
+      await env.app.request("/api/v1/auth/tokens", { headers: { authorization: `Bearer ${t2.token}` } })
+    ).json()) as { tokens: Array<{ token_id: string; revoked_at: string | null }> };
+    expect(list2.tokens.find((t) => t.token_id === other!.token_id)?.revoked_at).toBeTruthy();
   });
 
   it("开发模式（MF_ENV=dev）：行为不变，无 setup 门槛", async () => {

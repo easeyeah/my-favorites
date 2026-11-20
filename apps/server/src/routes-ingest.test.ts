@@ -27,7 +27,7 @@ describe("POST /bookmarks/ingest（F1.1）", () => {
     expect(folders.map((f) => f.name)).toEqual(expect.arrayContaining(["书签栏", "开发", "未整理"]));
   });
 
-  it("去重：同义 URL（utm/www/协议差异）只导入一次", async () => {
+  it("去重（DEV-13 保守键 v2）：tracking 差异仍合并；scheme/www/hash 差异不再误吞", async () => {
     env = makeEnv();
     const res = await env.app.request("/api/v1/bookmarks/ingest", {
       method: "POST",
@@ -36,13 +36,18 @@ describe("POST /bookmarks/ingest（F1.1）", () => {
         idempotencyKey: "key-0002",
         items: [
           { url: "https://github.com/a?utm_source=rss", title: "a", folderPath: [] },
-          { url: "http://www.github.com/a/", title: "a 同义", folderPath: [] },
+          { url: "https://github.com/a/", title: "a 末斜杠同义", folderPath: [] },
+          // DEV-13：https 与 http 指向可能不同（内网设备/策略），保守不再合并
+          { url: "http://github.com/a", title: "a http 变体", folderPath: [] },
+          // hash 路由是不同页面（SPA），不吞
+          { url: "https://app.example.com/#/a", title: "hash a", folderPath: [] },
+          { url: "https://app.example.com/#/b", title: "hash b", folderPath: [] },
         ],
       }),
     });
     const body = (await res.json()) as { imported: number; skipped_duplicate: number };
-    expect(body.imported).toBe(1);
-    expect(body.skipped_duplicate).toBe(1);
+    expect(body.imported).toBe(4);
+    expect(body.skipped_duplicate).toBe(1); // 仅 utm 变体被合并
   });
 
   it("幂等：同 key 重放不重复导入", async () => {

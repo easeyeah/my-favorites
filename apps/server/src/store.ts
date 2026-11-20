@@ -1,5 +1,6 @@
 /** 仓储层 —— 全部 SQL 集中在此，路由不直接摸 SQL */
 import { rmSync } from "node:fs";
+import { randomBytes, createHash } from "node:crypto";
 import { canonicalizeUrl } from "@mf/shared";
 import type { Db } from "./db";
 import { newId, now } from "./db";
@@ -34,6 +35,12 @@ export interface BookmarkRow {
   archived_into?: string | null;
   /** A3-4 冲突检测：用户手动修改计数（提案前后对比） */
   content_revision?: number;
+  /** D30 站点化三类标注（site_tool/site_ref/content；null = 未分析） */
+  site_type?: string | null;
+  /** 疑似失效连续周期（原型 14：连续 2 周期升级确认候选） */
+  suspect_streak?: number;
+  /** 可解释失败原因（报告明细「为什么访问不了」） */
+  last_fail_reason?: string | null;
 }
 
 export class Store {
@@ -50,6 +57,24 @@ export class Store {
     return this.db.prepare("SELECT * FROM folders WHERE id = ?").get(id) as
       | FolderRow
       | undefined;
+  }
+
+  /** 目录重命名（收纳盒等系统目录拒绝改名） */
+  renameFolder(id: string, name: string): FolderRow | undefined {
+    const row = this.getFolder(id);
+    if (!row || row.is_system_inbox === 1) return undefined;
+    this.db.prepare("UPDATE folders SET name = ? WHERE id = ?").run(name, id);
+    this.recordChange("folder", id, "upsert", { id, name, parent_id: row.parent_id });
+    return this.getFolder(id);
+  }
+
+  /** 系统收纳盒改名：仅供 /inbox/setup 幂等校准（D36 术语迁移），用户面重命名仍走 renameFolder */
+  renameSystemFolder(id: string, name: string): FolderRow | undefined {
+    const row = this.getFolder(id);
+    if (!row) return undefined;
+    this.db.prepare("UPDATE folders SET name = ? WHERE id = ?").run(name, id);
+    this.recordChange("folder", id, "upsert", { id, name, parent_id: row.parent_id });
+    return this.getFolder(id);
   }
 
   findFolderByName(name: string): FolderRow | undefined {
@@ -152,6 +177,8 @@ export class Store {
     description?: string | null;
     faviconUrl?: string | null;
     addedAt?: string;
+    /** 查重键规则版本（DEV-13；与 @mf/shared URL_KEY_RULES_VERSION 一致） */
+    urlKeyVersion?: number;
   }): BookmarkRow {
     const row: BookmarkRow = {
       id: newId(),
@@ -171,7 +198,7 @@ export class Store {
     };
     this.db
       .prepare(
-        "INSERT INTO bookmarks (id, folder_id, url_raw, url_canonical, title, description, status, favicon_url, cover_url, added_at, last_checked_at, pinned, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO bookmarks (id, folder_id, url_raw, url_canonical, title, description, status, favicon_url, cover_url, added_at, last_checked_at, pinned, created_at, url_key_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       )
       .run(
         row.id,
@@ -187,6 +214,7 @@ export class Store {
         row.last_checked_at,
         row.pinned,
         row.created_at,
+        input.urlKeyVersion ?? 2,
       );
       this.recordChange("bookmark", row.id, "upsert", row);
     return row;
@@ -234,6 +262,8 @@ export class Store {
   listBookmarks(filter?: {
     folderId?: string;
     status?: string;
+    siteType?: string;
+    hasSnapshot?: boolean;
     limit?: number;
     offset?: number;
   }): BookmarkRow[] {
@@ -243,28 +273,46 @@ export class Store {
       conds.push("folder_id = ?");
       args.push(filter.folderId);
     }
-    if (filter?.status) {
+    // 疑似失效：未被确认失效、抓取被 403 反爬拦截（保守规则仅标注，见功能文档 D 系列）
+    const wantSuspect = filter?.status === "suspect";
+    if (filter?.status && !wantSuspect) {
       conds.push("status = ?");
       args.push(filter.status);
+    }
+    if (wantSuspect) {
+      conds.push("b.status = 'normal'");
+      conds.push("cc.fail_reason LIKE '403%'");
+    }
+    // 站点类型 / 有快照筛选（原型 11；与 suspect 探测路径不同 SQL 形态，互斥使用）
+    if (!wantSuspect && filter?.siteType) {
+      conds.push("site_type = ?");
+      args.push(filter.siteType);
+    }
+    if (!wantSuspect && filter?.hasSnapshot) {
+      conds.push("id IN (SELECT bookmark_id FROM snapshot)");
     }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
     const limit = filter?.limit ?? 1000;
     // 追加 id 保证分页稳定排序（同 added_at 时不错位）；A3-5：软归档书签不出现在常规列表
     const offset = filter?.offset ?? 0;
-    return this.db
-      .prepare(
-        `SELECT * FROM bookmarks ${where ? where + " AND" : "WHERE"} archived_into IS NULL ORDER BY pinned DESC, added_at DESC, id LIMIT ${limit} OFFSET ${offset}`,
-      )
-      .all(...args) as unknown as BookmarkRow[];
+    const sql = wantSuspect
+      ? `SELECT b.* FROM bookmarks b LEFT JOIN content_cache cc ON cc.bookmark_id = b.id ${where ? where + " AND" : "WHERE"} b.archived_into IS NULL ORDER BY b.pinned DESC, b.added_at DESC, b.id LIMIT ${limit} OFFSET ${offset}`
+      : `SELECT * FROM bookmarks ${where ? where + " AND" : "WHERE"} archived_into IS NULL ORDER BY pinned DESC, added_at DESC, id LIMIT ${limit} OFFSET ${offset}`;
+    return this.db.prepare(sql).all(...args) as unknown as BookmarkRow[];
   }
 
-  search(q: string, limit = 50): BookmarkRow[] {
+  /**
+   * 关键词搜索。DEV-02：默认排除私密与软归档（所有读入口一致边界）；
+   * includePrivate 仅限已鉴权管理面的显式开关（X-MF-Private），公开入口永不传入。
+   */
+  search(q: string, limit = 50, opts: { includePrivate?: boolean } = {}): BookmarkRow[] {
     const like = `%${q.replace(/[%_]/g, "")}%`;
+    const privacyCond = opts.includePrivate ? "" : " AND b.is_private = 0";
     return this.db
       .prepare(
         `SELECT DISTINCT b.* FROM bookmarks b
          LEFT JOIN content_cache c ON c.bookmark_id = b.id
-         WHERE b.archived_into IS NULL AND (b.title LIKE ? OR b.url_canonical LIKE ? OR IFNULL(b.description,'') LIKE ? OR IFNULL(c.l2_text,'') LIKE ?)
+         WHERE b.archived_into IS NULL${privacyCond} AND (b.title LIKE ? OR b.url_canonical LIKE ? OR IFNULL(b.description,'') LIKE ? OR IFNULL(c.l2_text,'') LIKE ?)
          LIMIT ?`,
       )
       .all(like, like, like, like, limit) as unknown as BookmarkRow[];
@@ -343,27 +391,64 @@ export class Store {
       .run(domain, category, now(), now());
   }
 
-  // ---------- organize versions ----------
-  saveVersion(sessionId: string | null, actions: unknown[]): string {
+  // ---------- organize versions（DEV-08：apply/undo 双版本历史） ----------
+  saveVersion(
+    sessionId: string | null,
+    actions: unknown[],
+    opts: { kind?: "apply" | "undo"; revertsVersionId?: string | null } = {},
+  ): string {
     const id = newId();
     this.db
       .prepare(
-        "INSERT INTO organize_version (id, session_id, actions, created_at, reverted) VALUES (?,?,?,?,0)",
+        "INSERT INTO organize_version (id, session_id, actions, created_at, reverted, kind, reverts_version_id) VALUES (?,?,?,?,0,?,?)",
       )
-      .run(id, sessionId, JSON.stringify(actions), now());
+      .run(id, sessionId, JSON.stringify(actions), now(), opts.kind ?? "apply", opts.revertsVersionId ?? null);
     return id;
   }
 
-  getVersion(id: string): { id: string; actions: unknown[]; reverted: number } | undefined {
+  getVersion(id: string): { id: string; actions: unknown[]; reverted: number; session_id: string | null; kind: string; reverts_version_id: string | null } | undefined {
     const row = this.db
       .prepare("SELECT * FROM organize_version WHERE id = ?")
-      .get(id) as { id: string; actions: string; reverted: number } | undefined;
+      .get(id) as { id: string; actions: string; reverted: number; session_id: string | null; kind: string; reverts_version_id: string | null } | undefined;
     if (!row) return undefined;
     return { ...row, actions: JSON.parse(row.actions) as unknown[] };
   }
 
+  /** DEV-08 apply 幂等：同一会话已提交的版本（崩溃后重试返回原结果，不产生第二份版本） */
+  getVersionBySession(sessionId: string): { id: string; actions: unknown[]; reverted: number } | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM organize_version WHERE session_id = ? AND kind = 'apply' ORDER BY created_at DESC LIMIT 1")
+      .get(sessionId) as { id: string; actions: string; reverted: number } | undefined;
+    if (!row) return undefined;
+    return { id: row.id, actions: JSON.parse(row.actions) as unknown[], reverted: row.reverted };
+  }
+
   markReverted(id: string): void {
     this.db.prepare("UPDATE organize_version SET reverted = 1 WHERE id = ?").run(id);
+  }
+
+  /** 列出会话/撤销历史（DEV-14 前置；刷新后仍可查看） */
+  listVersions(limit = 50): Array<{ id: string; session_id: string | null; kind: string; reverted: number; created_at: string; actionCount: number }> {
+    const rows = this.db
+      .prepare(
+        "SELECT id, session_id, kind, reverted, created_at, actions FROM organize_version ORDER BY created_at DESC LIMIT ?",
+      )
+      .all(limit) as unknown as Array<{
+      id: string;
+      session_id: string | null;
+      kind: string;
+      reverted: number;
+      created_at: string;
+      actions: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      session_id: r.session_id,
+      kind: r.kind,
+      reverted: r.reverted,
+      created_at: r.created_at,
+      actionCount: (JSON.parse(r.actions) as unknown[]).length,
+    }));
   }
 
   // ---------- idempotency ----------
@@ -442,63 +527,93 @@ export class Store {
   }
 
   /**
-   * A1-5 隐私规则变化后的存量清理：对命中（新）规则的存量书签，
-   * 清除正文缓存/摘要/关键词/向量（content_cache 行内敏感字段），保留 fail_reason 说明。
-   * 快照文件与索引一并删除（快照含完整页面内容）。
-   * 返回清理计数。已发送给第三方的数据（LLM 供应商）无法追回——界面需说明（见设置页）。
+   * A1-5 隐私规则变化后的存量清理（DEV-03 修订）：
+   *  - 覆盖软归档书签（listBookmarks 默认排除 archived_into，此处独立分页查询全量）；
+   *  - 游标分页扫描，不静默截断；
+   *  - 文件删除失败写入 pending_snapshot_deletions 台账（不"删索引即成功"），
+   *    下次清理/重启重试；
+   *  - 仅清理派生内容，永不删除原书签（红线 3）。
    */
   purgeContentForPrivacyRules(isPrivacy: (url: string) => boolean): {
     bookmarks: number;
     snapshots: number;
+    failedFileDeletions: number;
   } {
     let bookmarks = 0;
     let snapshots = 0;
-    const all = this.listBookmarks({ limit: 100_000 });
-    for (const bm of all) {
-      if (!isPrivacy(bm.url_canonical) && bm.is_private === 0) continue;
-      const cache = this.getCache(bm.id);
-      const hasSensitiveData =
-        cache && ((cache.l2_text as string | null) || (cache.l1_summary as string | null) || (cache.keywords as string) !== "[]");
-      if (hasSensitiveData || cache) {
-        // 清空内容字段，保留行并标记原因（可解释、可审计）
-        this.db
-          .prepare(
-            "UPDATE content_cache SET l1_summary = NULL, l1_tags = '[]', keywords = '[]', l2_text = NULL, embedding = NULL, fail_reason = 'privacy_rules_changed' WHERE bookmark_id = ?",
-          )
-          .run(bm.id);
-        bookmarks++;
-      }
-      // 关联快照删除（文件 + 索引）
-      const snaps = this.db
-        .prepare("SELECT id, path FROM snapshot WHERE bookmark_id = ?")
-        .all(bm.id) as unknown as Array<{ id: string; path: string }>;
-      for (const s of snaps) {
-        try {
-          rmSync(s.path, { force: true });
-        } catch {
-          // 文件缺失：继续删索引
+    let failedFileDeletions = 0;
+    const PAGE = 500;
+    let lastId = "";
+    for (;;) {
+      const rows = this.db
+        .prepare(
+          "SELECT id, url_canonical, is_private FROM bookmarks WHERE id > ? ORDER BY id LIMIT ?",
+        )
+        .all(lastId, PAGE) as unknown as Array<{
+        id: string;
+        url_canonical: string;
+        is_private: number;
+      }>;
+      if (rows.length === 0) break;
+      for (const bm of rows) {
+        lastId = bm.id;
+        if (!isPrivacy(bm.url_canonical) && bm.is_private === 0) continue;
+        const cache = this.getCache(bm.id);
+        if (cache) {
+          this.db
+            .prepare(
+              "UPDATE content_cache SET l1_summary = NULL, l1_tags = '[]', keywords = '[]', l2_text = NULL, embedding = NULL, fail_reason = 'privacy_rules_changed' WHERE bookmark_id = ?",
+            )
+            .run(bm.id);
+          bookmarks++;
         }
-        this.db.prepare("DELETE FROM snapshot WHERE id = ?").run(s.id);
-        snapshots++;
+        // 关联快照删除（文件 + 索引）；文件删除失败 → 台账，索引一并保留待重试
+        const snaps = this.db
+          .prepare("SELECT id, path FROM snapshot WHERE bookmark_id = ?")
+          .all(bm.id) as unknown as Array<{ id: string; path: string }>;
+        for (const s of snaps) {
+          try {
+            rmSync(s.path, { force: true });
+            // force: true 时文件缺失不抛错——直接删索引
+            this.db.prepare("DELETE FROM snapshot WHERE id = ?").run(s.id);
+            snapshots++;
+          } catch {
+            // 真实删除失败（权限/占用）：保留索引 + 记台账，可重试可观测
+            this.db
+              .prepare(
+                "INSERT OR REPLACE INTO pending_snapshot_deletions (id, path, reason, attempted_at) VALUES (?,?,?,?)",
+              )
+              .run(s.id, s.path, "privacy_purge_failed", now());
+            failedFileDeletions++;
+          }
+        }
       }
     }
-    return { bookmarks, snapshots };
+    // 重试历史台账（本次可能已能删除：如权限恢复）
+    failedFileDeletions += this.retryPendingSnapshotDeletions();
+    return { bookmarks, snapshots, failedFileDeletions };
   }
 
-  // ---------- nav ----------
-  saveNavSite(slug: string, title: string): void {
-    this.db
-      .prepare(
-        "INSERT OR REPLACE INTO nav_site (slug, title, visibility, created_at) VALUES (?,?, 'unlisted', ?)",
-      )
-      .run(slug, title, now());
+  /** 重试台账中失败的快照文件删除；成功项移除台账与索引 */
+  retryPendingSnapshotDeletions(): number {
+    const pending = this.db
+      .prepare("SELECT id, path FROM pending_snapshot_deletions")
+      .all() as unknown as Array<{ id: string; path: string }>;
+    let done = 0;
+    for (const p of pending) {
+      try {
+        rmSync(p.path, { force: true });
+        this.db.prepare("DELETE FROM snapshot WHERE id = ?").run(p.id);
+        this.db.prepare("DELETE FROM pending_snapshot_deletions WHERE id = ?").run(p.id);
+        done++;
+      } catch {
+        // 仍失败：保留台账
+      }
+    }
+    return done;
   }
 
-  getNavSite(slug: string): { slug: string; title: string } | undefined {
-    return this.db.prepare("SELECT * FROM nav_site WHERE slug = ?").get(slug) as
-      | { slug: string; title: string }
-      | undefined;
-  }
+  // ---------- nav（完整实现在文件尾部 nav 区块；此处保留旧签名兼容） ----------
 
   // ==================== A2：设备身份映射 / 待执行操作 / 软归档 ====================
 
@@ -614,6 +729,21 @@ export class Store {
       .run(status, lastError ?? null, now(), id);
   }
 
+  /**
+   * DEV-08/09 撤销补偿：撤销移动时取消同节点的待执行旧移动（避免旧操作晚到覆盖撤销）。
+   * 已执行（done）的操作不在此取消——补偿由 rollback 的反向移动承载。
+   */
+  cancelPendingBrowserOps(deviceId: string, browserBookmarkId: string, targetFolderName?: string): number {
+    const r = this.db
+      .prepare(
+        `UPDATE pending_browser_ops SET status = 'cancelled', last_error = 'superseded_by_undo', updated_at = ?
+         WHERE device_id = ? AND browser_bookmark_id = ? AND status = 'pending' AND op = 'move'
+           AND (? IS NULL OR target_browser_parent_id != ?)`,
+      )
+      .run(now(), deviceId, browserBookmarkId, targetFolderName ?? null, `mf-folder:${targetFolderName ?? ""}`);
+    return Number(r.changes);
+  }
+
   bumpBrowserOpAttempt(id: number, error: string): void {
     this.db
       .prepare("UPDATE pending_browser_ops SET attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ?")
@@ -622,19 +752,87 @@ export class Store {
 
   // ==================== M2/M3：鉴权 / 同步 / 维护 / 偏好 / 供应商 / 设置 ====================
 
-  // ---------- 鉴权 token ----------
-  createToken(label: string): string {
-    const token = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
-    this.db
-      .prepare("INSERT INTO tokens (token, label, created_at) VALUES (?,?,?)")
-      .run(token, label, now());
-    return token;
+  // ---------- 鉴权 token（DEV-05：摘要存储 + 非密 ID + 生命周期） ----------
+  static hashToken(token: string): string {
+    return createHash("sha256").update(token).digest("hex");
   }
 
+  /**
+   * 签发令牌：原值只在返回时出现一次，库中仅存 SHA-256 摘要与随机非密 ID。
+   * ttlHours 默认 30 天；null = 不过期（ADMIN_PASSWORD 模式可显式选择）。
+   */
+  createToken(label: string, ttlHours: number | null = 24 * 30): { token: string; tokenId: string } {
+    const token =
+      randomBytes(32).toString("base64url");
+    const tokenId = newId();
+    const expiresAt = ttlHours !== null ? new Date(Date.now() + ttlHours * 3600_000).toISOString() : null;
+    this.db
+      .prepare(
+        "INSERT INTO tokens (token, token_id, token_hash, label, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(tokenId, tokenId, Store.hashToken(token), label, now(), expiresAt);
+    return { token, tokenId };
+  }
+
+  /** 校验令牌：摘要匹配 + 未撤销 + 未过期；命中时更新 last_used_at */
+  resolveToken(token: string): { tokenId: string; label: string | null } | undefined {
+    const digest = Store.hashToken(token);
+    const row = this.db
+      .prepare(
+        "SELECT token_id, label, expires_at, revoked_at FROM tokens WHERE token_hash = ?",
+      )
+      .get(digest) as
+      | { token_id: string; label: string | null; expires_at: string | null; revoked_at: string | null }
+      | undefined;
+    if (!row || row.revoked_at) return undefined;
+    if (row.expires_at && row.expires_at <= now()) return undefined;
+    this.db
+      .prepare("UPDATE tokens SET last_used_at = ? WHERE token_id = ?")
+      .run(now(), row.token_id);
+    return { tokenId: row.token_id, label: row.label };
+  }
+
+  /** 兼容旧中间件签名：仅判有效与否 */
   hasToken(token: string): boolean {
-    return (
-      this.db.prepare("SELECT 1 FROM tokens WHERE token = ?").get(token) !== undefined
-    );
+    return this.resolveToken(token) !== undefined;
+  }
+
+  listTokens(): Array<{
+    token_id: string;
+    label: string | null;
+    created_at: string;
+    expires_at: string | null;
+    revoked_at: string | null;
+    last_used_at: string | null;
+  }> {
+    return this.db
+      .prepare(
+        "SELECT token_id, label, created_at, expires_at, revoked_at, last_used_at FROM tokens ORDER BY created_at DESC",
+      )
+      .all() as unknown as Array<{
+      token_id: string;
+      label: string | null;
+      created_at: string;
+      expires_at: string | null;
+      revoked_at: string | null;
+      last_used_at: string | null;
+    }>;
+  }
+
+  /** 按 ID 撤销（列表展示的是非密 ID，用户无需保存完整 token） */
+  revokeTokenById(tokenId: string): boolean {
+    const r = this.db
+      .prepare("UPDATE tokens SET revoked_at = ? WHERE token_id = ? AND revoked_at IS NULL")
+      .run(now(), tokenId);
+    return Number(r.changes) > 0;
+  }
+
+  /** 按原值撤销（logout：当前请求携带的 token） */
+  revokeByRawToken(token: string): boolean {
+    const r = this.db
+      .prepare("UPDATE tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL")
+      .run(now(), Store.hashToken(token));
+    return Number(r.changes) > 0;
   }
 
   // ---------- 变更日志（多端同步） ----------
@@ -736,6 +934,21 @@ export class Store {
       .prepare("SELECT COUNT(*) as c, MIN(added_at) as o FROM bookmarks WHERE added_at < ? AND is_private = 0")
       .get(threshold) as { c: number; o: string | null };
     return { stale: row.c, oldestCheck: row.o };
+  }
+
+  /** 归档建议清单（原型 14）：久收藏未归档非置顶——只建议不执行（红线③） */
+  archiveCandidates(days = 730, limit = 50): Array<{ id: string; title: string; url_canonical: string; folder_id: string; added_at: string; hasSnapshot: boolean }> {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT id, title, url_canonical, folder_id, added_at,
+                (id IN (SELECT bookmark_id FROM snapshot)) AS has_snapshot
+         FROM bookmarks
+         WHERE status = 'normal' AND pinned = 0 AND archived_into IS NULL AND is_private = 0 AND added_at < ?
+         ORDER BY added_at LIMIT ?`,
+      )
+      .all(cutoff, limit) as Array<{ id: string; title: string; url_canonical: string; folder_id: string; added_at: string; has_snapshot: number }>;
+    return rows.map((r) => ({ ...r, hasSnapshot: r.has_snapshot === 1 }));
   }
 
   // ---------- 偏好记忆 ----------
@@ -901,18 +1114,25 @@ export class Store {
     }));
   }
 
-  // ---------- 导航站配置更新 ----------
-  updateNavSite(slug: string, patch: { title?: string; template?: string; passwordHash?: string | null }): void {
-    const current = this.getNavSite(slug);
-    if (!current) return;
+  // ==================== nav（DEV-01：显式发布集合 / 密码 / revision） ====================
+
+  /** 加密随机 slug（不可枚举；冲突时上层重试） */
+  static newNavSlug(): string {
+    return randomBytes(9).toString("base64url");
+  }
+
+  saveNavSite(slug: string, title: string): void {
     this.db
-      .prepare("UPDATE nav_site SET title = ?, template = ?, password_hash = ? WHERE slug = ?")
-      .run(
-        patch.title ?? current.title,
-        patch.template ?? "grid",
-        patch.passwordHash !== undefined ? patch.passwordHash : null,
-        slug,
-      );
+      .prepare(
+        "INSERT INTO nav_site (slug, title, visibility, template, password_hash, published, revision, created_at, updated_at) VALUES (?,?, 'private', 'grid', NULL, 0, 1, ?, ?)",
+      )
+      .run(slug, title, now(), now());
+  }
+
+  getNavSite(slug: string): { slug: string; title: string } | undefined {
+    return this.db.prepare("SELECT slug, title FROM nav_site WHERE slug = ?").get(slug) as
+      | { slug: string; title: string }
+      | undefined;
   }
 
   getNavSiteFull(slug: string): {
@@ -920,15 +1140,437 @@ export class Store {
     title: string;
     template: string;
     password_hash: string | null;
+    published: number;
+    revision: number;
+    updated_at: string | null;
   } | undefined {
-    return this.db.prepare("SELECT * FROM nav_site WHERE slug = ?").get(slug) as
-      | { slug: string; title: string; template: string; password_hash: string | null }
+    return this.db
+      .prepare(
+        "SELECT slug, title, template, password_hash, published, revision, updated_at FROM nav_site WHERE slug = ?",
+      )
+      .get(slug) as
+      | {
+          slug: string;
+          title: string;
+          template: string;
+          password_hash: string | null;
+          published: number;
+          revision: number;
+          updated_at: string | null;
+        }
       | undefined;
   }
 
-  navSites(): Array<{ slug: string; title: string; template: string }> {
+  /**
+   * DEV-01 PATCH 语义：以完整当前配置为基线，缺字段保持原值，显式 null 才移除密码。
+   * （修复 E02：旧实现未传 password/template 时清空密码/重置模板）
+   */
+  updateNavSite(
+    slug: string,
+    patch: { title?: string; template?: string; passwordHash?: string | null },
+  ): void {
+    const current = this.getNavSiteFull(slug);
+    if (!current) return;
+    this.db
+      .prepare(
+        "UPDATE nav_site SET title = ?, template = ?, password_hash = ?, updated_at = ? WHERE slug = ?",
+      )
+      .run(
+        patch.title !== undefined ? patch.title : current.title,
+        patch.template !== undefined ? patch.template : current.template,
+        patch.passwordHash !== undefined ? patch.passwordHash : current.password_hash,
+        now(),
+        slug,
+      );
+    // 修改密码/模板影响已授权访客 → 撤销旧访问凭证（revision 入 cookie 签名）
+    if (patch.passwordHash !== undefined) this.bumpNavRevision(slug);
+  }
+
+  /** 目录改名后保持发布集合有效（发布集合存 folder_id，不受改名影响；此处仅 bump） */
+  bumpNavRevision(slug: string): void {
+    this.db
+      .prepare("UPDATE nav_site SET revision = revision + 1, updated_at = ? WHERE slug = ?")
+      .run(now(), slug);
+  }
+
+  /**
+   * 发布/更新发布集合（事务）：显式选择的书签与目录，写入后 published=1 并 bump revision。
+   * 只发布显式集合；未选择任何项 = 拒绝发布（默认私有红线）。
+   */
+  publishNavSite(
+    slug: string,
+    selection: { folderIds: string[]; bookmarkIds: string[] },
+    meta: { title?: string; template?: string; passwordHash?: string | null } = {},
+  ): { itemCount: number } {
+    const site = this.getNavSiteFull(slug);
+    if (!site) throw new Error("site_not_found");
+    if (selection.folderIds.length === 0 && selection.bookmarkIds.length === 0) {
+      throw new Error("empty_publication_scope");
+    }
+    const db = this.db;
+    db.exec("BEGIN");
+    try {
+      // 校验引用存在（防悬挂）
+      const bmIds = selection.bookmarkIds.filter((id) => this.getBookmark(id));
+      const folderIds = selection.folderIds.filter((id) => this.getFolder(id));
+      db.prepare("DELETE FROM nav_site_folder WHERE slug = ?").run(slug);
+      db.prepare("DELETE FROM nav_site_bookmark WHERE slug = ?").run(slug);
+      const insF = db.prepare("INSERT OR IGNORE INTO nav_site_folder (slug, folder_id) VALUES (?,?)");
+      for (const fid of folderIds) insF.run(slug, fid);
+      const insB = db.prepare("INSERT OR IGNORE INTO nav_site_bookmark (slug, bookmark_id) VALUES (?,?)");
+      for (const bid of bmIds) insB.run(slug, bid);
+      const itemCount = this.navSiteItems(slug).length;
+      if (itemCount === 0) throw new Error("empty_publication_scope");
+      db.prepare(
+        "UPDATE nav_site SET published = 1, revision = revision + 1, title = ?, template = ?, password_hash = ?, updated_at = ? WHERE slug = ?",
+      ).run(
+        meta.title !== undefined ? meta.title : site.title,
+        meta.template !== undefined ? meta.template : site.template,
+        meta.passwordHash !== undefined ? meta.passwordHash : site.password_hash,
+        now(),
+        slug,
+      );
+      db.exec("COMMIT");
+      return { itemCount };
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  /** 撤销发布：published=0 + bump revision（旧访问凭证与发布集合同时失效） */
+  unpublishNavSite(slug: string): boolean {
+    const site = this.getNavSiteFull(slug);
+    if (!site) return false;
+    this.db
+      .prepare("UPDATE nav_site SET published = 0, revision = revision + 1, updated_at = ? WHERE slug = ?")
+      .run(now(), slug);
+    return true;
+  }
+
+  /** 显式发布集合（发布配置回显用；不含展开的书签） */
+  navSiteScope(slug: string): { folderIds: string[]; bookmarkIds: string[] } {
+    const folders = this.db
+      .prepare("SELECT folder_id FROM nav_site_folder WHERE slug = ?")
+      .all(slug) as unknown as Array<{ folder_id: string }>;
+    const bookmarks = this.db
+      .prepare("SELECT bookmark_id FROM nav_site_bookmark WHERE slug = ?")
+      .all(slug) as unknown as Array<{ bookmark_id: string }>;
+    return {
+      folderIds: folders.map((r) => r.folder_id),
+      bookmarkIds: bookmarks.map((r) => r.bookmark_id),
+    };
+  }
+
+  /**
+   * 公开站数据：仅显式集合内的书签（目录展开 + 单选书签），过滤私密/软归档/归档态，
+   * 仅元数据 + 允许的 L1 摘要——不含正文（l2_text）、不含快照内容、不含内部字段。
+   */
+  navSiteItems(slug: string): Array<{
+    id: string;
+    folder_id: string;
+    title: string;
+    url_raw: string;
+    favicon_url: string | null;
+    dead: boolean;
+    summary: string | null;
+    site_type: string | null;
+    has_snapshot: boolean;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT b.id, b.folder_id, b.title, b.url_raw, b.favicon_url, b.status, b.site_type, c.l1_summary,
+                (b.id IN (SELECT bookmark_id FROM snapshot)) AS has_snapshot
+         FROM bookmarks b
+         LEFT JOIN content_cache c ON c.bookmark_id = b.id
+         WHERE b.archived_into IS NULL AND b.is_private = 0 AND b.status != 'archived'
+           AND (b.id IN (SELECT bookmark_id FROM nav_site_bookmark WHERE slug = ?)
+                OR b.folder_id IN (SELECT folder_id FROM nav_site_folder WHERE slug = ?))`,
+      )
+      .all(slug, slug) as unknown as Array<{
+      id: string;
+      folder_id: string;
+      title: string;
+      url_raw: string;
+      favicon_url: string | null;
+      status: string;
+      site_type: string | null;
+      l1_summary: string | null;
+      has_snapshot: number;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      folder_id: r.folder_id,
+      title: r.title,
+      url_raw: r.url_raw,
+      favicon_url: r.favicon_url,
+      dead: r.status === "dead",
+      summary: r.l1_summary,
+      site_type: r.site_type,
+      has_snapshot: r.has_snapshot === 1,
+    }));
+  }
+
+  navSites(): Array<{
+    slug: string;
+    title: string;
+    template: string;
+    published: number;
+    revision: number;
+  }> {
     return this.db
-      .prepare("SELECT slug, title, template FROM nav_site ORDER BY created_at DESC")
-      .all() as unknown as Array<{ slug: string; title: string; template: string }>;
+      .prepare(
+        "SELECT slug, title, template, published, revision FROM nav_site ORDER BY created_at DESC",
+      )
+      .all() as unknown as Array<{
+      slug: string;
+      title: string;
+      template: string;
+      published: number;
+      revision: number;
+    }>;
+  }
+
+  // ---------- 原型补齐底座（2026-11-20，迁移 v8） ----------
+
+  /** 快照存在性（导航卡「📸 有快照」标识 / 书签库筛选；红线④：仅状态，永不给内容） */
+  hasSnapshot(bookmarkId: string): boolean {
+    const row = this.db.prepare("SELECT 1 FROM snapshot WHERE bookmark_id = ? LIMIT 1").get(bookmarkId);
+    return row !== undefined;
+  }
+
+  /** 快照版本列表（原型 08/11：版本切换 tabs + 详情抽屉） */
+  listSnapshots(bookmarkId: string): Array<{ id: string; created_at: string; size: number; via: string }> {
+    return this.db
+      .prepare("SELECT id, created_at, size, via FROM snapshot WHERE bookmark_id = ? ORDER BY created_at DESC")
+      .all(bookmarkId) as Array<{ id: string; created_at: string; size: number; via: string }>;
+  }
+
+  /** 站点化分析：写回单条 site_type（D30/D31；分析是投影，不改其它书签数据） */
+  setSiteType(bookmarkId: string, siteType: string | null): void {
+    this.db.prepare("UPDATE bookmarks SET site_type = ? WHERE id = ?").run(siteType, bookmarkId);
+  }
+
+  countBySiteType(): Record<string, number> {
+    const rows = this.db
+      .prepare(
+        "SELECT COALESCE(site_type, 'unanalyzed') AS k, COUNT(*) AS c FROM bookmarks WHERE archived_into IS NULL GROUP BY k",
+      )
+      .all() as Array<{ k: string; c: number }>;
+    return Object.fromEntries(rows.map((r) => [r.k, r.c]));
+  }
+
+  listBySiteType(siteType: string, limit = 500): Array<{ id: string; title: string; url_canonical: string; folder_id: string }> {
+    return this.db
+      .prepare(
+        "SELECT id, title, url_canonical, folder_id FROM bookmarks WHERE site_type = ? AND archived_into IS NULL ORDER BY added_at DESC LIMIT ?",
+      )
+      .all(siteType, limit) as Array<{ id: string; title: string; url_canonical: string; folder_id: string }>;
+  }
+
+  /** 站点投影缓存（分析结果可随时重建；存 prefs JSON） */
+  saveProjection(projection: object): void {
+    this.setPref("nav_projection", { ...projection, built_at: now() });
+  }
+
+  getProjection():
+    | (Record<string, unknown> & { built_at?: string })
+    | undefined {
+    return this.getPref("nav_projection") as
+      | (Record<string, unknown> & { built_at?: string })
+      | undefined;
+  }
+
+  // ---------- nav_site.config（原型 13：主题色/引擎/显示选项/水印/自定义卡/包含资料站） ----------
+  getNavSiteConfig(slug: string): Record<string, unknown> {
+    const row = this.db.prepare("SELECT config FROM nav_site WHERE slug = ?").get(slug) as
+      | { config: string | null }
+      | undefined;
+    if (!row?.config) return {};
+    try {
+      return JSON.parse(row.config) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+
+  setNavSiteConfig(slug: string, config: Record<string, unknown>): void {
+    this.db
+      .prepare("UPDATE nav_site SET config = ?, updated_at = ? WHERE slug = ?")
+      .run(JSON.stringify(config), now(), slug);
+  }
+
+  // ---------- D33 集成 Hook（出站 Webhook） ----------
+  listHooks(): Array<{
+    id: string; label: string; url: string; events: string[];
+    granularity: string; enabled: number; has_secret: boolean; created_at: string;
+  }> {
+    const rows = this.db
+      .prepare("SELECT * FROM hook ORDER BY created_at")
+      .all() as Array<{ id: string; label: string; url: string; events: string; granularity: string; secret: string | null; enabled: number; created_at: string }>;
+    return rows.map((r) => ({
+      id: r.id,
+      label: r.label,
+      url: r.url,
+      events: JSON.parse(r.events) as string[],
+      granularity: r.granularity,
+      enabled: r.enabled,
+      has_secret: Boolean(r.secret),
+      created_at: r.created_at,
+    }));
+  }
+
+  saveHook(input: {
+    id?: string; label: string; url: string; events: string[];
+    granularity?: string; secret?: string | null; enabled?: boolean;
+  }): { id: string } {
+    const id = input.id ?? newId();
+    const granularity = input.granularity ?? "meta";
+    const enabled = input.enabled === false ? 0 : 1;
+    if (input.id) {
+      // 更新：secret 为 undefined = 保持原值，null = 清除
+      const current = this.db.prepare("SELECT secret FROM hook WHERE id = ?").get(input.id) as { secret: string | null } | undefined;
+      if (!current) throw new Error("hook_not_found");
+      const secret = input.secret === undefined ? current.secret : input.secret;
+      this.db
+        .prepare("UPDATE hook SET label=?, url=?, events=?, granularity=?, secret=?, enabled=? WHERE id=?")
+        .run(input.label, input.url, JSON.stringify(input.events), granularity, secret, enabled, id);
+    } else {
+      this.db
+        .prepare("INSERT INTO hook (id, label, url, events, secret, granularity, enabled, created_at) VALUES (?,?,?,?,?,?,?,?)")
+        .run(id, input.label, input.url, JSON.stringify(input.events), input.secret ?? null, granularity, enabled, now());
+    }
+    return { id };
+  }
+
+  deleteHook(id: string): boolean {
+    const r = this.db.prepare("DELETE FROM hook WHERE id = ?").run(id);
+    return r.changes > 0;
+  }
+
+  getHook(id: string): { id: string; label: string; url: string; events: string[]; secret: string | null; granularity: string; enabled: number } | undefined {
+    const r = this.db.prepare("SELECT * FROM hook WHERE id = ?").get(id) as
+      | { id: string; label: string; url: string; events: string; secret: string | null; granularity: string; enabled: number }
+      | undefined;
+    return r ? { ...r, events: JSON.parse(r.events) as string[] } : undefined;
+  }
+
+  enabledHooksForEvent(event: string): Array<{ id: string; label: string; url: string; secret: string | null; granularity: string }> {
+    return this.listHooks()
+      .filter((h) => h.enabled === 1 && h.events.includes(event))
+      .map((h) => ({ id: h.id, label: h.label, url: h.url, secret: null, granularity: h.granularity }));
+  }
+
+  // ---------- 收纳盒条目状态机（原型 06） ----------
+  upsertInboxState(bookmarkId: string, state: string, confidence?: number | null, reason?: string | null, attempts?: number): void {
+    this.db
+      .prepare(
+        "INSERT INTO inbox_state (bookmark_id, state, confidence, reason, attempts, updated_at) VALUES (?,?,?,?,?,?) " +
+          "ON CONFLICT(bookmark_id) DO UPDATE SET state=excluded.state, confidence=excluded.confidence, reason=excluded.reason, " +
+          "attempts=excluded.attempts, updated_at=excluded.updated_at",
+      )
+      .run(bookmarkId, state, confidence ?? null, reason ?? null, attempts ?? 0, now());
+  }
+
+  getInboxState(bookmarkId: string): { state: string; confidence: number | null; reason: string | null; attempts: number } | undefined {
+    return this.db.prepare("SELECT state, confidence, reason, attempts FROM inbox_state WHERE bookmark_id = ?").get(bookmarkId) as
+      | { state: string; confidence: number | null; reason: string | null; attempts: number }
+      | undefined;
+  }
+
+  clearInboxState(bookmarkId: string): void {
+    this.db.prepare("DELETE FROM inbox_state WHERE bookmark_id = ?").run(bookmarkId);
+  }
+
+  setInboxStateVersion(bookmarkId: string, versionId: string): void {
+    this.db.prepare("UPDATE inbox_state SET version_id = ? WHERE bookmark_id = ?").run(versionId, bookmarkId);
+  }
+
+  /** 收纳盒面板「已自动归位」区：最近 placed 条目（已移出箱，含撤销入口的版本） */
+  listInboxRecentPlaced(limit = 5): Array<{
+    bookmark_id: string; title: string; url_canonical: string; reason: string | null;
+    updated_at: string; version_id: string | null;
+  }> {
+    return this.db
+      .prepare(
+        `SELECT s.bookmark_id, b.title, b.url_canonical, s.reason, s.updated_at, s.version_id
+         FROM inbox_state s JOIN bookmarks b ON b.id = s.bookmark_id
+         WHERE s.state = 'placed' AND b.archived_into IS NULL
+         ORDER BY s.updated_at DESC LIMIT ?`,
+      )
+      .all(limit) as Array<{
+      bookmark_id: string; title: string; url_canonical: string; reason: string | null;
+      updated_at: string; version_id: string | null;
+    }>;
+  }
+
+  /** 收纳盒面板数据：箱内书签 + 状态（无状态行默认 pending） */
+  listInboxWithState(): Array<{
+    id: string; title: string; url_canonical: string; added_at: string; is_private: number;
+    state: string; confidence: number | null; reason: string | null; attempts: number;
+  }> {
+    const inbox = this.inboxFolder();
+    if (!inbox) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT b.id, b.title, b.url_canonical, b.added_at, b.is_private,
+                COALESCE(s.state, 'pending') AS state, s.confidence, s.reason, COALESCE(s.attempts, 0) AS attempts
+         FROM bookmarks b LEFT JOIN inbox_state s ON s.bookmark_id = b.id
+         WHERE b.folder_id = ? AND b.archived_into IS NULL
+         ORDER BY b.added_at DESC LIMIT 200`,
+      )
+      .all(inbox.id) as Array<{
+      id: string; title: string; url_canonical: string; added_at: string; is_private: number;
+      state: string; confidence: number | null; reason: string | null; attempts: number;
+    }>;
+    return rows;
+  }
+
+  /** 隐私域名本地记忆规则（不走 AI，按域名自动归位）：prefs JSON domain→folderId */
+  getDomainPlaceRules(): Record<string, string> {
+    return (this.getPref("domain_place_rules") as Record<string, string>) ?? {};
+  }
+
+  setDomainPlaceRule(domain: string, folderId: string | null): void {
+    const rules = this.getDomainPlaceRules();
+    if (folderId === null) delete rules[domain];
+    else rules[domain] = folderId;
+    this.setPref("domain_place_rules", rules);
+  }
+
+  /** 整理偏好记忆（原型 12）：用户可查看/删除的规则，注入整理 LLM system prompt */
+  getOrganizeRules(): string[] {
+    return (this.getPref("organize_rules") as string[]) ?? [];
+  }
+
+  setOrganizeRules(rules: string[]): void {
+    this.setPref("organize_rules", rules);
+  }
+
+  addOrganizeRule(rule: string): void {
+    const rules = this.getOrganizeRules();
+    if (!rules.includes(rule)) rules.push(rule);
+    this.setOrganizeRules(rules);
+  }
+
+  // ---------- D29 最常访问（应用内点击计数） ----------
+  recordBookmarkClick(bookmarkId: string): void {
+    this.db
+      .prepare(
+        "INSERT INTO bookmark_click (bookmark_id, clicks, last_at) VALUES (?,1,?) " +
+          "ON CONFLICT(bookmark_id) DO UPDATE SET clicks = clicks + 1, last_at = excluded.last_at",
+      )
+      .run(bookmarkId, now());
+  }
+
+  topClickedBookmarks(limit = 8): Array<{ id: string; title: string; url_canonical: string; favicon_url: string | null; clicks: number }> {
+    return this.db
+      .prepare(
+        `SELECT b.id, b.title, b.url_canonical, b.favicon_url, c.clicks
+         FROM bookmark_click c JOIN bookmarks b ON b.id = c.bookmark_id
+         WHERE b.archived_into IS NULL AND b.is_private = 0 AND b.status != 'archived'
+         ORDER BY c.clicks DESC, c.last_at DESC LIMIT ?`,
+      )
+      .all(limit) as Array<{ id: string; title: string; url_canonical: string; favicon_url: string | null; clicks: number }>;
   }
 }

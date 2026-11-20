@@ -45,7 +45,12 @@ const app = buildApp({
   adminPassword: process.env.ADMIN_PASSWORD,
 });
 
-startScheduler(store, new MaintenanceService(store));
+startScheduler(
+  store,
+  new MaintenanceService(store),
+  // 每小时收纳盒清扫兜底（原型 06）：离线堆积批量处理 + 全设备镜像入队
+  new Pipeline(store, llmFor, { syncAi: process.env.MF_SYNC_AI === "1" }),
+);
 
 // 仅作为主进程运行时启动监听（测试导入时不启服务）
 if (process.env.MF_SKIP_SERVE !== "1") {

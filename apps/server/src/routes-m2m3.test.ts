@@ -2,6 +2,7 @@
 import http from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeEnv, type TestEnv } from "./test-env";
+import { checkLink } from "./maintenance";
 
 let env: TestEnv;
 afterEach(() => env?.cleanup());
@@ -44,7 +45,8 @@ describe("鉴权（F6.2 ADMIN_PASSWORD）", () => {
       body: JSON.stringify({ password: "secret-123", label: "e2e" }),
     });
     const { token } = (await goodLogin.json()) as { token: string };
-    expect(token).toHaveLength(64);
+    // DEV-05：随机 32 字节 base64url（43 字符）；库内仅摘要
+    expect(token).toHaveLength(43);
 
     const ok = await env.app.request("/api/v1/bookmarks", {
       headers: { authorization: `Bearer ${token}` },
@@ -102,23 +104,28 @@ describe("多端同步（F1.7）", () => {
 });
 
 describe("死链检测 + 查重 + 体检（F5）", () => {
-  it("三级判定：本地可达=normal，不可达端口=dead", async () => {
-    // 本地"正常站"
+  it("三级判定：本地可达=normal，不可达端口=dead（DEV-04 判定走统一网络守卫）", async () => {
+    // 本地"正常站"（直连判定函数 + 回环 allowlist，等价部署方显式放行内网）
     const okServer = http.createServer((_q, r) => {
       r.writeHead(200).end("ok");
     });
     await new Promise<void>((r) => okServer.listen(31801, r));
+    const allowLoopback = { mode: "selfhosted_allowlist" as const, allowedCidrs: ["127.0.0.0/8", "::1/128"] };
+    const alive = await checkLink("http://127.0.0.1:31801/alive", allowLoopback);
+    expect(alive.verdict).toBe("normal");
+    const dead = await checkLink("http://127.0.0.1:59997/dead", allowLoopback);
+    expect(dead.verdict).toBe("dead");
+    okServer.close();
+  });
 
+  it("DEV-04：隐私域书签不自动探测（探测即外泄域名在册信号）；报告可解释", async () => {
     env = makeEnv();
     await env.app.request("/api/v1/bookmarks/ingest", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        idempotencyKey: "seed-links",
-        items: [
-          { url: "http://127.0.0.1:31801/alive", title: "可达页", folderPath: [] },
-          { url: "http://127.0.0.1:59997/dead", title: "死链页", folderPath: [] },
-        ],
+        idempotencyKey: "seed-links-privacy",
+        items: [{ url: "https://icbc.bank/login", title: "银行页", folderPath: [] }],
       }),
     });
     const res = await env.app.request("/api/v1/maintenance/links/run", {
@@ -128,21 +135,18 @@ describe("死链检测 + 查重 + 体检（F5）", () => {
     });
     const body = (await res.json()) as {
       checked: number;
-      results: Array<{ verdict: string; url: string }>;
-      reportId: string;
+      results: Array<{ verdict: string; url: string; detail: string }>;
     };
-    expect(body.checked).toBe(2);
-    const alive = body.results.find((r) => r.url.includes("alive"));
-    const dead = body.results.find((r) => r.url.includes("59997"));
-    expect(alive?.verdict).toBe("normal");
-    expect(dead?.verdict).toBe("dead");
+    expect(body.checked).toBe(1);
+    expect(body.results[0]?.verdict).toBe("suspect");
+    expect(body.results[0]?.detail).toContain("隐私策略拦截");
 
-    // 状态落库 + 周报可取
+    // 报告可取（隐私域不误判为 dead：suspect 计数 1）
     const report = (await (
       await env.app.request("/api/v1/maintenance/report/latest?type=link_check")
-    ).json()) as { findings: { dead: number } };
-    expect(report.findings.dead).toBe(1);
-    okServer.close();
+    ).json()) as { findings: { dead: number; suspect: number } };
+    expect(report.findings.dead).toBe(0);
+    expect(report.findings.suspect).toBe(1);
   });
 
   it("查重扫描产出合并建议（不自动删除，红线 3）", async () => {
@@ -234,60 +238,160 @@ describe("语义搜索 + BYOK（F7.2 / F3.7）", () => {
     expect(test.ok).toBe(false);
   });
 
-  it("偏好记忆：apply 记录采纳目录，prefs 可查", async () => {
+  it("偏好记忆：整理直接生效即记录采纳目录，prefs 可查（D27）", async () => {
     env = makeEnv(null);
     await seed(env);
-    const session = (await (
-      await env.app.request("/api/v1/organize/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: "整理" }),
-      })
-    ).json()) as { sessionId: string };
-    await env.app.request(`/api/v1/organize/sessions/${session.sessionId}/apply`, { method: "POST" });
+    await env.app.request("/api/v1/organize/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "整理" }),
+    });
     const prefs = (await (await env.app.request("/api/v1/settings/prefs")).json()) as {
       topCategories: string[];
     };
     // github 种子本就在「开发」目录（无移动提案），bilibili 从「娱乐」→「视频」被采纳
     expect(prefs.topCategories).toContain("视频");
   });
+
+  it("通知偏好三档（D28）：PATCH 落库可查，非法值 400，默认 toast", async () => {
+    env = makeEnv(null);
+    const def = (await (await env.app.request("/api/v1/settings/prefs")).json()) as { notifyStyle: string };
+    expect(def.notifyStyle).toBe("toast");
+
+    const bad = await env.app.request("/api/v1/settings/prefs", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ notifyStyle: "loud" }),
+    });
+    expect(bad.status).toBe(400);
+
+    const set = await env.app.request("/api/v1/settings/prefs", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ notifyStyle: "silent" }),
+    });
+    expect(set.status).toBe(200);
+    const after = (await (await env.app.request("/api/v1/settings/prefs")).json()) as { notifyStyle: string };
+    expect(after.notifyStyle).toBe("silent");
+  });
 });
 
-describe("导航模板 + 密码访问（F4.2/F4.4）", () => {
-  it.each(["grid", "list", "cards", "home"] as const)("%s 模板渲染", async (template) => {
-    env = makeEnv();
-    await seed(env);
-    const pub = (await (
+describe("导航模板 + 密码访问（F4.2/F4.4 + DEV-01 显式发布集合）", () => {
+  /** 发布 seed 中的全部非收件箱目录（显式集合） */
+  async function publishAll(env: TestEnv, body: Record<string, unknown>): Promise<{ slug: string; itemCount: number }> {
+    const folders = (await (await env.app.request("/api/v1/folders")).json()) as Array<{
+      id: string;
+      is_system_inbox: number;
+    }>;
+    return (await (
       await env.app.request("/api/v1/nav/publish", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title: "T", template }),
+        body: JSON.stringify({
+          ...body,
+          folderIds: folders.filter((f) => !f.is_system_inbox).map((f) => f.id),
+        }),
       })
-    ).json()) as { slug: string };
+    ).json()) as { slug: string; itemCount: number };
+  }
+
+  it.each(["grid", "list", "cards", "home"] as const)("%s 模板渲染", async (template) => {
+    env = makeEnv();
+    await seed(env);
+    const pub = await publishAll(env, { title: "T", template });
+    expect(pub.itemCount).toBeGreaterThan(0);
     const html = await (await env.app.request(`/s/${pub.slug}`)).text();
     expect(html).toContain("T");
     if (template === "cards") expect(html).toContain("minmax(230px");
     if (template === "list") expect(html).toContain("border-bottom");
     if (template === "home") expect(html).toContain("greet");
-    if (template === "grid") expect(html).toContain("minmax(150px");
+    if (template === "grid") expect(html).toContain("minmax(210px"); // 原型 16：站点卡两行摘要加宽
   });
 
-  it("密码访问：无密码看验证页，正确密码进入", async () => {
+  it("DEV-01：未选择发布范围 → 拒绝发布（默认私有红线）", async () => {
+    env = makeEnv();
+    const res = await env.app.request("/api/v1/nav/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "空站" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("empty_publication_scope");
+  });
+
+  it("DEV-01：私密/软归档书签不进入发布集合", async () => {
     env = makeEnv();
     await seed(env);
+    // 标记一条私密
+    const all = (await (await env.app.request("/api/v1/bookmarks")).json()) as Array<{
+      id: string;
+      title: string;
+    }>;
+    const secret = all.find((b) => b.title === "Rust 仓库")!;
+    await env.app.request(`/api/v1/bookmarks/${secret.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ isPrivate: true }),
+    });
+    const folders = (await (await env.app.request("/api/v1/folders")).json()) as Array<{
+      id: string;
+      is_system_inbox: number;
+    }>;
     const pub = (await (
       await env.app.request("/api/v1/nav/publish", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title: "加密站", password: "pass123" }),
+        body: JSON.stringify({
+          title: "过滤站",
+          folderIds: folders.filter((f) => !f.is_system_inbox).map((f) => f.id),
+        }),
       })
-    ).json()) as { slug: string };
+    ).json()) as { slug: string; itemCount: number };
+    expect(pub.itemCount).toBe(4); // 5 条 - 1 条私密
+    const html = await (await env.app.request(`/s/${pub.slug}`)).text();
+    expect(html).not.toContain("Rust 仓库");
+    expect(html).toContain("Go 仓库");
+  });
+
+  it("密码访问：POST 验证 + HttpOnly cookie；?p= 查询参数通道已移除", async () => {
+    env = makeEnv();
+    await seed(env);
+    const pub = await publishAll(env, { title: "加密站", password: "pass123" });
     const locked = await (await env.app.request(`/s/${pub.slug}`)).text();
     expect(locked).toContain("访问验证");
-    const opened = await (await env.app.request(`/s/${pub.slug}?p=pass123`)).text();
-    expect(opened).toContain("加密站");
-    const wrong = await (await env.app.request(`/s/${pub.slug}?p=wrong`)).text();
-    expect(wrong).toContain("访问验证");
+
+    // 旧查询参数通道：不再放行（带 ?p= 仍显示验证页）
+    const viaQuery = await (await env.app.request(`/s/${pub.slug}?p=pass123`)).text();
+    expect(viaQuery).toContain("访问验证");
+
+    // POST 正确密码 → 303 + Set-Cookie（HttpOnly）→ 带 cookie 可进入
+    const auth = await env.app.request(`/s/${pub.slug}/auth`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "password=pass123",
+    });
+    expect(auth.status).toBe(303);
+    const setCookie = auth.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).not.toContain("pass123"); // cookie 不含密码本身
+    const cookie = setCookie.split(";")[0]!;
+    const opened = await env.app.request(`/s/${pub.slug}`, {
+      headers: { cookie },
+    });
+    expect(opened.status).toBe(200);
+    const openedHtml = await opened.text();
+    expect(openedHtml).toContain("加密站");
+    expect(openedHtml).toContain("Go 仓库"); // 发布集合内的书签可见
+
+    // POST 错误密码 → 401 验证页
+    const wrong = await env.app.request(`/s/${pub.slug}/auth`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "password=wrongpass",
+    });
+    expect(wrong.status).toBe(401);
+    expect(await wrong.text()).toContain("访问验证");
   });
 });
 
@@ -390,5 +494,27 @@ describe("快照配额 + 私密书签 + 迁移回灌", () => {
     }>;
     expect(all.length).toBe(5);
     env2.cleanup();
+  });
+});
+
+describe("最常访问（D29/D40）", () => {
+  it("GET /bookmarks/top 按点击数排序（回归：曾被 /bookmarks/:id 路由截胡恒 404，新标签页磁贴从未显示）", async () => {
+    env = makeEnv();
+    const mk = (url: string, title: string) =>
+      env.app.request("/api/v1/bookmarks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url, title }),
+      });
+    const a = (await (await mk("https://example.com/a", "A")).json()) as { id: string };
+    const b = (await (await mk("https://example.com/b", "B")).json()) as { id: string };
+    await env.app.request(`/api/v1/bookmarks/${a.id}/click`, { method: "POST" });
+    await env.app.request(`/api/v1/bookmarks/${a.id}/click`, { method: "POST" });
+    await env.app.request(`/api/v1/bookmarks/${b.id}/click`, { method: "POST" });
+    const top = (await (await env.app.request("/api/v1/bookmarks/top?limit=8")).json()) as {
+      items: Array<{ id: string; clicks: number }>;
+    };
+    expect(top.items.map((x) => x.id)).toEqual([a.id, b.id]);
+    expect(top.items[0]!.clicks).toBe(2);
   });
 });

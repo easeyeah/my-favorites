@@ -40,7 +40,11 @@ export function makeEnv(
     opts.embedClient ?? null,
     opts.embedClient ? "mock-embedding" : null,
   );
-  const maintenance = new MaintenanceService(store);
+  // DEV-04：维护探测走统一网络守卫。测试环境显式放行回环段（本地 mock 站点所在），
+  // 与"自建显式开启才放行内网"的生产语义一致——此处等价于部署时设置 MF_ALLOW_INTRANET_FETCH。
+  const maintenance = new MaintenanceService(store, {
+    guardConfig: { mode: "selfhosted_allowlist", allowedCidrs: ["127.0.0.0/8", "::1/128"] },
+  });
   const app = buildApp({
     store,
     llmFor,

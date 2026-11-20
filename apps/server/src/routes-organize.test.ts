@@ -1,4 +1,4 @@
-/** F3 聊天整理：proposal → apply → rollback 全链路 + 红线（不静默改动） */
+/** F3 整理（D27 act + undo）：一次调用直接生效 + rollback 完整还原；旧确认流端点已移除 */
 import { afterEach, describe, expect, it } from "vitest";
 import { makeEnv, type TestEnv } from "./test-env";
 
@@ -23,25 +23,40 @@ async function seedBookmarks(env: TestEnv) {
   });
 }
 
-describe("整理会话（F3）", () => {
-  it("重新分类：规则命中产生 move 提案，未确认前原目录不变（红线：不静默改动）", async () => {
+interface RunResult {
+  sessionId: string;
+  status: string;
+  answer: string;
+  actions: Array<{ type: string; toFolder?: string }> | null;
+  versionId?: string;
+  applied?: number;
+}
+
+async function run(env: TestEnv, message: string): Promise<RunResult> {
+  return (await (
+    await env.app.request("/api/v1/organize/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message }),
+    })
+  ).json()) as RunResult;
+}
+
+describe("整理一次调用直接生效（F3 / D27）", () => {
+  it("重新分类：规则命中 → 直接归位 + 返回只读明细与版本", async () => {
     env = makeEnv(null); // 无 LLM：只有规则信号
     await seedBookmarks(env);
 
-    const session = (await (
-      await env.app.request("/api/v1/organize/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: "重新分类" }),
-      })
-    ).json()) as { sessionId: string; status: string; proposal: Array<{ type: string; toFolder?: string }> };
-
-    expect(session.status).toBe("proposed");
-    const move = session.proposal.find((p) => p.type === "move");
+    const result = await run(env, "重新分类");
+    expect(result.status).toBe("applied");
+    expect(result.versionId).toBeTruthy();
+    expect(result.applied).toBeGreaterThan(0);
+    // 只读明细（事后呈现，不再是确认卡）：含 GitHub → 开发
+    const move = result.actions?.find((a) => a.type === "move");
     expect(move?.toFolder).toBe("开发");
 
-    // apply 前书签仍在原目录
-    const before = (await (await env.app.request("/api/v1/bookmarks")).json()) as Array<{
+    // 书签已实际挪动（无确认流）
+    const bookmarks = (await (await env.app.request("/api/v1/bookmarks")).json()) as Array<{
       title: string;
       folder_id: string;
     }>;
@@ -49,27 +64,18 @@ describe("整理会话（F3）", () => {
       id: string;
       name: string;
     }>;
-    const misc = folders.find((f) => f.name === "杂项");
-    expect(before.filter((b) => b.title === "GitHub 仓库").every((b) => b.folder_id === misc?.id)).toBe(true);
+    const dev = folders.find((f) => f.name === "开发");
+    const gh = bookmarks.find((b) => b.title === "GitHub 仓库");
+    expect(gh?.folder_id).toBe(dev?.id);
   });
 
-  it("apply 落库 + rollback 完整还原（含合并重插）", async () => {
+  it("合并重复直接生效（软归档）+ rollback 完整还原（含合并重插）", async () => {
     env = makeEnv(null);
     await seedBookmarks(env);
 
-    // ① 分类提案并应用
-    const session = (await (
-      await env.app.request("/api/v1/organize/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: "整理" }),
-      })
-    ).json()) as { sessionId: string };
-    const applied = (await (
-      await env.app.request(`/api/v1/organize/sessions/${session.sessionId}/apply`, { method: "POST" })
-    ).json()) as { versionId: string; applied: number };
+    // ① 分类直接生效
+    const applied = await run(env, "整理");
     expect(applied.applied).toBeGreaterThan(0);
-
     const bookmarks = (await (await env.app.request("/api/v1/bookmarks")).json()) as Array<{
       title: string;
       folder_id: string;
@@ -82,24 +88,16 @@ describe("整理会话（F3）", () => {
     const gh = bookmarks.find((b) => b.title === "GitHub 仓库");
     expect(gh?.folder_id).toBe(dev?.id);
 
-    // ② 合并重复
-    const mergeSession = (await (
-      await env.app.request("/api/v1/organize/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: "合并重复" }),
-      })
-    ).json()) as { sessionId: string; proposal: Array<{ type: string }> };
-    expect(mergeSession.proposal.some((p) => p.type === "merge")).toBe(true);
-    const mergeApplied = (await (
-      await env.app.request(`/api/v1/organize/sessions/${mergeSession.sessionId}/apply`, { method: "POST" })
-    ).json()) as { versionId: string };
+    // ② 合并重复（D28：直接移除重复副本，7 天版本恢复）
+    const merge = await run(env, "合并重复");
+    expect(merge.status).toBe("applied");
+    expect(merge.actions?.some((a) => a.type === "merge")).toBe(true);
     const afterMerge = (await (await env.app.request("/api/v1/bookmarks")).json()) as unknown[];
     expect(afterMerge.length).toBe(4); // 5 - 1 dup
 
     // ③ 合并回滚：被删书签重插
     const rb = (await (
-      await env.app.request(`/api/v1/organize/rollback/${mergeApplied.versionId}`, { method: "POST" })
+      await env.app.request(`/api/v1/organize/rollback/${merge.versionId}`, { method: "POST" })
     ).json()) as { reversed: number };
     expect(rb.reversed).toBeGreaterThan(0);
     const afterRollback = (await (await env.app.request("/api/v1/bookmarks")).json()) as unknown[];
@@ -115,22 +113,13 @@ describe("整理会话（F3）", () => {
     }>;
     const misc = folders.find((f) => f.name === "杂项");
 
-    const session = (await (
-      await env.app.request("/api/v1/organize/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: "整理" }),
-      })
-    ).json()) as { sessionId: string };
-    // rollback 前记住每个书签的位置（apply 之前的原始状态）
+    // rollback 前记住每个书签的位置（整理之前的原始状态）
     const before = (await (await env.app.request("/api/v1/bookmarks")).json()) as Array<{
       id: string;
       folder_id: string;
       title: string;
     }>;
-    const applied = (await (
-      await env.app.request(`/api/v1/organize/sessions/${session.sessionId}/apply`, { method: "POST" })
-    ).json()) as { versionId: string };
+    const applied = await run(env, "整理");
     const rb = (await (
       await env.app.request(`/api/v1/organize/rollback/${applied.versionId}`, { method: "POST" })
     ).json()) as { reversed: number };
@@ -149,32 +138,20 @@ describe("整理会话（F3）", () => {
     expect(gh?.folder_id).toBe(misc?.id);
   });
 
-  it("自由对话返回指引（无 proposal）", async () => {
+  it("自由对话返回指引（无动作、不生效）", async () => {
     env = makeEnv(null);
-    const res = await env.app.request("/api/v1/organize/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: "你好" }),
-    });
-    const body = (await res.json()) as { status: string; proposal: null };
+    const body = await run(env, "你好");
     expect(body.status).toBe("answered");
-    expect(body.proposal).toBeNull();
+    expect(body.actions).toBeNull();
+    expect(body.versionId).toBeUndefined();
   });
 
-  it("重复 apply 拒绝（乐观锁：已应用会话不能再应用）", async () => {
+  it("旧确认流端点已移除：/organize/sessions/:id/apply → 404（切片 A 验收）", async () => {
     env = makeEnv(null);
     await seedBookmarks(env);
-    const session = (await (
-      await env.app.request("/api/v1/organize/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: "整理" }),
-      })
-    ).json()) as { sessionId: string };
-    await env.app.request(`/api/v1/organize/sessions/${session.sessionId}/apply`, { method: "POST" });
-    const again = await env.app.request(`/api/v1/organize/sessions/${session.sessionId}/apply`, {
+    const res = await env.app.request(`/api/v1/organize/sessions/whatever/apply`, {
       method: "POST",
     });
-    expect(again.status).toBe(400);
+    expect(res.status).toBe(404);
   });
 });

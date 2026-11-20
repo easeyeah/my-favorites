@@ -1,4 +1,4 @@
-/** A3 事务/冲突/回滚/软归档验收：无部分提交 / 冲突不覆盖 / 合并恢复关联可用 */
+/** A3 事务/冲突/回滚/软归档验收：无部分提交 / 回滚不破坏用户后改 / 合并恢复关联可用 */
 import { afterEach, describe, expect, it } from "vitest";
 import { makeEnv, type TestEnv } from "./test-env";
 
@@ -21,24 +21,29 @@ async function seed(env: TestEnv) {
   });
 }
 
-async function propose(env: TestEnv, message: string): Promise<string> {
-  const s = (await (
+/** D27：整理 = 一次调用直接生效；返回完整结果（含版本） */
+async function run(env: TestEnv, message: string): Promise<{
+  sessionId: string;
+  status: string;
+  versionId?: string;
+  applied?: number;
+  conflicts?: Array<{ bookmarkId: string; reason: string }>;
+}> {
+  return (await (
     await env.app.request("/api/v1/organize/sessions", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ message }),
     })
-  ).json()) as { sessionId: string };
-  return s.sessionId;
+  ).json()) as { sessionId: string; status: string; versionId?: string; applied?: number };
 }
 
 describe("A3-3 事务化：中途异常无部分提交", () => {
-  it("apply 内部抛错 → 整体回滚，目录/书签保持原状", async () => {
+  it("提交内核抛错 → 整体回滚，目录/书签保持原状，不写版本", async () => {
     env = makeEnv(null);
     await seed(env);
-    const sessionId = await propose(env, "整理");
 
-    // 注入故障：monkeypatch moveBookmark 在第 1 次 move 时抛错
+    // 注入故障：monkeypatch moveBookmark 在第 1 次 move 时抛错（D27：提交在调用内发生）
     const store = env.store;
     const original = store.moveBookmark.bind(store);
     let calls = 0;
@@ -49,51 +54,27 @@ describe("A3-3 事务化：中途异常无部分提交", () => {
     }) as typeof store.moveBookmark;
 
     const before = store.listBookmarks({ limit: 100 }).map((b) => [b.id, b.folder_id]);
-    await expect(
-      env.app.request(`/api/v1/organize/sessions/${sessionId}/apply`, { method: "POST" }),
-    ).resolves.toMatchObject({ status: 400 });
+    const res = await env.app.request("/api/v1/organize/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "整理" }),
+    });
+    expect(res.status).toBe(500);
 
     const after = store.listBookmarks({ limit: 100 }).map((b) => [b.id, b.folder_id]);
     expect(after).toEqual(before); // 无半套修改
-    // 会话仍处于 proposed（可重试），未写版本
-    const sess = store.db
-      .prepare("SELECT status FROM organize_session WHERE id = ?")
-      .get(sessionId) as { status: string };
-    expect(sess.status).toBe("proposed");
+    // 会话保留计划（proposed）但未写版本；下一次整理重新计划，无残留生效
     expect(store.db.prepare("SELECT COUNT(*) as c FROM organize_version").get()).toMatchObject({ c: 0 });
   });
 });
 
-describe("A3-4 冲突检测：旧提案不覆盖新修改", () => {
-  it("提案后用户手动移动过的书签 → apply 跳过并报告冲突", async () => {
+describe("A3-4 撤销安全网：回滚不覆盖用户后改", () => {
+  it("整理生效后用户手动移动过的书签 → 回滚跳过不破坏", async () => {
     env = makeEnv(null);
     await seed(env);
-    const sessionId = await propose(env, "整理");
-
-    // 用户手动把 GitHub 仓库移到「我的收藏夹」（提案生成之后）
-    const folders = env.store.listFolders();
-    const target = env.store.createFolder("我的收藏夹", null, "user");
-    const gh = env.store.listBookmarks({ limit: 100 }).find((b) => b.title === "GitHub 仓库")!;
-    env.store.updateBookmark(gh.id, { folder_id: target.id }); // content_revision +1
-    void folders;
-
-    const res = (await (
-      await env.app.request(`/api/v1/organize/sessions/${sessionId}/apply`, { method: "POST" })
-    ).json()) as { applied: number; conflicts: Array<{ bookmarkId: string; reason: string }> };
-
-    expect(res.conflicts.some((c) => c.bookmarkId === gh.id && c.reason === "modified_after_proposal")).toBe(true);
-    // 用户的新修改未被覆盖
-    expect(env.store.getBookmark(gh.id)?.folder_id).toBe(target.id);
-  });
-
-  it("回滚时遇到用户后来又移动过的项目 → 跳过不破坏", async () => {
-    env = makeEnv(null);
-    await seed(env);
-    // apply 一个整理（GitHub → 开发）
-    const s1 = await propose(env, "整理");
-    const applied = (await (
-      await env.app.request(`/api/v1/organize/sessions/${s1}/apply`, { method: "POST" })
-    ).json()) as { versionId: string };
+    // 整理一次（GitHub → 开发）
+    const applied = await run(env, "整理");
+    expect(applied.versionId).toBeTruthy();
     // 用户手动再改：GitHub 仓库 → 新目录
     const target = env.store.createFolder("用户后改", null, "user");
     const gh = env.store.listBookmarks({ limit: 100 }).find((b) => b.title === "GitHub 仓库")!;
@@ -105,7 +86,7 @@ describe("A3-4 冲突检测：旧提案不覆盖新修改", () => {
 
     // 回滚不把用户后改的书签拽回去
     expect(env.store.getBookmark(gh.id)?.folder_id).toBe(target.id);
-    void rb;
+    expect(rb.skipped.some((s) => s.bookmarkId === gh.id)).toBe(true);
   });
 });
 
@@ -136,10 +117,9 @@ describe("A3-5 软归档合并：正文/快照/隐私属性保留，回滚后可
     ).json()) as { id: string };
     expect(up.id).toBeTruthy();
 
-    const s = await propose(env, "合并重复");
-    const applied = (await (
-      await env.app.request(`/api/v1/organize/sessions/${s}/apply`, { method: "POST" })
-    ).json()) as { versionId: string; applied: number };
+    // D28：合并重复直接生效（直接移除重复副本，软归档保留 7 天恢复窗口）
+    const applied = await run(env, "合并重复");
+    expect(applied.status).toBe("applied");
     expect(applied.applied).toBe(1);
 
     // 软归档状态：列表不可见但行存在，正文保留
@@ -149,8 +129,8 @@ describe("A3-5 软归档合并：正文/快照/隐私属性保留，回滚后可
     expect(row?.archived_into).toBe(dupA.id);
     expect(env.store.getCache(dupB.id)?.l2_text).toBe("被合并方的正文"); // 正文未丢
     // 快照索引仍在、文件仍可读
-    const snapDuring = await env.app.request(`/api/v1/snapshots/${up.id}`);
-    expect(snapDuring.status).toBe(200);
+    const snapDuring = await env.app.request(`/api/v1/snapshots/${up.id}/download`);
+    expect(snapDuring.status).toBe(200); // DEV-02：受控下载读回（旧直读已封堵）
 
     // 回滚：书签恢复可见，正文/快照全部在
     const rb = (await (
@@ -160,8 +140,8 @@ describe("A3-5 软归档合并：正文/快照/隐私属性保留，回滚后可
     const restored = env.store.getBookmark(dupB.id);
     expect(restored?.archived_into).toBeNull();
     expect(env.store.getCache(dupB.id)?.l2_text).toBe("被合并方的正文");
-    const snapGet = await env.app.request(`/api/v1/snapshots/${up.id}`);
-    expect(snapGet.status).toBe(200); // 快照仍可打开
+    const snapGet = await env.app.request(`/api/v1/snapshots/${up.id}/download`);
+    expect(snapGet.status).toBe(200); // 快照仍可打开（受控下载）
   });
 
   it("私密属性在软归档合并/回滚全程保留", async () => {
@@ -173,10 +153,7 @@ describe("A3-5 软归档合并：正文/快照/隐私属性保留，回滚后可
     // 私密标记直接写库（绕过 updateBookmark 的 revision bump，等效历史数据）
     env.store.db.prepare("UPDATE bookmarks SET is_private = 1 WHERE id = ?").run(dupB.id);
 
-    const s = await propose(env, "合并重复");
-    const applied = (await (
-      await env.app.request(`/api/v1/organize/sessions/${s}/apply`, { method: "POST" })
-    ).json()) as { versionId: string };
+    const applied = await run(env, "合并重复");
     expect(env.store.getBookmark(dupB.id)?.is_private).toBe(1); // 软归档未丢私密属性
 
     await env.app.request(`/api/v1/organize/rollback/${applied.versionId}`, { method: "POST" });
@@ -195,10 +172,7 @@ describe("A3-5 软归档合并：正文/快照/隐私属性保留，回滚后可
       .prepare("UPDATE bookmarks SET added_at = '2026-11-17T00:00:00.000Z' WHERE id IN (?, ?)")
       .run(dupA.id, dupB.id);
 
-    const s = await propose(env, "合并重复");
-    const applied = (await (
-      await env.app.request(`/api/v1/organize/sessions/${s}/apply`, { method: "POST" })
-    ).json()) as { applied: number };
+    const applied = await run(env, "合并重复");
     expect(applied.applied).toBe(1);
     // 保留方 = id 字典序较小者（确定性），另一方软归档
     const sorted = [dupA.id, dupB.id].sort() as [string, string];

@@ -6,22 +6,33 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { randomBytes, scryptSync } from "node:crypto";
 import path from "node:path";
 import {
   ingestRequest,
   captureRequest,
   canonicalizeUrl,
+  classifyByRules,
   isPrivacyDomain,
   parseNetscapeBookmarks,
   exportNetscapeHtml,
+  INBOX_FOLDER_TITLE,
 } from "@mf/shared";
 import type { LlmClient } from "@mf/ai/llm-client";
 import { newId, now } from "./db";
 import { Store, type BookmarkRow } from "./store";
 import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
-import { navData, renderNavHtml, renderPasswordPage, NAV_TEMPLATES, type NavTemplate } from "./nav";
+import { enqueueMirrorMoves } from "./organize";
+import { analyzeSiteProjection, type SiteProjection } from "./site-analysis";
+import { dispatchWebhooks, deliverHook } from "./hooks";
+import {
+  navData,
+  renderNavHtml,
+  renderPasswordPage,
+  NAV_TEMPLATES,
+  type NavTemplate,
+  type NavData,
+} from "./nav";
 import { login, mountAuth, authEnabled } from "./auth";
 import {
   mountSecurity,
@@ -34,6 +45,14 @@ import type { MaintenanceService } from "./maintenance";
 import type { SemanticService } from "./semantic";
 import { fetchGuardConfigFromEnv, guardedFetch } from "./fetch-guard";
 import { buildSnapshotView } from "./snapshot-view";
+import {
+  NAV_ACCESS_COOKIE,
+  navAccessCookieHeader,
+  navClearCookieHeader,
+  signNavAccess,
+  verifyNavAccess,
+} from "./nav-auth";
+import { loginRateLimited, recordLoginFailure, clearLoginFailures } from "./security";
 
 export type LlmFor = (purpose: "organize" | "summarize" | "embedding") => LlmClient | null;
 
@@ -48,21 +67,9 @@ export interface AppDeps {
   adminPassword?: string;
 }
 
-// ---------- 密码哈希（scrypt，无外部依赖） ----------
-export async function hashPassword(password: string): Promise<{ hash: string }> {
-  const salt = randomBytes(16).toString("hex");
-  const hash = scryptSync(password, salt, 32).toString("hex");
-  return { hash: `s1:${salt}:${hash}` };
-}
-
-export function verifyPasswordHash(password: string, stored: string): boolean {
-  const parts = stored.split(":");
-  const version = parts[0];
-  const salt = parts[1];
-  const hash = parts[2];
-  if (version !== "s1" || !salt || !hash) return false;
-  return scryptSync(password, salt, 32).toString("hex") === hash;
-}
+// 密码哈希已提取至 ./password.ts（DEV-23 消除循环依赖）；此处重导出保持既有 import 兼容
+export { hashPassword, verifyPasswordHash } from "./password";
+import { hashPassword, verifyPasswordHash } from "./password";
 
 export function buildApp(deps: AppDeps): Hono {
   const { store, llmFor, pipeline, organize, dataDir, semantic, maintenance, adminPassword } = deps;
@@ -80,32 +87,53 @@ export function buildApp(deps: AppDeps): Hono {
       `${c.req.method} ${pathOnly} → ${c.res?.status ?? "?"} ${Date.now() - start}ms`,
     );
   });
-  api.use(
-    "*",
-    cors({
-      origin: (origin) => origin,
-      allowHeaders: [
-        "Content-Type",
-        "Authorization",
-        "Idempotency-Key",
-        "X-MF-Private",
-        "X-MF-Device",
-      ],
-    }),
+  // DEV-05 来源白名单：CORS 不代替认证，只决定是否下发跨域头。
+  // 允许：显式配置（MF_ALLOWED_ORIGINS 逗号分隔，含扩展 chrome-extension:// origin）；
+  // 非生产语义下放行 localhost 与浏览器扩展开发源。未认可来源不下发 CORS 头（浏览器拒绝跨域），
+  // 非浏览器请求仍走认证中间件。
+  const allowedOrigins = new Set(
+    (process.env.MF_ALLOWED_ORIGINS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
   );
+  // CORS 不代替认证，只决定是否下发跨域头。API 与根路由（/auth/login、/healthz）共用同一策略，
+  // 否则分离部署的 Web 管理台无法跨源登录（根路由此前无 CORS，预检必败）。
+  const sharedCors = cors({
+    origin: (origin) => {
+      if (!origin) return null;
+      if (allowedOrigins.has(origin)) return origin;
+      if (!isProductionLike()) {
+        if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return origin;
+        if (origin.startsWith("chrome-extension://")) return origin;
+        if (origin.startsWith("moz-extension://")) return origin;
+      }
+      return null;
+    },
+    allowHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Idempotency-Key",
+      "X-MF-Private",
+      "X-MF-Device",
+    ],
+  });
+  api.use("*", sharedCors);
 
-  // ---------- 鉴权（F6.2 + A4-1 安全默认值） ----------
+  // ---------- 鉴权（F6.2 + A4-1 安全默认值 + DEV-05 引导凭据/令牌生命周期） ----------
   // 环境变量密码模式：原逻辑；生产语义无密码：强制 setup 门槛（503）或 DB hash + token
   if (authEnabled(adminPassword)) {
     mountAuth(api, store, adminPassword);
   } else {
     mountSecurity(api, store, adminPassword);
-    // 首启 setup（唯一免鉴权通道；仅一次）
+    // 首启 setup（唯一免鉴权通道；仅一次）。DEV-05：生产语义要求部署引导凭据，
+    // 禁止暴露端口后任何人抢先设管理员（凭据来源：MF_SETUP_TOKEN env 或 dataDir 引导文件）
     api.post("/admin/setup", async (c) => {
       const body = (await c.req.json().catch(() => ({}))) as { password?: string };
       if (!body.password) return c.json({ error: "password_required" }, 400);
-      const result = await adminSetup(store, body.password);
-      if ("error" in result) return c.json({ error: result.error }, 400);
+      const bootstrap = c.req.header("x-mf-setup-token") ?? "";
+      const result = await adminSetup(store, body.password, bootstrap, dataDir);
+      if ("error" in result) return c.json({ error: result.error }, result.error === "setup_token_required" || result.error === "setup_token_invalid" ? 403 : 400);
       return c.json(result);
     });
   }
@@ -119,6 +147,9 @@ export function buildApp(deps: AppDeps): Hono {
     const rows = store.listBookmarks({
       folderId: c.req.query("folderId"),
       status: c.req.query("status"),
+      // 原型 11：站点类型 / 有快照筛选（切片 B 分析标注后可用）
+      siteType: c.req.query("siteType") || undefined,
+      hasSnapshot: c.req.query("hasSnapshot") === "1",
       limit: c.req.query("limit") ? Math.min(Number(c.req.query("limit")), 1000) : undefined,
       offset: c.req.query("offset") ? Math.max(Number(c.req.query("offset")), 0) : undefined,
     });
@@ -158,6 +189,7 @@ export function buildApp(deps: AppDeps): Hono {
         folderId: folder.id,
         urlRaw: item.url,
         urlCanonical: canon.canonical,
+        urlKeyVersion: canon.rulesVersion,
         title: item.title,
         addedAt: item.addedAt,
       });
@@ -197,6 +229,7 @@ export function buildApp(deps: AppDeps): Hono {
         folderId: folder.id,
         urlRaw: item.url,
         urlCanonical: canon.canonical,
+        urlKeyVersion: canon.rulesVersion,
         title: item.title,
         addedAt: item.addedAt,
       });
@@ -333,7 +366,33 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json(folder, 201);
   });
 
+  // 目录重命名（收纳盒等系统目录不可改名）
+  api.patch("/folders/:id", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { name?: string };
+    const name = body.name?.trim();
+    if (!name) return c.json({ error: "name_required" }, 400);
+    const folder = store.renameFolder(c.req.param("id"), name);
+    if (!folder) return c.json({ error: "not_found_or_system" }, 400);
+    return c.json(folder);
+  });
+
+  // 删除目录：仅允许空目录（无子目录且无书签）——数据安全兜底
+  api.delete("/folders/:id", (c) => {
+    const id = c.req.param("id");
+    const folder = store.getFolder(id);
+    if (!folder) return c.json({ error: "not_found" }, 404);
+    if (folder.is_system_inbox === 1) return c.json({ error: "system_folder" }, 400);
+    if (!store.deleteFolderIfEmpty(id)) return c.json({ error: "folder_not_empty" }, 400);
+    return c.json({ ok: true });
+  });
+
   api.get("/bookmarks", (c) => c.json(listVisibleBookmarks(c)));
+
+  // 注意：必须先于 /bookmarks/:id 注册，否则 "top" 会被当作 id 匹配（404）
+  api.get("/bookmarks/top", (c) => {
+    const limit = Math.min(Number(c.req.query("limit") ?? 8), 24);
+    return c.json({ items: store.topClickedBookmarks(limit) });
+  });
 
   api.get("/bookmarks/:id", (c) => {
     const bm = store.getBookmark(c.req.param("id"));
@@ -350,6 +409,8 @@ export function buildApp(deps: AppDeps): Hono {
       title?: string;
       folderId?: string;
       folderPath?: string[];
+      /** 原型 02 popup「为什么收藏它？」备注 */
+      description?: string;
     };
     if (!body.url) return c.json({ error: "url_required" }, 400);
     const canon = canonicalizeUrl(body.url);
@@ -371,7 +432,16 @@ export function buildApp(deps: AppDeps): Hono {
       folderId,
       urlRaw: body.url,
       urlCanonical: canon.canonical,
+        urlKeyVersion: canon.rulesVersion,
       title: body.title ?? body.url,
+      ...(body.description ? { description: body.description.slice(0, 500) } : {}),
+    });
+    // D33 出站 Hook（异步不阻塞；隐私命中永不外发）
+    dispatchWebhooks(store, "bookmark.added", {
+      bookmarkId: bm.id,
+      url: body.url,
+      title: bm.title,
+      bookmark: { title: bm.title, folder: store.getFolder(folderId)?.name ?? null },
     });
     return c.json({ ...bm, suggest }, 201);
   });
@@ -419,11 +489,75 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json(pipeline.suggest(body.url, body.title ?? ""));
   });
 
-  // ---------- F1.5 收件箱 ----------
+  // ---------- F1.5 收纳盒（自动收纳；D36 术语） ----------
+  api.get("/inbox/count", (c) => {
+    const inbox = store.inboxFolder();
+    if (!inbox) return c.json({ count: 0 });
+    const rows = store.listInboxWithState();
+    return c.json({ count: rows.length, ambiguous: rows.filter((r) => r.state === "ambiguous").length });
+  });
+
+  // 收纳盒面板（原型 06）：箱内条目 + 状态机（pending/处理中、ambiguous 歧义滞留、
+  // privacy_hold 隐私、retry 失败重试）+ 最近已归位（撤销入口带版本）
+  api.get("/inbox/items", (c) => {
+    const items = store.listInboxWithState();
+    const placed = store.listInboxRecentPlaced(5);
+    const domainRules = store.getDomainPlaceRules();
+    const withSuggest = items.map((it) => {
+      const parsed = canonicalizeUrl(it.url_canonical);
+      const rule = parsed ? classifyByRules(parsed.registrableDomain, it.title) : null;
+      return {
+        ...it,
+        suggestCategory: rule && rule.source !== "none" ? rule.category : null,
+        domainRuleFolderId: domainRules[parsed?.registrableDomain ?? ""] ?? null,
+      };
+    });
+    return c.json({ items: withSuggest, placed, ambiguousCount: items.filter((i) => i.state === "ambiguous").length });
+  });
+
+  // 手动选目录 / 改目录（D37：隐私条目「按域名记忆」本地规则可自动归位，不走 AI）
+  api.post("/inbox/assign", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      bookmarkId?: string; folderId?: string; deviceId?: string; rememberDomain?: boolean;
+    };
+    if (!body.bookmarkId || !body.folderId) return c.json({ error: "bookmarkId_folderId_required" }, 400);
+    const bm = store.getBookmark(body.bookmarkId);
+    const folder = store.getFolder(body.folderId);
+    if (!bm || !folder) return c.json({ error: "not_found" }, 404);
+    store.moveBookmark(bm.id, folder.id);
+    store.clearInboxState(bm.id);
+    if (body.deviceId) enqueueMirrorMoves(store, bm.id, folder.id, body.deviceId);
+    if (body.rememberDomain) {
+      const parsed = canonicalizeUrl(bm.url_canonical);
+      if (parsed) store.setDomainPlaceRule(parsed.registrableDomain, folder.id);
+    }
+    return c.json({ ok: true, folderName: folder.name });
+  });
+
+  // 立即重试：清除重试计数 → 重新走流水线（复用 /inbox/process 单条路径）
+  api.post("/inbox/retry", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { bookmarkId?: string; deviceId?: string };
+    if (!body.bookmarkId) return c.json({ error: "bookmarkId_required" }, 400);
+    const bm = store.getBookmark(body.bookmarkId);
+    if (!bm) return c.json({ error: "not_found" }, 404);
+    store.upsertInboxState(bm.id, "pending", null, null, 0);
+    const inbox = store.inboxFolder();
+    if (!inbox || bm.folder_id !== inbox.id) return c.json({ error: "not_in_inbox" }, 400);
+    const deviceId = body.deviceId ?? (c.req.header("x-mf-device") ?? undefined);
+    const result = await pipeline.processInbox([bm.id], inbox.id, { deviceId });
+    return c.json(result);
+  });
+
   api.post("/inbox/setup", (c) => {
     const existing = store.inboxFolder();
-    if (existing) return c.json(existing);
-    const folder = store.createFolder("📥 自动整理", null, "user", true);
+    if (existing) {
+      // D36 术语校准：旧库名「📥 自动整理」幂等改为「📥 收纳盒」
+      if (existing.name !== INBOX_FOLDER_TITLE) {
+        return c.json(store.renameSystemFolder(existing.id, INBOX_FOLDER_TITLE));
+      }
+      return c.json(existing);
+    }
+    const folder = store.createFolder(INBOX_FOLDER_TITLE, null, "user", true);
     return c.json(folder, 201);
   });
 
@@ -463,13 +597,14 @@ export function buildApp(deps: AppDeps): Hono {
     }
     // canonical 查重（扩展已收藏过 / 导入过）
     const byCanonical = store.findByCanonical(canon.canonical);
-    const inbox = store.inboxFolder() ?? store.createFolder("📥 自动整理", null, "user", true);
+    const inbox = store.inboxFolder() ?? store.createFolder(INBOX_FOLDER_TITLE, null, "user", true);
     const bm =
       byCanonical ??
       store.createBookmark({
         folderId: inbox.id,
         urlRaw: body.url,
         urlCanonical: canon.canonical,
+        urlKeyVersion: canon.rulesVersion,
         title: body.title ?? body.url,
       });
     store.upsertIdentity({
@@ -546,26 +681,9 @@ export function buildApp(deps: AppDeps): Hono {
         ids.push(bm.id);
       }
     }
-    const result = await pipeline.processInbox(ids, inbox.id);
-    // A2-4 镜像模式（D20）：应用库归位后，为触发设备排浏览器节点移动操作。
-    // 不与 DB 事务共用（浏览器外部状态），走持久待执行队列，扩展拉取后执行。
-    if (body.deviceId) {
-      for (const mv of result.moved) {
-        for (const ident of store.identitiesForApp(mv.id)) {
-          if (ident.device_id !== body.deviceId) continue;
-          const target = store.findFolderByName(mv.to);
-          if (!target) continue;
-          // 浏览器侧目标目录节点：按「分类名」在映射表里找该设备的节点（扩展端 ensureMirrorFolder 维护）
-          store.enqueueBrowserOpIdempotent({
-            deviceId: ident.device_id,
-            op: "move",
-            browserBookmarkId: ident.browser_bookmark_id,
-            targetBrowserParentId: `mf-folder:${target.name}`,
-            payload: { folderName: target.name, appFolderId: target.id },
-          });
-        }
-      }
-    }
+    // DEV-08：镜像操作在流水线提交事务内入队（崩溃无「已提交但无镜像」空窗），
+    // 不再事务外补排。
+    const result = await pipeline.processInbox(ids, inbox.id, { deviceId: body.deviceId });
     return c.json(result);
   });
 
@@ -588,7 +706,12 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json(result);
   });
 
+  // DEV-02：内容读取先从书签对象授权（存在性 + 私密可见性），再读缓存；
+  // 不存在与不允许读取返回同一 404（避免泄露"对象存在"这一元数据）
   api.get("/content/:bookmarkId", (c) => {
+    const bm = store.getBookmark(c.req.param("bookmarkId"));
+    if (!bm || bm.archived_into) return c.json({ error: "not_found" }, 404);
+    if (bm.is_private && !privateVisible(c)) return c.json({ error: "not_found" }, 404);
     const cache = store.getCache(c.req.param("bookmarkId"));
     if (!cache) return c.json({ error: "not_found" }, 404);
     return c.json(cache);
@@ -605,7 +728,7 @@ export function buildApp(deps: AppDeps): Hono {
     for (const bm of targets) {
       if (!bm) continue;
       // A1-3 服务端纵深校验：隐私域/私密书签禁止抓取（独立判定，不信任任何客户端声明）
-      const decision = pipeline.serverDecide("server_fetch", bm.url_canonical, {
+      const decision = pipeline.serverDecide("server_fetch", bm.url_raw, {
         isPrivateBookmark: bm.is_private === 1,
       });
       if (!decision.allowed) {
@@ -619,13 +742,23 @@ export function buildApp(deps: AppDeps): Hono {
       }
       try {
         // A1-4 网络访问策略：私网/回环/链路本地禁止（自建显式开启才放行）；每跳重定向重新校验
-        const res = await guardedFetch(bm.url_canonical, guardConfig, {
-          headers: {
-            "user-agent": "my-favorites-bot/0.1 (+https://github.com/easeyeah/my-favorites)",
+        // DEV-13：抓取地址用原始 URL（canonical 只是查重键，不再承担网络目标语义）
+        // DEV-04：连接固定到已校验地址；读取期强制字节上限（先于整包分配）
+        const res = await guardedFetch(
+          bm.url_raw,
+          guardConfig,
+          {
+            headers: {
+              "user-agent": "my-favorites-bot/0.1 (+https://github.com/easeyeah/my-favorites)",
+            },
           },
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const html = (await res.text()).slice(0, 500_000);
+          { maxBytes: 500_000, timeoutMs: 10_000, totalTimeoutMs: 25_000 },
+        );
+        if (!res.ok) {
+          res.dispose();
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const html = (await res.readBody(500_000)).toString("utf8");
         const description =
           /<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i.exec(html)?.[1] ??
           /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']*)["']/i.exec(html)?.[1];
@@ -660,32 +793,31 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json({ processed: results.length, results });
   });
 
-  // ---------- F3 聊天整理 ----------
+  // ---------- F3 整理（D27 act + undo：一次调用直接生效，安全网 = 版本撤销） ----------
   api.post("/organize/sessions", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { message?: string };
     if (!body.message) return c.json({ error: "message_required" }, 400);
-    const result = await organize.handleMessage(body.message);
-    return c.json(result, 201);
-  });
-
-  api.post("/organize/sessions/:id/apply", (c) => {
     try {
-      const result = organize.apply(c.req.param("id"));
-      // F3.8 偏好记忆：记录采纳的目录迁移
-      const session = store.db
-        .prepare("SELECT proposal FROM organize_session WHERE id = ?")
-        .get(c.req.param("id")) as { proposal: string | null } | undefined;
-      if (session?.proposal) {
-        const proposal = JSON.parse(session.proposal) as Array<{ type: string; toFolder?: string }>;
-        for (const a of proposal) {
-          if (a.type === "move" && a.toFolder) store.recordCategoryAdoption(a.toFolder);
-        }
+      const result = await organize.handleMessage(body.message);
+      // F3.8 偏好记忆：只统计实际生效（applied 的 move）；冲突/跳过不计入偏好
+      for (const a of result.appliedActions ?? []) {
+        if (a.type === "move" && a.toFolderName) store.recordCategoryAdoption(a.toFolderName);
       }
-      return c.json(result);
+      // D33 出站 Hook：整理完成事件（聚合，不含单条内容）
+      if (result.status === "applied") {
+        dispatchWebhooks(store, "bookmark.organized", {
+          versionId: result.versionId,
+          applied: result.applied ?? 0,
+        });
+      }
+      return c.json(result, 201);
     } catch (err) {
-      return c.json({ error: String(err) }, 400);
+      return c.json({ error: String(err) }, 500);
     }
   });
+
+  // DEV-08/14：历史版本列表（通知卡 / 只读明细 / 版本时间线三处撤销入口的兜底一环）
+  api.get("/organize/versions", (c) => c.json({ versions: store.listVersions() }));
 
   api.post("/organize/rollback/:versionId", (c) => {
     try {
@@ -700,75 +832,200 @@ export function buildApp(deps: AppDeps): Hono {
     const q = c.req.query("q")?.trim();
     if (!q) return c.json({ results: [] });
     if (c.req.query("semantic") === "1") {
-      const rows = await semantic.search(q);
+      const rows = await semantic.search(q, 20, { includePrivate: privateVisible(c) });
       return c.json({ results: rows, mode: "semantic" });
     }
-    return c.json({ results: store.search(q), mode: "fulltext" });
+    // DEV-02：关键词搜索默认排除私密；X-MF-Private 为已鉴权管理面的显式显示开关
+    return c.json({ results: store.search(q, 50, { includePrivate: privateVisible(c) }), mode: "fulltext" });
   });
 
-  // ---------- F4 导航站（模板/发布/密码） ----------
-  api.get("/nav/data", (c) => c.json(navData(store)));
+  // ---------- F4 导航站（DEV-01：显式发布集合 + 确认计数 + 撤销发布） ----------
+  api.get("/nav/data", (c) => {
+    // 管理面预览：过滤私密/软归档（与公开渲染同一边界；不提供全库公开渲染）
+    const folders = store.listFolders().filter((f) => !f.is_system_inbox);
+    const data: NavData = {
+      title: "我的导航",
+      groups: folders
+        .map((f) => ({
+          name: f.name,
+          items: store
+            .listBookmarks({ folderId: f.id, limit: 200 })
+            .filter((b) => b.status !== "archived" && b.is_private === 0)
+            .map((b) => ({
+              title: b.title,
+              url: b.url_raw,
+              favicon: b.favicon_url,
+              dead: b.status === "dead",
+              summary: (store.getCache(b.id)?.l1_summary as string | null) ?? null,
+              siteType: b.site_type ?? null,
+              hasSnapshot: store.hasSnapshot(b.id),
+            })),
+        }))
+        .filter((g) => g.items.length > 0),
+    };
+    return c.json(data);
+  });
+
+  // ---------- D30/D31 站点化分析（切片 B：投影可随时重建） ----------
+  api.post("/nav/projection/rebuild", (c) => {
+    const projection = analyzeSiteProjection(store);
+    store.saveProjection(projection);
+    return c.json({ ok: true, counts: projection.counts, built_at: store.getProjection()?.built_at ?? null });
+  });
+
+  api.get("/nav/projection", (c) => {
+    return c.json({ projection: store.getProjection() ?? null });
+  });
+
+  // 看名单 / 看明细（原型 13：站点化分析卡逐行钻取）
+  api.get("/nav/projection/list", (c) => {
+    const kind = c.req.query("kind") ?? "sites";
+    const projection = store.getProjection() as SiteProjection | undefined;
+    if (!projection) return c.json({ error: "projection_not_built" }, 404);
+    if (kind === "sites" || kind === "upgraded") {
+      const rows = (projection.sites ?? [])
+        .filter((s) => (kind === "upgraded" ? s.upgraded : true))
+        .map((s) => ({ domain: s.domain, title: s.title, url: s.url, upgraded: s.upgraded, count: s.bookmarkIds.length }));
+      return c.json({ rows });
+    }
+    if (kind === "refs") return c.json({ rows: projection.refs ?? [] });
+    if (kind === "merged") return c.json({ rows: projection.merged ?? [] });
+    if (kind === "content") {
+      return c.json({ rows: store.listBySiteType("content", 500) });
+    }
+    return c.json({ error: "invalid_kind" }, 400);
+  });
+
+  // ---------- D29 最常访问（应用内点击计数） ----------
+  api.post("/bookmarks/:id/click", (c) => {
+    store.recordBookmarkClick(c.req.param("id"));
+    return c.json({ ok: true });
+  });
+  // GET /bookmarks/top 注册在 /bookmarks/:id 之前（见上方书签查询路由块）
   api.get("/nav/sites", (c) => c.json(store.navSites()));
 
+  /**
+   * 发布（新建或更新）。默认私有：必须显式提供 folderIds/bookmarkIds 至少一项。
+   * 返回 itemCount（“将公开 N 项”确认页数据源）；仅元数据/摘要进入公开响应。
+   */
   api.post("/nav/publish", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
+      slug?: string;
       title?: string;
       template?: string;
-      password?: string;
+      password?: string | null;
+      folderIds?: string[];
+      bookmarkIds?: string[];
     };
-    const slug = Math.random().toString(36).slice(2, 10); // 随机不可枚举（D5）
     const template = NAV_TEMPLATES.includes(body.template as NavTemplate)
       ? (body.template as NavTemplate)
       : "grid";
-    store.saveNavSite(slug, body.title ?? "我的导航");
-    const passwordHash = body.password ? (await hashPassword(body.password)).hash : null;
-    store.db
-      .prepare("UPDATE nav_site SET template = ?, password_hash = ? WHERE slug = ?")
-      .run(template, passwordHash, slug);
-    return c.json({ slug, url: `/s/${slug}`, template }, 201);
+    const passwordHash =
+      body.password === null
+        ? null
+        : body.password
+          ? (await hashPassword(body.password)).hash
+          : undefined; // undefined = 保持原密码（仅更新范围/模板）
+    let slug = body.slug ?? "";
+    if (slug) {
+      const site = store.getNavSiteFull(slug);
+      if (!site) return c.json({ error: "site_not_found" }, 404);
+    } else {
+      // 加密随机 slug + 唯一冲突重试
+      do {
+        slug = Store.newNavSlug();
+      } while (store.getNavSiteFull(slug) !== undefined);
+      store.saveNavSite(slug, body.title ?? "我的导航");
+    }
+    try {
+      const { itemCount } = store.publishNavSite(
+        slug,
+        { folderIds: body.folderIds ?? [], bookmarkIds: body.bookmarkIds ?? [] },
+        {
+          title: body.title,
+          template,
+          passwordHash,
+        },
+      );
+      const site = store.getNavSiteFull(slug)!;
+      return c.json(
+        { slug, url: `/s/${slug}`, template, itemCount, revision: site.revision, published: site.published === 1 },
+        201,
+      );
+    } catch (err) {
+      if (String(err).includes("empty_publication_scope")) {
+        // 未选择任何内容：拒绝发布并回滚新建的空站点（默认私有红线）
+        if (!body.slug) {
+          store.db.prepare("DELETE FROM nav_site WHERE slug = ?").run(slug);
+        }
+        return c.json({ error: "empty_publication_scope", hint: "发布前必须显式选择书签或目录" }, 400);
+      }
+      throw err;
+    }
   });
 
+  api.post("/nav/sites/:slug/unpublish", (c) => {
+    const ok = store.unpublishNavSite(c.req.param("slug"));
+    if (!ok) return c.json({ error: "not_found" }, 404);
+    return c.json({ unpublished: true });
+  });
+
+  // 站点配置回显（管理面；password_hash 不回传，只回传是否有密码）
+  api.get("/nav/sites/:slug", (c) => {
+    const site = store.getNavSiteFull(c.req.param("slug"));
+    if (!site) return c.json({ error: "not_found" }, 404);
+    const scope = store.navSiteScope(site.slug);
+    return c.json({
+      slug: site.slug,
+      title: site.title,
+      template: site.template,
+      hasPassword: site.password_hash !== null,
+      published: site.published === 1,
+      revision: site.revision,
+      scope,
+      config: store.getNavSiteConfig(site.slug),
+      itemCount: store.navSiteItems(site.slug).length,
+    });
+  });
+
+  /**
+   * PATCH 以完整当前配置为基线：缺字段保持原值；password 显式 null 才移除；
+   * 只改 title 不再丢失密码/模板（修复 E02）。
+   */
   api.patch("/nav/sites/:slug", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
       title?: string;
       template?: string;
       password?: string | null;
+      /** 原型 13：主题色/搜索引擎/显示选项/水印/自定义卡/包含资料站（整体替换语义） */
+      config?: Record<string, unknown>;
     };
     const site = store.getNavSiteFull(c.req.param("slug"));
     if (!site) return c.json({ error: "not_found" }, 404);
     const passwordHash =
       body.password === null ? null : body.password ? (await hashPassword(body.password)).hash : undefined;
     store.updateNavSite(c.req.param("slug"), {
-      ...(body.title ? { title: body.title } : {}),
+      ...(body.title !== undefined ? { title: body.title } : {}),
       ...(body.template && NAV_TEMPLATES.includes(body.template as NavTemplate)
         ? { template: body.template }
         : {}),
       ...(passwordHash !== undefined ? { passwordHash } : {}),
     });
-    return c.json(store.getNavSiteFull(c.req.param("slug")));
+    if (body.config !== undefined) store.setNavSiteConfig(c.req.param("slug"), body.config);
+    const updated = store.getNavSiteFull(c.req.param("slug"))!;
+    return c.json({
+      slug: updated.slug,
+      title: updated.title,
+      template: updated.template,
+      hasPassword: updated.password_hash !== null,
+      published: updated.published === 1,
+      revision: updated.revision,
+      config: store.getNavSiteConfig(c.req.param("slug")),
+    });
   });
 
-  api.get("/s/search", (c) => {
-    const q = c.req.query("q") ?? "";
-    const results = store.search(q, 20);
-    c.header("content-type", "text/html; charset=utf-8");
-    return c.body(
-      `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${esc(q)} - 搜索结果</title>
-<style>
-  :root { --bg:#f7f7f8; --text:#222; --muted:#888; --card:#fff; --border:#e5e5e8; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#161618; --text:#eee; --muted:#999; --card:#222225; --border:#333; } }
-  body { margin:0 auto; max-width:720px; padding:40px 24px; background:var(--bg); color:var(--text);
-         font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
-  ul { list-style:none; padding:0; }
-  li { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px 16px; margin:8px 0; }
-  a { color:inherit; text-decoration:none; } a:hover { text-decoration:underline; }
-  .back { color:var(--muted); font-size:13px; }
-</style>
-</head><body><h1>“${esc(q)}”的搜索结果</h1><ul>${results
-        .map((r) => `<li><a href="${esc(r.url_raw)}">${esc(r.title)}</a></li>`)
-        .join("")}</ul><p><a class="back" href="javascript:history.back()">← 返回</a></p></body></html>`,
-    );
-  });
+  // DEV-01：匿名全库搜索已关闭。公开搜索一律 /s/:slug/search（限定站点发布集合，
+  // 且受该站密码凭证约束）；私有搜索走已鉴权 /api/v1/search。
 
   // ---------- F2.4 快照（配额管控） ----------
   api.post("/snapshots", async (c) => {
@@ -812,6 +1069,14 @@ export function buildApp(deps: AppDeps): Hono {
   });
 
   // A4-4/A4-5：快照查看（净化视图，禁脚本/禁外联）与受控下载分开
+  // 快照版本列表（原型 08/11：查看器版本 tabs + 书签详情抽屉；仅元数据不含内容）
+  api.get("/snapshots", (c) => {
+    const bookmarkId = c.req.query("bookmarkId");
+    if (!bookmarkId) return c.json({ error: "bookmarkId_required" }, 400);
+    if (!store.getBookmark(bookmarkId)) return c.json({ error: "bookmark_not_found" }, 404);
+    return c.json({ snapshots: store.listSnapshots(bookmarkId) });
+  });
+
   api.get("/snapshots/:id/view", (c) => {
     const row = store.db
       .prepare("SELECT s.*, b.url_canonical, b.title, b.is_private FROM snapshot s JOIN bookmarks b ON b.id = s.bookmark_id WHERE s.id = ?")
@@ -864,20 +1129,17 @@ export function buildApp(deps: AppDeps): Hono {
     }
   });
 
+  // DEV-02：旧快照直读接口已封堵——它绕过受控下载头/隐私检查（message/rfc822 可被内联渲染）。
+  // 迁移指引：净化查看 /view，原始文件受控下载 /download（均鉴权 + 隐私检查）。
   api.get("/snapshots/:id", (c) => {
-    const row = store.db
-      .prepare("SELECT * FROM snapshot WHERE id = ?")
-      .get(c.req.param("id")) as
-      | { id: string; path: string; size: number; format: string }
-      | undefined;
-    if (!row) return c.json({ error: "not_found" }, 404);
-    try {
-      const data = readFileSync(row.path);
-      c.header("content-type", "message/rfc822");
-      return c.body(data);
-    } catch {
-      return c.json({ error: "file_missing" }, 500);
-    }
+    void c.req.param("id");
+    return c.json(
+      {
+        error: "endpoint_removed",
+        hint: "旧快照直读已下线。净化查看: GET /api/v1/snapshots/:id/view；受控下载: GET /api/v1/snapshots/:id/download",
+      },
+      410,
+    );
   });
 
   // ---------- F1.7 多端同步（变更日志 + 游标） ----------
@@ -1007,12 +1269,99 @@ export function buildApp(deps: AppDeps): Hono {
     }
   });
 
+  // 拉取供应商在线模型列表（OpenAI 兼容 GET /models；Anthropic 走自有端点与协议头）
+  api.get("/settings/providers/:id/models", async (c) => {
+    const row = store.enabledProviderConfigs().find((r) => r.id === c.req.param("id"));
+    if (!row) return c.json({ error: "provider_not_found_or_disabled" }, 404);
+    const base = row.base_url.replace(/\/$/, "");
+    const isAnthropic = row.provider_id === "anthropic";
+    const url = isAnthropic ? `${base}/v1/models` : `${base}/models`;
+    const headers: Record<string, string> = isAnthropic
+      ? { "x-api-key": row.api_key ?? "", "anthropic-version": "2023-06-01" }
+      : row.api_key
+        ? { authorization: `Bearer ${row.api_key}` }
+        : {};
+    try {
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) return c.json({ error: `provider_returned_${res.status}` }, 502);
+      const json = (await res.json().catch(() => ({}))) as { data?: Array<{ id?: string }> };
+      const models = (json.data ?? []).map((m) => String(m.id ?? "")).filter(Boolean);
+      return c.json({ models });
+    } catch (err) {
+      return c.json({ error: String(err).slice(0, 200) }, 502);
+    }
+  });
+
   api.get("/settings/prefs", (c) =>
     c.json({
       topCategories: store.topCategories(),
       adoption: store.getPref("category_adoption") ?? {},
+      // D28 通知方式（管理台侧）：toast 轻提示（默认）/ card 通知卡 / silent 静默仅版本记录
+      notifyStyle: store.getPref("notify_style") ?? "toast",
+      // 原型 12：整理偏好记忆（用户可查看/删除的规则，如「同一文档多版本共存时不合并」）
+      organizeRules: store.getOrganizeRules(),
     }),
   );
+
+  // D28 + 原型 12：通知方式三档 / 整理偏好规则（管理台侧）
+  api.patch("/settings/prefs", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { notifyStyle?: unknown; organizeRules?: unknown };
+    if (body.notifyStyle !== undefined && !["toast", "card", "silent"].includes(body.notifyStyle as string)) {
+      return c.json({ error: "invalid_notify_style" }, 400);
+    }
+    if (body.notifyStyle !== undefined) store.setPref("notify_style", body.notifyStyle);
+    if (body.organizeRules !== undefined) {
+      if (!Array.isArray(body.organizeRules) || body.organizeRules.some((r) => typeof r !== "string")) {
+        return c.json({ error: "invalid_organize_rules" }, 400);
+      }
+      store.setOrganizeRules(body.organizeRules as string[]);
+    }
+    return c.json({
+      ok: true,
+      notifyStyle: store.getPref("notify_style") ?? "toast",
+      organizeRules: store.getOrganizeRules(),
+    });
+  });
+
+  // ---------- D33 集成 Hook（出站 Webhook：Key/Secret 落库、SSRF 防护、隐私前置） ----------
+  api.get("/settings/webhooks", (c) => c.json({ webhooks: store.listHooks() }));
+
+  api.post("/settings/webhooks", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      id?: string; label?: string; url?: string; events?: string[];
+      granularity?: string; secret?: string | null; enabled?: boolean;
+    };
+    if (!body.label || !body.url || !/^https?:\/\//.test(body.url) || !Array.isArray(body.events) || body.events.length === 0) {
+      return c.json({ error: "invalid_request" }, 400);
+    }
+    const { id } = store.saveHook({
+      id: body.id,
+      label: body.label,
+      url: body.url,
+      events: body.events,
+      granularity: body.granularity === "full" ? "full" : "meta",
+      secret: body.secret ?? undefined,
+      enabled: body.enabled,
+    });
+    return c.json({ ok: true, id }, 201);
+  });
+
+  api.delete("/settings/webhooks/:id", (c) => {
+    const ok = store.deleteHook(c.req.param("id"));
+    return ok ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+  });
+
+  // 测试：发一条 test 事件（走同一 SSRF/HMAC 链路；目标不可达时 ok=false + 原因，不抛 500）
+  api.post("/settings/webhooks/:id/test", async (c) => {
+    const hook = store.getHook(c.req.param("id"));
+    if (!hook) return c.json({ error: "not_found" }, 404);
+    const result = await deliverHook(hook.url, hook.secret, {
+      event: "checkup.done",
+      ts: new Date().toISOString(),
+      data: { test: true, source: "my-favorites" },
+    });
+    return c.json(result);
+  });
 
   // ---------- 埋点 ----------
   api.post("/analytics/events", async (c) => {
@@ -1030,7 +1379,8 @@ export function buildApp(deps: AppDeps): Hono {
       "install",
       "import_completed",
       "stage1_result_viewed",
-      "diff_accepted",
+      "diff_accepted", // 旧确认流事件（D27 前历史数据，仅保留统计）
+      "organize_applied", // D27：整理直接生效（替代 diff_accepted）
       "nav_generated",
       "ntp_enabled",
       "inbox_auto_sorted",
@@ -1040,28 +1390,24 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json(Object.fromEntries(names.map((n) => [n, store.countEvents(n)])));
   });
 
-  // ---------- 令牌管理（A4-1：可撤销、可失效） ----------
+  // ---------- 令牌管理（DEV-05：非密 ID 列表 / 按 ID 撤销 / logout 失效） ----------
   api.get("/auth/tokens", (c) => {
-    const rows = store.db
-      .prepare("SELECT token, label, created_at FROM tokens ORDER BY created_at DESC")
-      .all() as unknown as Array<{ token: string; label: string | null; created_at: string }>;
-    return c.json({
-      tokens: rows.map((r) => ({ ...r, token: `${r.token.slice(0, 8)}…` })), // 脱敏展示
-    });
+    // 列表不含任何 token 原值/摘要；token_id 为随机非密 ID，可直接用于撤销
+    return c.json({ tokens: store.listTokens() });
   });
 
-  api.delete("/auth/tokens/:token", (c) => {
-    const token = c.req.param("token");
-    store.db.prepare("DELETE FROM tokens WHERE token = ?").run(token);
+  api.delete("/auth/tokens/:tokenId", (c) => {
+    const ok = store.revokeTokenById(c.req.param("tokenId"));
+    if (!ok) return c.json({ error: "not_found_or_already_revoked" }, 404);
     return c.json({ revoked: true });
   });
 
   api.post("/auth/logout", (c) => {
-    // 撤销当前请求使用的 token
+    // 撤销当前请求使用的 token（摘要匹配）
     const header = c.req.header("authorization") ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-    if (token) store.db.prepare("DELETE FROM tokens WHERE token = ?").run(token);
-    return c.json({ loggedOut: true });
+    const revoked = token ? store.revokeByRawToken(token) : false;
+    return c.json({ loggedOut: revoked });
   });
 
   // ---------- stats ----------
@@ -1076,6 +1422,7 @@ export function buildApp(deps: AppDeps): Hono {
 
   // ---------- 公开页与根级路由 ----------
   const root = new Hono();
+  root.use("*", sharedCors);
   root.get("/healthz", (c) =>
     c.json({
       ok: true,
@@ -1084,22 +1431,37 @@ export function buildApp(deps: AppDeps): Hono {
     }),
   );
 
-  // F6.2/A4-1 登录（环境变量密码或 DB hash；均带速率限制）
+  // DEV-05 客户端标识：仅在显式信任代理（MF_TRUST_PROXY=1，自建反代白名单）时
+  // 采信 X-Forwarded-For；否则用 TCP 对端地址——伪造代理头不能绕过限速
+  const clientKeyOf = (c: { req: { header: (n: string) => string | undefined }; env: unknown }): string => {
+    if (process.env.MF_TRUST_PROXY === "1") {
+      const fwd = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+      if (fwd) return fwd;
+    }
+    const incoming = (c.env as { incoming?: { socket?: { remoteAddress?: string } } })?.incoming;
+    return incoming?.socket?.remoteAddress ?? "local";
+  };
+
+  // F6.2/A4-1 + DEV-05 登录（环境变量密码或 DB hash；两种模式统一限速，key 区分模式）
   root.post("/auth/login", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { password?: string; label?: string };
     if (!body.password) return c.json({ error: "password_required" }, 400);
-    // 环境变量模式（兼容既有部署）
+    const clientKey = clientKeyOf(c);
+    // 环境变量模式（兼容既有部署）：同样限速（修复 E07：env 密码无速率限制）
     if (authEnabled(adminPassword)) {
+      const key = `admin-env:${clientKey}`;
+      if (loginRateLimited(key)) return c.json({ error: "rate_limited" }, 429);
       const result = login(store, adminPassword, body.password, body.label ?? "device");
       if ("error" in result) {
+        recordLoginFailure(key);
         return c.json(result, result.error === "auth_disabled" ? 400 : 401);
       }
+      clearLoginFailures(key);
       return c.json(result);
     }
     // A4-1 DB hash 模式（生产语义首启 setup 后）
     if (isProductionLike() && !setupRequired(store)) {
-      const clientKey = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || "local";
-      const result = loginWithDbHash(store, body.password, body.label ?? "device", clientKey);
+      const result = loginWithDbHash(store, body.password, body.label ?? "device", `admin-db:${clientKey}`);
       if ("status" in result) {
         const status = result.status as 401 | 429;
         return c.json({ error: result.error }, status);
@@ -1113,26 +1475,15 @@ export function buildApp(deps: AppDeps): Hono {
   // 传播裂变设想，在 D15 自建端形态下无获客目标，且无鉴权暴露统计、误导管理台用户。
   // JSON 数据端点保留（/api/v1/health-report，管理台概览数据源）。云端阶段如需落地页重新设计。
 
-  // 导航站搜索落地页（P0 XSS 修复版：q 全量转义）
+  // DEV-01：全局 /s/search 已关闭（曾可匿名搜全库，包括私密书签）。
+  // 公开搜索必须携带站点标识：/s/:slug/search 且仅覆盖该站显式发布集合。
   root.get("/s/search", (c) => {
-    const q = c.req.query("q") ?? "";
-    const results = store.search(q, 20);
-    c.header("content-type", "text/html; charset=utf-8");
-    return c.body(
-      `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${esc(q)} - 搜索结果</title>
-<style>
-  :root { --bg:#f7f7f8; --text:#222; --muted:#888; --card:#fff; --border:#e5e5e8; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#161618; --text:#eee; --muted:#999; --card:#222225; --border:#333; } }
-  body { margin:0 auto; max-width:720px; padding:40px 24px; background:var(--bg); color:var(--text);
-         font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
-  ul { list-style:none; padding:0; }
-  li { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px 16px; margin:8px 0; }
-  a { color:inherit; text-decoration:none; } a:hover { text-decoration:underline; }
-  .back { color:var(--muted); font-size:13px; }
-</style>
-</head><body><h1>“${esc(q)}”的搜索结果</h1><ul>${results
-        .map((r) => `<li><a href="${esc(r.url_raw)}">${esc(r.title)}</a></li>`)
-        .join("")}</ul><p><a class="back" href="javascript:history.back()">← 返回</a></p></body></html>`,
+    return c.json(
+      {
+        error: "endpoint_removed",
+        hint: "公开搜索请访问具体站点：/s/<slug>/search；全库搜索需要登录 /api/v1/search",
+      },
+      410,
     );
   });
 
@@ -1170,45 +1521,108 @@ export function buildApp(deps: AppDeps): Hono {
     root.get("/favicon.ico", (c) => c.body(null, 204));
   }
 
-  // 导航站公开页（模板 + 密码）
+  // ---------- 导航站公开页（DEV-01：唯一实现路径；显式发布集合 + POST 密码凭证） ----------
+
+  /** 访问判定：站点已发布 且（无密码 或 持有效访问凭证——绑定 slug+revision） */
+  const navAccessAllowed = (c: { req: { header: (n: string) => string | undefined } }, site: NonNullable<ReturnType<typeof store.getNavSiteFull>>): boolean => {
+    if (site.published !== 1) return false;
+    if (!site.password_hash) return true;
+    const cookie = c.req.header("cookie") ?? "";
+    const match = new RegExp(`(?:^|;\\s*)${NAV_ACCESS_COOKIE(site.slug)}=([^;]+)`).exec(cookie);
+    return verifyNavAccess(store, site.slug, site.revision, match?.[1] ? decodeURIComponent(match[1]) : undefined);
+  };
+
+  // 密码验证（POST）：独立于管理员登录的限速（key: nav:<slug>:<client>），
+  // 成功签发短期 HttpOnly cookie；旧 ?p= 查询参数通道移除。
+  root.post("/s/:slug/auth", async (c) => {
+    const site = store.getNavSiteFull(c.req.param("slug"));
+    if (!site || site.published !== 1 || !site.password_hash) {
+      return c.json({ error: "not_found" }, 404);
+    }
+    const bodyForm = (await c.req.parseBody().catch(() => ({}))) as Record<string, unknown>;
+    const password = typeof bodyForm.password === "string" ? bodyForm.password : "";
+    const key = `nav:${site.slug}:${clientKeyOf(c)}`;
+    if (!password || loginRateLimited(key) || !verifyPasswordHash(password, site.password_hash)) {
+      if (password) recordLoginFailure(key);
+      c.header("content-type", "text/html; charset=utf-8");
+      c.header("cache-control", "no-store");
+      c.header("referrer-policy", "no-referrer");
+      return c.body(renderPasswordPage(site.title, site.slug, true), 401);
+    }
+    clearLoginFailures(key);
+    const token = signNavAccess(store, site.slug, site.revision);
+    c.header("set-cookie", navAccessCookieHeader(site.slug, token, new URL(c.req.url).protocol === "https:"));
+    c.header("cache-control", "no-store");
+    return c.redirect(`/s/${site.slug}`, 303);
+  });
+
+  // 公开站首页（模板 + 密码凭证；未发布站点显示占位说明，不回退全库数据）
   root.get("/s/:slug", (c) => {
     const site = store.getNavSiteFull(c.req.param("slug"));
     if (!site) return c.json({ error: "not_found" }, 404);
-    if (site.password_hash) {
-      const p = c.req.query("p") ?? "";
-      if (!p || !verifyPasswordHash(p, site.password_hash)) {
-        c.header("content-type", "text/html; charset=utf-8");
-        return c.body(renderPasswordPage(site.title));
-      }
-    }
+    c.header("cache-control", "no-store"); // 站点内容随发布范围变化，禁止中间缓存
+    c.header("referrer-policy", "no-referrer");
     c.header("content-type", "text/html; charset=utf-8");
+    if (site.published !== 1) {
+      // DEV-01：存量站点缺少显式发布集合 → 待确认/不可公开（升级说明见 docs）
+      return c.body(renderUnpublishedPage(site.title));
+    }
+    if (!navAccessAllowed(c, site)) {
+      return c.body(renderPasswordPage(site.title, site.slug));
+    }
     return c.body(
-      renderNavHtml(navData(store, site.title), {
-        watermark: true,
+      renderNavHtml(navData(store, site.slug, site.title), {
+        // 原型 13：水印自建端可关（D12 全功能开放）；主题色/显示选项/自定义卡走站点 config
+        watermark: store.getNavSiteConfig(site.slug).watermark !== false,
         template: (site.template as NavTemplate) ?? "grid",
+        config: store.getNavSiteConfig(site.slug) as { themeColor?: string; showSummary?: boolean; snapshotBadge?: boolean; customCards?: Array<{ title: string; url: string; desc?: string; favicon?: string }> },
       }),
     );
   });
 
-  root.get("/s/:slug", (c) => {
+  // 站内搜索（q 全量转义；仅该站显式发布集合；密码站需有效凭证）
+  root.get("/s/:slug/search", (c) => {
     const site = store.getNavSiteFull(c.req.param("slug"));
-    if (!site) return c.json({ error: "not_found" }, 404);
-    if (site.password_hash) {
-      const p = c.req.query("p") ?? "";
-      if (!p || !verifyPasswordHash(p, site.password_hash)) {
-        c.header("content-type", "text/html; charset=utf-8");
-        return c.body(renderPasswordPage(site.title));
-      }
-    }
+    if (!site || site.published !== 1) return c.json({ error: "not_found" }, 404);
+    c.header("cache-control", "no-store");
+    c.header("referrer-policy", "no-referrer");
     c.header("content-type", "text/html; charset=utf-8");
+    if (!navAccessAllowed(c, site)) {
+      return c.body(renderPasswordPage(site.title, site.slug));
+    }
+    const q = c.req.query("q") ?? "";
+    const items = store
+      .navSiteItems(site.slug)
+      .filter((it) => it.title.toLowerCase().includes(q.toLowerCase()) || it.url_raw.toLowerCase().includes(q.toLowerCase()))
+      .slice(0, 50);
     return c.body(
-      renderNavHtml(navData(store, site.title), {
-        watermark: true,
-        template: (site.template as NavTemplate) ?? "grid",
-      }),
+      `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>${esc(q)} - 搜索结果</title>
+<style>
+  :root { --bg:#f7f7f8; --text:#222; --muted:#888; --card:#fff; --border:#e5e5e8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161618; --text:#eee; --muted:#999; --card:#222225; --border:#333; } }
+  body { margin:0 auto; max-width:720px; padding:40px 24px; background:var(--bg); color:var(--text);
+         font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  ul { list-style:none; padding:0; }
+  li { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px 16px; margin:8px 0; }
+  a { color:inherit; text-decoration:none; } a:hover { text-decoration:underline; }
+  .back { color:var(--muted); font-size:13px; }
+</style>
+</head><body><h1>“${esc(q)}”的搜索结果</h1><ul>${items
+        .map((r) => `<li><a href="${esc(r.url_raw)}">${esc(r.title)}</a></li>`)
+        .join("")}</ul><p><a class="back" href="/s/${esc(site.slug)}">← 返回</a></p></body></html>`,
     );
   });
 
   root.route("/", api);
   return root;
+}
+
+/** DEV-01：未发布站点占位页（存量站点升级后待管理员确认发布） */
+function renderUnpublishedPage(title: string): string {
+  const esc = (v: string): string =>
+    v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>${esc(title)}</title></head>
+<body style="font:15px/1.6 -apple-system,sans-serif;max-width:480px;margin:20vh auto;padding:0 24px;color:#333">
+<h2>该站点暂未发布</h2><p>导航站升级后需要在管理台重新确认发布范围（书签/目录选择）后才会对外可见。这是 v0.4 的安全变更：公开内容不再默认全库。</p>
+</body></html>`;
 }

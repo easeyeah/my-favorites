@@ -1,7 +1,10 @@
 /**
  * 语义能力（F7.2 语义搜索 + F3.9 大库聚类）
  * 向量存 content_cache.embedding（JSON 数组，M1 数据量级 ≤10k 用内存余弦足够）。
+ * DEV-03：embedding 是模型入口——统一走隐私策略（隐私域/私密不外发），
+ * 且 await 返回后重验策略再落库（等待期间规则可能变化）。
  */
+import { checkPrivacy, type PrivacyRules } from "@mf/shared";
 import type { Store, BookmarkRow } from "./store";
 import type { LlmClient } from "@mf/ai/llm-client";
 
@@ -40,16 +43,43 @@ export class SemanticService {
     }
   }
 
-  /** 捕获/抓取后为书签生成向量（失败静默——语义搜索是增强而非依赖） */
+  /** 服务端当前隐私规则（每次判定实时读取，不缓存旧值） */
+  private currentRules(): PrivacyRules {
+    const { patterns, revision } = this.store.privacyRules();
+    return { patterns, revision };
+  }
+
+  /**
+   * 捕获/抓取后为书签生成向量（失败静默——语义搜索是增强而非依赖）。
+   * DEV-03：私密与隐私域书签不向量化（向量内容会发往 embedding 供应商）；
+   * await 返回后重验——模型调用期间新加的隐私规则/私密标记同样拦截写回。
+   */
   async embedBookmark(bookmarkId: string): Promise<boolean> {
     const bm = this.store.getBookmark(bookmarkId);
-    if (!bm || bm.is_private) return false; // 私密书签不向量化（隐私红线）
+    if (!bm) return false;
+    const decision = checkPrivacy("call_model", bm.url_raw, this.currentRules(), {
+      isPrivateBookmark: bm.is_private === 1,
+    });
+    if (!decision.allowed) return false; // 原因码见 decision.reason（不记录 URL）
+    const rulesRevBefore = this.store.privacyRevision();
     const cache = this.store.getCache(bookmarkId);
     const text =
       `${bm.title}\n${(cache?.l1_summary as string) ?? ""}\n${(cache?.l2_text as string) ?? ""}`.trim();
     if (text.length < 6) return false; // 标题本身可索引
     const vector = await this.embed(text);
     if (!vector) return false;
+    // DEV-03 异步竞态：等待期间规则/私密状态变化 → 丢弃结果（不外发后的写回）
+    const after = this.store.getBookmark(bookmarkId);
+    if (
+      !after ||
+      after.is_private === 1 ||
+      this.store.privacyRevision() !== rulesRevBefore ||
+      !checkPrivacy("call_model", after.url_raw, this.currentRules(), {
+        isPrivateBookmark: after.is_private === 1,
+      }).allowed
+    ) {
+      return false;
+    }
     // 缓存行可能不存在（仅语义索引场景）→ 先确保行存在
     this.store.upsertCache({
       bookmarkId,
@@ -61,16 +91,18 @@ export class SemanticService {
     return true;
   }
 
-  /** 语义搜索：余弦相似度排序，回退到全文搜索 */
-  async search(query: string, limit = 20): Promise<BookmarkRow[]> {
-    if (!this.available()) return this.store.search(query, limit);
+  /** 语义搜索：余弦相似度排序，回退到全文搜索（同一可见性边界：私密+软归档排除） */
+  async search(query: string, limit = 20, opts: { includePrivate?: boolean } = {}): Promise<BookmarkRow[]> {
+    if (!this.available()) return this.store.search(query, limit, opts);
     const qv = await this.embed(query);
-    if (!qv) return this.store.search(query, limit);
+    if (!qv) return this.store.search(query, limit, opts);
 
+    // DEV-02：语义搜索与关键词搜索同一边界——私密（可显式开启）与软归档一律排除
+    const privateCond = opts.includePrivate ? "" : " AND b.is_private = 0";
     const rows = this.store.db
       .prepare(
         `SELECT b.*, c.embedding FROM bookmarks b JOIN content_cache c ON c.bookmark_id = b.id
-         WHERE c.embedding IS NOT NULL AND b.is_private = 0 LIMIT 10000`,
+         WHERE c.embedding IS NOT NULL AND b.archived_into IS NULL${privateCond} LIMIT 10000`,
       )
       .all() as unknown as Array<BookmarkRow & { embedding: string }>;
     const scored = rows
