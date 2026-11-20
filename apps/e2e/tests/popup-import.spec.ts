@@ -36,7 +36,7 @@ test.afterAll(async () => {
   try { rmSync(dataDir, { recursive: true, force: true }); } catch {}
 });
 
-test("popup 中可见「一键导入全部书签」入口", async () => {
+test("导入入口：onboarding 引导页 + options 数据迁移（原型 01/07；导入按钮已从 popup 移入引导与设置）", async () => {
   let sw = context.serviceWorkers().find((w) => w.url().startsWith("chrome-extension://"));
   for (let i = 0; i < 120 && !sw; i++) {
     await new Promise((r) => setTimeout(r, 500));
@@ -44,8 +44,12 @@ test("popup 中可见「一键导入全部书签」入口", async () => {
   }
   const extId = new URL(sw!.url()).host;
   const page = await context.newPage();
-  await page.goto(`chrome-extension://${extId}/popup.html`);
+  await page.goto(`chrome-extension://${extId}/welcome.html`);
   await page.waitForLoadState();
   await page.waitForTimeout(400);
-  await expect(page.getByText("一键导入全部书签")).toBeVisible();
+  await expect(page.getByText("直接读取浏览器书签")).toBeVisible();
+  await page.goto(`chrome-extension://${extId}/options.html`);
+  await page.waitForLoadState();
+  await page.waitForTimeout(400);
+  await expect(page.getByText("一键导入浏览器全部书签")).toBeVisible();
 }, 90_000);

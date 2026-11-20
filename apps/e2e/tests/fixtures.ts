@@ -104,11 +104,19 @@ export async function seedViaApi(): Promise<{ slug: string }> {
   });
   if (!ingest.ok) throw new Error("seed ingest failed");
 
+  // D23 显式发布集合：发布必须带范围（全部非系统目录）
+  const folders = (await (await fetch(`${BASE}/api/v1/folders`)).json()) as Array<{
+    id: string;
+    is_system_inbox: number;
+  }>;
+  const folderIds = folders.filter((f) => f.is_system_inbox !== 1).map((f) => f.id);
+
   const pub = await fetch(`${BASE}/api/v1/nav/publish`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title: "我的导航站" }),
+    body: JSON.stringify({ title: "我的导航站", folderIds }),
   });
+  if (!pub.ok) throw new Error(`seed publish failed: HTTP ${pub.status}`);
   const { slug } = (await pub.json()) as { slug: string };
   return { slug };
 }

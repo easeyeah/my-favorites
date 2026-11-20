@@ -55,7 +55,8 @@ test("管理台 tab 持久化：点击书签→URL hash→刷新后仍在书签�
   await page.reload();
   await page.waitForLoadState();
   await page.waitForTimeout(300);
-  await expect(page.getByRole("button", { name: "书签", exact: true })).toHaveClass(/bg-indigo-600/);
-  // 概览 tab 不应处于选中态
-  await expect(page.getByRole("button", { name: "概览" })).not.toHaveClass(/bg-indigo-600/);
+  // D39 品牌主色后选中态 = bg-primary（主按钮底色）
+  await expect(page.getByRole("button", { name: "书签", exact: true })).toHaveClass(/bg-primary/);
+  // 「今天」（首页 tab，界面重写后由「概览」更名）不应处于选中态
+  await expect(page.getByRole("button", { name: "今天" })).not.toHaveClass(/bg-primary/);
 });

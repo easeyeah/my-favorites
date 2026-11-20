@@ -26,7 +26,18 @@ async function api(pathname: string, init?: RequestInit): Promise<Response> {
 
 test.beforeAll(async () => {
   server = spawn("node", [path.resolve(here, "../../server/dist/index.js")], {
-    env: { ...process.env, DATA_DIR: dataDir, PORT: String(PORT), ADMIN_PASSWORD },
+    env: {
+      ...process.env,
+      DATA_DIR: dataDir,
+      PORT: String(PORT),
+      ADMIN_PASSWORD,
+      // test 语义（fixtures 同口径）：CORS 放行 chrome-extension:// 源，扩展页面上下文 fetch 才能通；
+      // 未设 MF_ENV = 生产语义 → 扩展源被拒（曾致多端同步测试 Failed to fetch）
+      MF_ENV: "test",
+      // A4 加固后回环默认禁探（SSRF 面）；本 spec 专门验证探测语义 → 显式放行回环（部署 allowlist 场景）
+      MF_ALLOW_INTRANET_FETCH: "1",
+      MF_ALLOW_INTRANET_CIDRS: "127.0.0.1/32,::1/128",
+    },
     stdio: "ignore",
   });
   for (let i = 0; i < 40; i++) {
@@ -56,10 +67,13 @@ test.beforeAll(async () => {
       ],
     }),
   });
+  // D23 显式发布集合：发布必须带范围（全部非系统目录）
+  const folders = (await (await api("/folders")).json()) as Array<{ id: string; is_system_inbox: number }>;
+  const folderIds = folders.filter((f) => f.is_system_inbox !== 1).map((f) => f.id);
   const pub = (await (
     await api("/nav/publish", {
       method: "POST",
-      body: JSON.stringify({ title: "加密导航", template: "cards", password: "nav-pw" }),
+      body: JSON.stringify({ title: "加密导航", template: "cards", password: "nav-pw", folderIds }),
     })
   ).json()) as { slug: string };
   slug = pub.slug;
@@ -96,8 +110,11 @@ test("死链检测任务：本地可达 normal / 不可达 dead，状态落库",
 
 test("密码导航页：无密码 → 验证页；正确密码 → 卡片模板渲染", async ({ page }) => {
   await page.goto(`${BASE}/s/${slug}`);
-  await expect(page.locator("input[name=p]")).toBeVisible();
-  await page.goto(`${BASE}/s/${slug}?p=nav-pw`);
+  await expect(page.locator("input[name=password]")).toBeVisible();
+  // A4 加固后 ?p= 查询参数通道已移除：走 POST /s/:slug/auth 签发访问 cookie
+  await page.fill("input[name=password]", "nav-pw");
+  await page.getByRole("button", { name: "进入" }).click();
+  await page.waitForURL(new RegExp(`/s/${slug}$`));
   await expect(page).toHaveTitle(/加密导航/);
   await expect(page.locator("h2", { hasText: "开发" })).toBeVisible();
   await expect(page.locator("footer", { hasText: "my-favorites" })).toBeVisible();
@@ -115,31 +132,37 @@ test("多端同步：API 侧 push → 扩展侧镜像到浏览器书签树", asy
     sw = context.serviceWorkers().find((w) => w.url().startsWith("chrome-extension://"));
   }
   expect(sw).toBeTruthy();
-  // 扩展上下文内执行镜像（与 options 按钮同契约）
-  const added = (await sw!.evaluate(async (authToken) => {
+  // 扩展页面上下文内执行镜像（与 options「反向同步」按钮同契约）。
+  // 不用 SW 上下文 evaluate：msedge headless 下 SW 跨源 fetch 不稳定（见开发报告）；
+  // options 页面同时具备 fetch 与 chrome.bookmarks，且服务端 CORS 全放行。
+  const page = await context.newPage();
+  const extId = new URL(sw!.url()).host;
+  await page.goto(`chrome-extension://${extId}/options.html`);
+  await page.waitForLoadState();
+  const added = (await page.evaluate(async (authToken) => {
     const headers = { authorization: `Bearer ${authToken}` };
-    const pull = await fetch("http://localhost:3210/api/v1/sync/pull?cursor=0&device=e2e-browser", { headers });
+    const pull = await fetch("http://127.0.0.1:3210/api/v1/sync/pull?cursor=0&device=e2e-browser", { headers });
     void pull;
     // 与 background.syncMirror 相同契约：带 token 拉书签后镜像进浏览器书签树
-    const list = await fetch("http://localhost:3210/api/v1/bookmarks", { headers })
+    const list = await fetch("http://127.0.0.1:3210/api/v1/bookmarks", { headers })
       .then((r) => r.json() as Promise<Array<{ title: string; url_canonical: string }>>);
     const root = await new Promise<string>((resolve) => {
-      // @ts-expect-error chrome 由扩展环境提供
+      // @ts-expect-error chrome 由扩展页面环境提供
       chrome.bookmarks.search({ title: "my-favorites 同步" }, (nodes) => {
         if (nodes.length > 0) return resolve(nodes[0]!.id);
-        // @ts-expect-error chrome 由扩展环境提供
+        // @ts-expect-error chrome 由扩展页面环境提供
         chrome.bookmarks.create({ parentId: "1", title: "my-favorites 同步" }, (n) => resolve(n.id));
       });
     });
     let created = 0;
     for (const bm of list) {
       const dupe = await new Promise<boolean>((resolve) => {
-        // @ts-expect-error chrome 由扩展环境提供
+        // @ts-expect-error chrome 由扩展页面环境提供
         chrome.bookmarks.search({ url: bm.url_canonical }, (nodes) => resolve(nodes.length > 0));
       });
       if (dupe) continue;
       await new Promise<void>((resolve) => {
-        // @ts-expect-error chrome 由扩展环境提供
+        // @ts-expect-error chrome 由扩展页面环境提供
         chrome.bookmarks.create({ parentId: root, title: bm.title, url: bm.url_canonical }, () => resolve());
       });
       created++;
@@ -147,6 +170,7 @@ test("多端同步：API 侧 push → 扩展侧镜像到浏览器书签树", asy
     return created;
   }, token)) as number;
   expect(added).toBeGreaterThanOrEqual(3);
+  await page.close();
   await context.close();
 });
 

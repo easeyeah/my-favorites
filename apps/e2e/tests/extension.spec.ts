@@ -47,23 +47,58 @@ test.afterAll(async () => {
   stopServer();
 });
 
-test("扩展 newtab：导航站数据渲染（留存钩子③）", async () => {
+test("扩展 newtab：原生式极简（D40）——搜索 + 最常访问", async () => {
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/newtab.html`);
-  await expect(page.locator("h1")).toHaveText("我的导航");
-  await expect(page.locator("h2", { hasText: "开发" })).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator("a", { hasText: "GitHub 主页" })).toBeVisible();
-  // 页脚水印
+  // D40 = 原生式极简：品牌头 + 搜索框；不再渲染全量书签分组
+  await expect(page.locator("h1", { hasText: "my-favorites" })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByPlaceholder(/搜索你的书签/)).toBeVisible();
   await expect(page.locator("footer", { hasText: "my-favorites" })).toBeVisible();
+  await expect(page.getByText("📁")).toHaveCount(0);
+  // 自定义面板可开（常用区数量 + 外部搜索引擎 + 小组件显隐）
+  await page.getByTitle("自定义").click();
+  await expect(page.getByText("自定义新标签页")).toBeVisible();
+  await expect(page.getByText("常用区数量")).toBeVisible();
   await page.close();
 });
 
-test("扩展 popup：UI 渲染 + 收藏按钮", async () => {
+test("扩展 newtab：小组件（D41）——只有显示/隐藏，黄历离线渲染", async () => {
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/newtab.html`);
+  await expect(page.locator("h1", { hasText: "my-favorites" })).toBeVisible({ timeout: 10_000 });
+  // 出厂全关（保 D40「安静」承诺）：页面上不存在任何组件字层
+  await expect(page.getByTestId("widget-almanac")).toHaveCount(0);
+  await expect(page.getByTestId("widget-weather")).toHaveCount(0);
+  await expect(page.getByTestId("widget-ip")).toHaveCount(0);
+  // 自定义面板：小组件行仅开关 chips，无任何设置项
+  await page.getByTitle("自定义").click();
+  await expect(page.getByText("小组件")).toBeVisible();
+  // 开启黄历（lunar-typescript 本地算，零网络、确定性）——内联进时钟区，无卡片盒子
+  await page.getByRole("button", { name: /黄历/ }).click();
+  const almanac = page.getByTestId("widget-almanac");
+  await expect(almanac).toBeVisible();
+  await expect(almanac).toContainText(/月/);
+  await expect(almanac).toContainText("宜");
+  // 刷新后保持开启（storage 持久化）
+  await page.reload();
+  await expect(page.getByTestId("widget-almanac")).toBeVisible();
+  // 关闭：内联字层消失，回到 D40 极简
+  await page.getByTitle("自定义").click();
+  await page.getByRole("button", { name: /黄历/ }).click();
+  await expect(page.getByTestId("widget-almanac")).toHaveCount(0);
+  await page.close();
+});
+
+test("扩展 popup：ptabs 四标签 + 快速收藏 + 收纳盒（原型 02/06；D42 AI 对话下线）", async () => {
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/popup.html`);
   await expect(page.locator("h1")).toHaveText("my-favorites");
-  await expect(page.getByText("收藏（自动归类）")).toBeVisible();
-  await expect(page.getByText("丢进收件箱")).toBeVisible();
+  await expect(page.getByRole("tab", { name: /快速收藏/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /收纳盒/ })).toBeVisible();
+  // D42：AI 聊天整理标签随侧栏整体移除
+  await expect(page.getByRole("tab", { name: /AI 整理/ })).toHaveCount(0);
+  // 无活动标签页（headless 直开 popup）时显示系统页提示；真实浏览器 http 页显示收藏卡
+  await expect(page.getByText(/当前页不支持收藏|丢进收纳盒/)).toBeVisible();
   await page.close();
 });
 

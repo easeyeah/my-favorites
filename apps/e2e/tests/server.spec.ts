@@ -26,17 +26,17 @@ test("导航站公开页：宫格渲染 + 水印 + 深浅色样式", async ({ pa
   expect(gridDisplay).toBe("grid");
 });
 
-test("导航站搜索框：关键词跳转搜索结果页", async ({ page }) => {
+test("导航站搜索框：关键词跳转本站搜索结果页（DEV-16：全库公开搜索已下线）", async ({ page }) => {
   await page.goto(`${BASE}/s/${slug}`);
   await page.fill("#q", "GitHub");
   await page.press("#q", "Enter");
-  await page.waitForURL(/\/s\/search\?q=/);
+  await page.waitForURL(new RegExp(`/s/${slug}/search\\?q=`));
   await expect(page.locator("h1")).toContainText("GitHub");
   await expect(page.locator("li a", { hasText: "GitHub 主页" })).toBeVisible();
 });
 
 test("XSS 回归：搜索词注入不执行（review P0 修复）", async ({ page }) => {
-  await page.goto(`${BASE}/s/search?q=${encodeURIComponent('<script>window.__xss=1</script>')}`);
+  await page.goto(`${BASE}/s/${slug}/search?q=${encodeURIComponent('<script>window.__xss=1</script>')}`);
   const injected = await page.evaluate(() => (window as { __xss?: number }).__xss);
   expect(injected).toBeUndefined();
   // 且原文被转义显示
