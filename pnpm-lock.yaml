@@ -264,6 +264,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@mf/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
       '@mf/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -338,6 +341,9 @@ importers:
 
   packages/shared:
     dependencies:
+      lunar-typescript:
+        specifier: ^1.8.7
+        version: 1.8.7
       zod:
         specifier: ^4.1.0
         version: 4.6.7
@@ -3019,6 +3025,9 @@ packages:
     resolution: {integrity: sha512-7r1/yUuflQDSt4f1bpn5ZAocyIxcTyVyBBChSVtBKn5M+392cPmI5YJMWOJKk/HUWGm5wg83chlAZtCcGbEZtw==}
     peerDependencies:
       react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
+
+  lunar-typescript@1.8.7:
+    resolution: {integrity: sha512-w1ZxRf+mmIqXGnk40Dl2U+qPdm2phHsoxpOEIy7BPc/+kkWZtfW98NCZvsBTYCuNXQMBanaw+u+DboXD65NrVA==}
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
@@ -6420,6 +6429,8 @@ snapshots:
   lucide-react@0.545.0(react@19.3.1):
     dependencies:
       react: 19.3.1
+
+  lunar-typescript@1.8.7: {}
 
   magic-string@0.30.21:
     dependencies:

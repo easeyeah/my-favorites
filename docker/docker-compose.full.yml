@@ -25,6 +25,16 @@ services:
       MF_MAINTENANCE_INTERVAL_HOURS: 168
       # 数据落盘（SQLite + 快照）
       DATA_DIR: /data
+      # DEV-05 生产语义：首启引导凭据（setup 时以 x-mf-setup-token 头携带；
+      # 不设置则服务端自动生成并写入 /data/bootstrap-token.txt，权限 600）
+      # MF_SETUP_TOKEN: "change-me-to-a-random-string"
+      # DEV-05 来源白名单：跨域访问（如自建 NAS 域名 + 浏览器扩展）显式列出 origin，
+      # 逗号分隔。管理台同源访问无需配置。
+      # MF_ALLOWED_ORIGINS: "chrome-extension://xxxxxxxx,https://nas.example.com"
+      # DEV-05 反代后按 X-Forwarded-For 限速（仅当反代可信时开启，默认不信任代理头）
+      # MF_TRUST_PROXY: "1"
+      # 生产语义必填：Provider API Key 的 AES-256-GCM 落库加密密钥（32 字节 base64）
+      # MF_SECRET_KEY: "base64-encoded-32-byte-key"
     volumes:
       - server-data:/data
     depends_on:
