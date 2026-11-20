@@ -1,1 +1,23 @@
-@import "tailwindcss" source("../");
+@import "tailwindcss" source("../../");
+
+/* popup 顶部标签页（原型 06：窄容器统一导航语法） */
+.ptabs {
+  display: flex;
+  gap: 2px;
+  padding: 8px 10px 0;
+  border-bottom: 1px solid rgb(229 229 234);
+  align-items: center;
+}
+.dark .ptabs { border-bottom-color: rgb(63 63 70); }
+.ptab {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  color: rgb(113 113 122);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ptab.on { color: rgb(24 24 27); border-bottom-color: rgb(24 24 27); }
+.dark .ptab.on { color: rgb(244 244 245); border-bottom-color: rgb(244 244 245); }
+.ptab.right { margin-left: auto; }

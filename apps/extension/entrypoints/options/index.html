@@ -96,11 +96,20 @@
       .msg.ok { color: var(--ok); }
       .msg.err { color: var(--danger); }
       .divider { border-top: 1px solid var(--border); margin: 16px 0; }
+      .notify-opt[aria-pressed="true"] {
+        border-color: var(--accent);
+        background: var(--accent-light);
+        color: var(--accent);
+        font-weight: 500;
+      }
     </style>
   </head>
   <body>
     <div class="wrap">
-      <h1>my-favorites</h1>
+      <h1 style="display: flex; align-items: center; gap: 10px">
+        <img src="/brand/mark-color.svg" alt="" style="width: 28px; height: 28px" draggable="false" />
+        my-favorites
+      </h1>
       <p class="sub">AI 书签导航 · 设置</p>
 
       <div class="card">
@@ -137,18 +146,40 @@
       </div>
 
       <div class="card">
-        <h2>④ 收件箱</h2>
+        <h2>④ 收纳盒（自动收纳 · 投递口）</h2>
         <p style="font-size: 13px; color: var(--muted); margin-bottom: 12px">
-          在浏览器书签栏创建「📥 自动整理」文件夹，丢进去的书签会自动归类（应用库 + 浏览器同步整理）
+          丢进去的书签会自动归类（应用库 + 浏览器同步整理）；文件夹只是物理投递口，管理入口 = 工具栏图标角标 → popup「收纳盒」标签
         </p>
+        <div class="row" style="align-items:center">
+          <label style="margin:0;font-size:13px">「📥 收纳盒」文件夹位置</label>
+          <select id="inbox-parent" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text)">
+            <option value="1">书签栏（默认 · 投递可见易拖）</option>
+            <option value="2">其他书签（不占栏位）</option>
+          </select>
+        </div>
         <div class="row">
-          <button id="inbox">创建收件箱</button>
+          <button id="inbox">创建收纳盒</button>
+          <button id="sweep">立即清扫收纳盒</button>
+          <span style="font-size:12px;color:var(--muted)">歧义阈值 80% · 攒 ≥3 条集中询问</span>
         </div>
         <p class="msg" id="msg-inbox"></p>
       </div>
 
       <div class="card">
-        <h2>⑤ 隐私保护</h2>
+        <h2>⑤ 整理通知方式</h2>
+        <p style="font-size: 13px; color: var(--muted); margin-bottom: 10px">
+          整理完成并记入版本后，怎么告诉你（端侧偏好，与管理台各自设置）
+        </p>
+        <div class="row" id="notify-group">
+          <button class="notify-opt" data-style="toast">轻提示（默认）</button>
+          <button class="notify-opt" data-style="card">通知卡</button>
+          <button class="notify-opt" data-style="silent">静默</button>
+        </div>
+        <p class="msg" id="msg-notify"></p>
+      </div>
+
+      <div class="card">
+        <h2>⑥ 隐私保护</h2>
         <p style="font-size: 13px; color: var(--muted); margin-bottom: 8px">
           隐私域名（银行、内网等）的书签：<b>不读取正文、不上传内容、不调用 AI、不做快照</b>，只保存标题和地址。规则在收藏前于本设备判定，服务端再次校验。
         </p>
@@ -159,11 +190,27 @@
       </div>
 
       <div class="card">
-        <h2>⑥ 服务端概览</h2>
+        <h2>⑦ 服务端概览</h2>
         <div class="stats" id="stats">未连接</div>
         <div class="row">
           <button id="refresh">刷新统计</button>
         </div>
+      </div>
+
+      <div class="card">
+        <h2>⑧ 关于</h2>
+        <div style="font-size: 13.5px; color: var(--text)">
+          <div class="row" style="margin-top:0"><span style="color:var(--muted);width:96px">版本</span><span id="about-version" class="grow">扩展 v—</span></div>
+          <div class="row"><span style="color:var(--muted);width:96px">开源</span><span class="grow"><a href="https://github.com/easeyeah/my-favorites" target="_blank" style="color:var(--accent)">github.com/easeyeah/my-favorites</a> · AGPL-3.0</span></div>
+          <div class="row"><span style="color:var(--muted);width:96px">当前模型</span><span id="about-model" class="grow">管理台配置 · 只读（D37）</span></div>
+        </div>
+      </div>
+
+      <div class="card" style="opacity:.6">
+        <h2>💻 本地模式（预留 · 后续交付）</h2>
+        <p style="font-size: 13px; color: var(--muted)">
+          未连接服务端时：受限本地缓存模式（离线首屏 + 基础搜索，D18）。完整本地模式（含本地 BYOK 直连，复用与自建端相同的供应商选择器）为后续独立交付（D15）。
+        </p>
       </div>
     </div>
     <script type="module" src="./main.ts"></script>

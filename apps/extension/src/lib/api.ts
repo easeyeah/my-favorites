@@ -1,9 +1,12 @@
 /** 服务端 API 客户端与扩展配置（storage 封装） */
 import { browser } from "wxt/browser";
 
+/** 整理通知方式（D28 三档，扩展端与管理台各自设置）：轻提示（默认）/ 通知卡 / 静默仅版本记录 */
+export type NotifyStyle = "toast" | "card" | "silent";
+
 export interface ExtensionConfig {
   serverUrl: string;
-  /** 浏览器书签树中收件箱文件夹的扩展侧 id（与服务器端 inbox 对应） */
+  /** 浏览器书签树中收纳盒文件夹的扩展侧 id（与服务器端 inbox 对应） */
   inboxExtId?: string;
   /** 自建端管理员密码登录后的 token（F6.2 鉴权） */
   token?: string;
@@ -11,12 +14,24 @@ export interface ExtensionConfig {
   syncCursor?: number;
   /** 周报已读标记（按天） */
   reportReadDate?: string;
+  /** 整理通知方式（D28 端侧偏好；options 页可调） */
+  notifyStyle?: NotifyStyle;
+  /** 原型 07：收纳盒投递口位置（1=书签栏 默认 / 2=其他书签） */
+  inboxParent?: string;
 }
 
 const DEFAULTS: ExtensionConfig = { serverUrl: "http://127.0.0.1:3000" };
 
 export async function getConfig(): Promise<ExtensionConfig> {
-  const stored = await browser.storage.local.get(["serverUrl", "inboxExtId", "token", "syncCursor", "reportReadDate"]);
+  const stored = await browser.storage.local.get([
+    "serverUrl",
+    "inboxExtId",
+    "token",
+    "syncCursor",
+    "reportReadDate",
+    "notifyStyle",
+    "inboxParent",
+  ]);
   return {
     ...DEFAULTS,
     ...(stored.serverUrl ? { serverUrl: stored.serverUrl as string } : {}),
@@ -24,6 +39,8 @@ export async function getConfig(): Promise<ExtensionConfig> {
     ...(stored.token ? { token: stored.token as string } : {}),
     ...(stored.syncCursor !== undefined ? { syncCursor: stored.syncCursor as number } : {}),
     ...(stored.reportReadDate ? { reportReadDate: stored.reportReadDate as string } : {}),
+    ...(stored.notifyStyle ? { notifyStyle: stored.notifyStyle as NotifyStyle } : {}),
+    ...(stored.inboxParent ? { inboxParent: stored.inboxParent as string } : {}),
   };
 }
 
@@ -50,7 +67,8 @@ const EVENTS = [
   "install",
   "import_completed",
   "stage1_result_viewed",
-  "diff_accepted",
+  "diff_accepted", // 旧确认流事件（D27 前历史数据）
+  "organize_applied", // D27：整理直接生效
   "nav_generated",
   "ntp_enabled",
   "inbox_auto_sorted",
@@ -120,12 +138,52 @@ export interface SuggestDto {
   folderPath: string[];
   privacy: boolean;
 }
-export interface OrganizeSessionDto {
+export interface FolderDto {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  is_system_inbox: number;
+}
+
+/** 收纳盒面板条目（原型 06 状态机） */
+export interface InboxItemDto {
+  id: string;
+  title: string;
+  url_canonical: string;
+  added_at: string;
+  is_private: number;
+  state: "pending" | "classifying" | "placed" | "ambiguous" | "privacy_hold" | "retry" | string;
+  confidence: number | null;
+  reason: string | null;
+  attempts: number;
+  suggestCategory: string | null;
+  domainRuleFolderId: string | null;
+}
+
+export interface InboxPlacedDto {
+  bookmark_id: string;
+  title: string;
+  url_canonical: string;
+  reason: string | null;
+  updated_at: string;
+  version_id: string | null;
+}
+
+export interface VersionDto {
+  id: string;
+  session_id: string | null;
+  kind: string;
+  reverted: number;
+  created_at: string;
+  actionCount: number;
+}
+/** D27 act + undo：一次调用直接生效；actions 为只读明细（事后呈现，不承担确认职责） */
+export interface OrganizeRunDto {
   sessionId: string;
-  status: "proposed" | "answered";
+  status: "applied" | "answered";
   answer: string;
-  proposal: Array<{
-    type: "move" | "rename" | "merge" | "createFolder";
+  actions: Array<{
+    type: "move" | "rename" | "merge" | "createFolder" | string;
     bookmarkId?: string;
     bookmarkTitle?: string;
     fromFolder?: string;
@@ -133,6 +191,9 @@ export interface OrganizeSessionDto {
     mergeFrom?: string[];
     folderName?: string;
   }> | null;
+  versionId?: string;
+  applied?: number;
+  conflicts?: Array<{ bookmarkId: string; reason: string }>;
 }
 /** 上传 MHTML 快照（F2.4 一键快照） */
 export async function uploadSnapshot(
@@ -179,6 +240,14 @@ export interface NavDataDto {
   title: string;
   groups: Array<{
     name: string;
-    items: Array<{ title: string; url: string; favicon: string | null; dead?: boolean }>;
+    items: Array<{
+      title: string;
+      url: string;
+      favicon: string | null;
+      dead?: boolean;
+      summary?: string | null;
+      siteType?: string | null;
+      hasSnapshot?: boolean;
+    }>;
   }>;
 }

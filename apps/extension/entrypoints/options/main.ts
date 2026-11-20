@@ -1,6 +1,6 @@
 /**
  * options 页逻辑（DOM 操作版——页面自带样式，无需 React）。
- * 与 popup/sidepanel 共享 src/lib/api 的 storage 配置。
+ * 与 popup 共享 src/lib/api 的 storage 配置。
  */
 import { api, getConfig, saveConfig } from "../../src/lib/api";
 
@@ -125,9 +125,59 @@ $("sync").addEventListener("click", async () => {
 $("inbox").addEventListener("click", async () => {
   const el = $("msg-inbox");
   await browser.runtime.sendMessage({ type: "setup-inbox" }, () => {
-    msg(el, "✅ 收件箱已创建（书签栏可见「📥 自动整理」）");
+    msg(el, "✅ 收纳盒已创建（书签栏可见「📥 收纳盒」）");
   });
 });
+
+// ---------- 原型 07：投递口位置 / 立即清扫 ----------
+const parentSel = $("inbox-parent") as unknown as HTMLSelectElement;
+
+async function loadInboxParent(): Promise<void> {
+  const { inboxParent } = await browser.storage.local.get(["inboxParent"]);
+  parentSel.value = (inboxParent as string) ?? "1";
+}
+void loadInboxParent();
+
+parentSel.addEventListener("change", async () => {
+  await browser.storage.local.set({ inboxParent: parentSel.value });
+  await browser.runtime.sendMessage({ type: "setup-inbox" }, () => {
+    msg($("msg-inbox"), parentSel.value === "2" ? "✅ 已移到「其他书签」下" : "✅ 已移到书签栏");
+  });
+});
+
+$("sweep").addEventListener("click", async () => {
+  const el = $("msg-inbox");
+  msg(el, "清扫中…");
+  await browser.runtime.sendMessage({ type: "sweep-inbox" }, (res: { moved?: number } | undefined) => {
+    msg(el, `✅ 已归位 ${res?.moved ?? 0} 条（可在 popup「收纳盒」查看/撤销）`);
+  });
+});
+
+// ---------- 整理通知方式（D28 三档：端侧偏好） ----------
+const NOTIFY_LABEL: Record<string, string> = {
+  toast: "轻提示：完成后一行轻提示，几秒消失",
+  card: "通知卡：展示变更摘要 + 撤销 + 只读明细",
+  silent: "静默：不打扰，变更只记入版本历史",
+};
+
+function paintNotify(current: string) {
+  for (const b of document.querySelectorAll<HTMLButtonElement>(".notify-opt")) {
+    b.setAttribute("aria-pressed", String(b.dataset.style === current));
+    b.title = NOTIFY_LABEL[b.dataset.style ?? ""] ?? "";
+  }
+}
+
+getConfig().then((cfg) => paintNotify(cfg.notifyStyle ?? "toast"));
+
+for (const b of document.querySelectorAll<HTMLButtonElement>(".notify-opt")) {
+  b.addEventListener("click", async () => {
+    const style = b.dataset.style as "toast" | "card" | "silent";
+    await saveConfig({ notifyStyle: style });
+    paintNotify(style);
+    msg($("msg-notify"), `✅ ${NOTIFY_LABEL[style]}`);
+    setTimeout(() => ($("msg-notify").textContent = ""), 2500);
+  });
+}
 
 $("refresh").addEventListener("click", async () => {
   const el = $("stats");
@@ -138,3 +188,22 @@ $("refresh").addEventListener("click", async () => {
     el.textContent = "未连接";
   }
 });
+
+// ---------- 原型 07：关于卡（版本 / 当前模型只读） ----------
+void (async () => {
+  const manifest = browser.runtime.getManifest();
+  const el = document.getElementById("about-version");
+  if (el) el.textContent = `扩展 v${manifest.version}`;
+  try {
+    const rows = await api<Array<{ provider_id: string; purpose_models: Record<string, string>; enabled: number }>>(
+      "/settings/providers",
+      {},
+    );
+    const active = rows.find((r) => r.enabled === 1);
+    const model = active ? active.purpose_models["organize"] ?? Object.values(active.purpose_models)[0] : null;
+    const modelEl = document.getElementById("about-model");
+    if (modelEl) modelEl.textContent = model ? `✦ ${model}（管理台配置 · 只读，D37）` : "未配置（规则引擎模式可用）";
+  } catch {
+    // 未连接：保持默认文案
+  }
+})();
