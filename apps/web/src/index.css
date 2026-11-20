@@ -1,32 +1,40 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-/* shadcn/ui 主题变量（CSS 变量驱动，支持导航模板深浅色定制——技术方案 §1.2）
- * 主色 indigo（与管理台既有 tab 选中态 indigo-600 一致）；
- * 2026-11-18 补全 card/accent/muted/secondary/destructive 系变量——
- * 此前 bg-card / hover:bg-accent / text-muted-foreground 等类因缺映射全部无效 */
+/* shadcn/ui 主题（zinc 中性色 + 品牌靛蓝主色）。
+ * 2026-11-19 起接入品牌规范（assets/brand/，决策 D37）：主色 = 中靛蓝 #4F46E5，
+ * hover 加深为品牌主色深靛蓝 #4338CA；zinc 中性色与语义色（失效=红 / 疑似=琥珀 /
+ * 正常=绿）不变，彩色除主色与语义外一律不用。 */
 @custom-variant dark (&:is(.dark *));
 
+@layer base {
+  /* Tailwind v4 裸 `border` 默认是 currentColor（近黑）——统一为 zinc 浅灰，
+     修复弹窗/浮层只写 border 未写色值时的黑边问题（shadcn v4 模板标准配置） */
+  * {
+    @apply border-border outline-ring/50;
+  }
+}
+
 :root {
-  --background: oklch(0.985 0 0);
+  --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
-  /* indigo-600 #4f46e5 */
-  --primary: oklch(0.511 0.262 276.966);
+  --primary: #4f46e5;
   --primary-foreground: oklch(0.985 0 0);
+  --primary-hover: #4338ca;
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
   --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.961 0.006 286.375); /* indigo-50 微冷灰，hover 反馈可见但不刺眼 */
+  --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: oklch(0.511 0.262 276.966);
+  --ring: #818cf8;
 }
 
 .dark {
@@ -34,21 +42,21 @@
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
   --card-foreground: oklch(0.985 0 0);
-  /* dark 下主色提亮到 indigo-500 #6366f1 */
-  --primary: oklch(0.585 0.233 277.117);
+  --primary: #6366f1;
   --primary-foreground: oklch(0.985 0 0);
+  --primary-hover: #818cf8;
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.269 0 0);
   --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0.015 286.375);
+  --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
   --popover: oklch(0.269 0 0);
   --popover-foreground: oklch(0.985 0 0);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.585 0.233 277.117);
+  --ring: #6366f1;
 }
 
 @theme inline {
@@ -58,6 +66,7 @@
   --color-card-foreground: var(--card-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
@@ -73,5 +82,23 @@
 }
 
 body {
-  @apply bg-background text-foreground;
+  @apply bg-background text-foreground antialiased;
+}
+
+/* 数字用 tabular，对齐不跳动 */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 内部滚动区（聊天等固定高度区域）用细滚动条，不抢视觉 */
+.scroll-slim {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.scroll-slim::-webkit-scrollbar {
+  width: 6px;
+}
+.scroll-slim::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--border);
 }
