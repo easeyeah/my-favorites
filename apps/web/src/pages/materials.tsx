@@ -5,7 +5,7 @@
  * AI 标签 = 内容证据），让「分类很厉害」一眼可见。
  * 行内操作：打开原页 / 导出 Markdown / 移出资料库（软删，书签不动）。
  */
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { ArrowUpRight, Clapperboard, Download, FileText, Image as ImageIcon, Loader2, Search, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -147,13 +147,15 @@ export function Materials() {
           }
         />
       ) : (
-        <ul className="divide-y divide-border/40">
-          {items.map((it) => {
+        <ul>
+          {items.map((it, i) => {
             const meta = KIND_META[it.type];
             const KindIcon = meta.icon;
             const tags = (it.l1_tags ?? []).slice(0, 5);
             return (
-              <li key={it.id} className="group hover:bg-accent/50 -mx-2 flex items-center gap-3 rounded-xl px-2 py-2.5 transition-colors">
+              <Fragment key={it.id}>
+              {/* 规范 #4：分割线是独立元素（不挂在行 border 上）与圆角解耦——行只做圆角 hover 高亮 */}
+              <li className="group hover:bg-accent/40 m-1 flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors">
                 {/* 位 1+2：标题行 + 分类标签行 */}
                 <div className="min-w-0 flex-1">
                   <div className="flex min-w-0 items-center gap-1.5">
@@ -226,6 +228,8 @@ export function Materials() {
                   </button>
                 </div>
               </li>
+              {i < items.length - 1 && <li aria-hidden className="border-border/40 mx-4 border-t" />}
+              </Fragment>
             );
           })}
         </ul>
