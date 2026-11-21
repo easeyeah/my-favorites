@@ -7,6 +7,8 @@
  * - ReorgButton / ReorgSection：全库重分类——入口挂目录树底部（移动端在目录 chips 行），
  *   点击后右栏列表区切换为重分类面板（内容区直显，不用弹窗）
  *   D27：一次调用直接生效（act + undo），无确认流；归档/删除建议永不自动执行（红线③）。
+ * - SensitiveButton / SensitiveSection：敏感内容旁路（D43）——入口挂目录树底部重分类下方，
+ *   点了就跑：命中项标私密 + 移入「私人收藏」，不再外发；版本历史可整批撤销。
  */
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -17,6 +19,7 @@ import {
   Loader2,
   Play,
   RotateCcw,
+  ShieldOff,
   Sparkles,
   TriangleAlert,
   X,
@@ -608,6 +611,164 @@ export function ReorgSection({
             <Btn primary onClick={() => void runReorg()} disabled={busy}>
               {busy ? <Loader2 className="animate-spin" /> : <Sparkles />}
               {busy ? '正在分析整理…' : '开始重分类'}
+            </Btn>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/** D43 敏感内容旁路入口（目录树底部、全库重分类下方）：点击后右栏切换为旁路面板 */
+export function SensitiveButton({
+  mobile = false,
+  active = false,
+  onClick,
+}: {
+  mobile?: boolean
+  active?: boolean
+  onClick: () => void
+}) {
+  const title = '把敏感站点书签自动标私密并移入「私人收藏」——不再外发，可整批撤销'
+  return mobile ? (
+    <TidyChip icon={ShieldOff} label="敏感内容旁路" title={title} onClick={onClick} />
+  ) : (
+    <button
+      onClick={onClick}
+      title={title}
+      className={cn(
+        'text-muted-foreground hover:bg-accent/50 hover:text-foreground mt-1 flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs transition-colors',
+        active && 'bg-accent/60 font-medium text-foreground',
+      )}
+    >
+      <ShieldOff className="size-3.5" /> 敏感内容旁路
+    </button>
+  )
+}
+
+/**
+ * D43 敏感内容旁路面板（右栏内容区）：点了就跑——供应商审核整包拒收会让整理整批失败，
+ * 命中项标私密 + 移入「私人收藏」后不再外发；结果直显，可整批撤销，也可在书签库开「显示私密」逐条复核。
+ */
+interface SensitiveResult {
+  marked: number
+  scanned: number
+  versionId: string
+}
+
+export function SensitiveSection({
+  onClose,
+  onApplied,
+  onShowHistory,
+}: {
+  onClose: () => void
+  onApplied: () => void
+  onShowHistory: () => void
+}) {
+  const { cfg, refreshBadges } = useShell()
+  const [busy, setBusy] = useState(false)
+  const [undoing, setUndoing] = useState(false)
+  const [result, setResult] = useState<SensitiveResult | null>(null)
+
+  const runSweep = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const r = await apiCall<{ scanned: number; marked: number; versionId: string | null; folderName: string }>(
+        cfg,
+        '/tidy/sensitive',
+        { method: 'POST' },
+      )
+      if (r.marked > 0 && r.versionId) {
+        setResult({ marked: r.marked, scanned: r.scanned, versionId: r.versionId })
+        tidyNotify.ok(`已标私密 ${r.marked} 条并移入「${r.folderName}」`)
+        onApplied()
+      } else {
+        setResult(null)
+        tidyNotify.ok('未发现需要旁路的敏感内容 ✅')
+      }
+      refreshBadges()
+      window.dispatchEvent(new Event('mf:versions-changed'))
+    } catch (e) {
+      toast.err(`旁路失败：${e instanceof ApiError ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const undoBatch = async () => {
+    if (!result || undoing) return
+    setUndoing(true)
+    try {
+      const r = await apiCall<{ reversed: number }>(cfg, `/organize/rollback/${result.versionId}`, { method: 'POST' })
+      tidyNotify.ok(`已还原 ${r.reversed} 项——私密标记与目录都回到原样`)
+      setResult(null)
+      onApplied()
+      refreshBadges()
+      window.dispatchEvent(new Event('mf:versions-changed'))
+    } catch (e) {
+      toast.err(`撤销失败：${e instanceof ApiError ? e.message : String(e)}`)
+    } finally {
+      setUndoing(false)
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-base font-semibold tracking-tight">敏感内容旁路</h3>
+          <p className="text-muted-foreground mt-1 max-w-xl text-sm">
+            {result
+              ? `这一批 ${result.marked} 条已标私密并移入「私人收藏」——它们不再进入 AI 批次，随时可整批撤销。`
+              : '扫描整个书签库，把敏感站点自动标私密并移入「私人收藏」——不外发给 AI、不进公开导航站；不做道德判断，只做工程规避。'}
+          </p>
+        </div>
+        <button
+          onClick={onClose}
+          title="返回书签列表"
+          className="text-muted-foreground hover:bg-accent hover:text-foreground shrink-0 rounded-lg p-1.5 transition-colors"
+        >
+          <X className="size-4" />
+        </button>
+      </div>
+
+      {result ? (
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <Btn onClick={() => void undoBatch()} disabled={undoing || busy}>
+            {undoing ? <Loader2 className="animate-spin" /> : <RotateCcw />} 撤销这批
+          </Btn>
+          <Btn primary onClick={() => void runSweep()} disabled={busy || undoing}>
+            {busy ? <Loader2 className="animate-spin" /> : <ShieldOff />} 再扫一次
+          </Btn>
+          <p className="text-muted-foreground text-xs">
+            共扫描 <b className="text-foreground">{result.scanned}</b> 条 · 记录在
+            <button className="text-foreground hover:underline" onClick={onShowHistory}>
+              版本历史
+            </button>
+            ，可在书签库筛选行打开「显示私密」逐条复核
+          </p>
+        </div>
+      ) : (
+        <>
+          <ul className="mt-5 space-y-1.5">
+            <li className="text-muted-foreground flex gap-2 text-[13px]">
+              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-amber-500" />
+              标私密 + 移入「私人收藏」，只移动不删除（红线③），全程可撤销
+            </li>
+            <li className="text-muted-foreground flex gap-2 text-[13px]">
+              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-amber-500" />
+              旁路后这些条目不再进入 AI 批次——整理/摘要不会再被供应商审核整包拒收
+            </li>
+            <li className="text-muted-foreground flex gap-2 text-[13px]">
+              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-amber-500" />
+              默认视图会隐藏私密项；在书签库筛选行打开「显示私密」即可复核与逐条还原
+            </li>
+          </ul>
+          <div className="mt-5">
+            <Btn primary onClick={() => void runSweep()} disabled={busy}>
+              {busy ? <Loader2 className="animate-spin" /> : <ShieldOff />}
+              {busy ? '正在扫描…' : '扫描并旁路'}
             </Btn>
           </div>
         </>

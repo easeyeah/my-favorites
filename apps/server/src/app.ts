@@ -22,7 +22,9 @@ import { newId, now } from "./db";
 import { Store, type BookmarkRow } from "./store";
 import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
-import { enqueueMirrorMoves } from "./organize";
+import { enqueueBrowserReorder, enqueueMirrorMoves } from "./organize";
+import { applySyncMutations } from "./sync-apply";
+import { ChangeHub } from "./events";
 import { analyzeSiteProjection, type SiteProjection } from "./site-analysis";
 import { dispatchWebhooks, deliverHook } from "./hooks";
 import {
@@ -43,7 +45,9 @@ import {
 } from "./security";
 import type { MaintenanceService } from "./maintenance";
 import type { SemanticService } from "./semantic";
-import { fetchGuardConfigFromEnv, guardedFetch } from "./fetch-guard";
+import { fetchGuardConfigFromEnv, guardedFetch, ipCoveredByAllowlist, type FetchGuardConfig } from "./fetch-guard";
+import { resolveFavicon } from "./favicon";
+import { buildMaterialMarkdown, removeCoverFile } from "./materials";
 import { buildSnapshotView } from "./snapshot-view";
 import {
   NAV_ACCESS_COOKIE,
@@ -65,6 +69,8 @@ export interface AppDeps {
   semantic: SemanticService;
   maintenance: MaintenanceService;
   adminPassword?: string;
+  /** 网络守卫配置（favicon 等出站抓取用）；缺省按环境变量推断，测试可注入回环放行 */
+  guardConfig?: FetchGuardConfig;
 }
 
 // 密码哈希已提取至 ./password.ts（DEV-23 消除循环依赖）；此处重导出保持既有 import 兼容
@@ -73,8 +79,13 @@ import { hashPassword, verifyPasswordHash } from "./password";
 
 export function buildApp(deps: AppDeps): Hono {
   const { store, llmFor, pipeline, organize, dataDir, semantic, maintenance, adminPassword } = deps;
+  const guardConfig = deps.guardConfig ?? fetchGuardConfigFromEnv();
   const esc = (v: string): string =>
     v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+  // D50：变更广播（Store 钩子 → SSE 订阅者）
+  const hub = new ChangeHub();
+  store.onRecorded = (ch) => hub.publish(ch);
 
   const api = new Hono().basePath("/api/v1");
   // A1-3 日志脱敏：hono 默认 logger 会输出完整 path+query（含 /by-url?url= 的完整隐私 URL）。
@@ -134,12 +145,25 @@ export function buildApp(deps: AppDeps): Hono {
       const bootstrap = c.req.header("x-mf-setup-token") ?? "";
       const result = await adminSetup(store, body.password, bootstrap, dataDir);
       if ("error" in result) return c.json({ error: result.error }, result.error === "setup_token_required" || result.error === "setup_token_invalid" ? 403 : 400);
+      store.audit("setup.done", "管理员密码初始化完成（引导凭据已失效）", clientKeyOf(c));
       return c.json(result);
     });
   }
 
   const privateVisible = (c: { req: { header: (n: string) => string | undefined } }): boolean =>
     c.req.header("x-mf-private") === "1";
+
+  // DEV-05 客户端标识：仅在显式信任代理（MF_TRUST_PROXY=1，自建反代白名单）时
+  // 采信 X-Forwarded-For；否则用 TCP 对端地址——伪造代理头不能绕过限速。
+  // D58：同时作为审计日志 source（登录失败/限速/配置变更的来源追溯）。
+  const clientKeyOf = (c: { req: { header: (n: string) => string | undefined }; env: unknown }): string => {
+    if (process.env.MF_TRUST_PROXY === "1") {
+      const fwd = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+      if (fwd) return fwd;
+    }
+    const incoming = (c.env as { incoming?: { socket?: { remoteAddress?: string } } })?.incoming;
+    return incoming?.socket?.remoteAddress ?? "local";
+  };
 
   const listVisibleBookmarks = (
     c: { req: { header: (n: string) => string | undefined; query: (n: string) => string | undefined } },
@@ -172,20 +196,29 @@ export function buildApp(deps: AppDeps): Hono {
     let skippedDuplicate = 0;
     let skippedInvalid = 0;
     const batchSeen = new Set<string>();
+    // D44：导入即建浏览器身份映射（deviceId + browserId → 应用库书签），
+    // 之后管理台删除才能精确镜像 remove 浏览器节点（无映射则不动浏览器）
+    const deviceId = parsed.data.deviceId;
+    if (deviceId) store.ensureDevice(deviceId);
     for (const item of parsed.data.items) {
       const canon = canonicalizeUrl(item.url);
       if (!canon) {
         skippedInvalid++;
         continue;
       }
-      if (batchSeen.has(canon.canonical) || store.findByCanonical(canon.canonical)) {
+      const existing = store.findByCanonical(canon.canonical);
+      if (batchSeen.has(canon.canonical) || existing) {
+        // 重复 URL 也回填身份（同浏览器节点重复导入幂等；跨设备同 URL 指向同一条应用库书签）
+        if (deviceId && item.browserId && existing) {
+          store.upsertIdentity({ deviceId, browserBookmarkId: item.browserId, appBookmarkId: existing.id });
+        }
         skippedDuplicate++;
         continue;
       }
       batchSeen.add(canon.canonical);
       // 导入不进收件箱（AGENTS.md 红线 5）：直接落映射目录
       const folder = store.ensurePath(item.folderPath);
-      store.createBookmark({
+      const bm = store.createBookmark({
         folderId: folder.id,
         urlRaw: item.url,
         urlCanonical: canon.canonical,
@@ -193,6 +226,9 @@ export function buildApp(deps: AppDeps): Hono {
         title: item.title,
         addedAt: item.addedAt,
       });
+      if (deviceId && item.browserId) {
+        store.upsertIdentity({ deviceId, browserBookmarkId: item.browserId, appBookmarkId: bm.id });
+      }
       imported++;
     }
     const result = {
@@ -443,6 +479,9 @@ export function buildApp(deps: AppDeps): Hono {
       title: bm.title,
       bookmark: { title: bm.title, folder: store.getFolder(folderId)?.name ?? null },
     });
+    // D61 资料库：视频/图片凭 URL 形态即时入库（文章等捕获到全文后再显性化）
+    if (pipeline.syncMode) await pipeline.materialize(bm.id);
+    else void pipeline.materialize(bm.id);
     return c.json({ ...bm, suggest }, 201);
   });
 
@@ -453,16 +492,35 @@ export function buildApp(deps: AppDeps): Hono {
       status?: string;
       pinned?: boolean;
       isPrivate?: boolean;
+      /** D52：编辑 URL = 换资源，重算查重键；正文缓存随之作废 */
+      url?: string;
+      /** D52：备注（为什么收藏它） */
+      description?: string;
     };
-    const bm = store.getBookmark(c.req.param("id"));
+    const id = c.req.param("id");
+    const bm = store.getBookmark(id);
     if (!bm) return c.json({ error: "not_found" }, 404);
-    store.updateBookmark(c.req.param("id"), {
+    const fields: Parameters<Store["updateBookmark"]>[1] = {
       ...(body.title !== undefined ? { title: body.title } : {}),
       ...(body.folderId !== undefined ? { folder_id: body.folderId } : {}),
       ...(body.status !== undefined ? { status: body.status } : {}),
       ...(body.pinned !== undefined ? { pinned: body.pinned ? 1 : 0 } : {}),
       ...(body.isPrivate !== undefined ? { is_private: body.isPrivate ? 1 : 0 } : {}),
-    });
+      ...(body.description !== undefined ? { description: body.description.slice(0, 2000) } : {}),
+    };
+    if (body.url !== undefined && body.url !== bm.url_raw) {
+      const canon = canonicalizeUrl(body.url);
+      if (!canon) return c.json({ error: "invalid_url" }, 400);
+      const dup = store.findByCanonical(canon.canonical);
+      if (dup && dup.id !== id) return c.json({ error: "duplicate_url", existing_id: dup.id }, 409);
+      Object.assign(fields, {
+        url_raw: body.url,
+        url_canonical: canon.canonical,
+        url_key_version: canon.rulesVersion,
+      });
+      store.clearCache(id); // 内容归属旧 URL，快照保留（历史资产）
+    }
+    store.updateBookmark(id, fields);
     const updated = store.getBookmark(c.req.param("id"));
     if (updated?.is_private) {
       // 私密书签不参与内容抓取/AI（隐私红线）
@@ -635,8 +693,16 @@ export function buildApp(deps: AppDeps): Hono {
     if (!body.status || !["done", "failed", "cancelled"].includes(body.status)) {
       return c.json({ error: "status_required" }, 400);
     }
-    store.completeBrowserOp(id, body.status, body.error);
+    if (!store.completeBrowserOp(id, body.status, body.error)) {
+      return c.json({ error: "op_not_found_or_not_pending" }, 404);
+    }
     return c.json({ ok: true });
+  });
+
+  /** D45 浏览器书签重排：按管理台列表口径为含映射书签的目录生成顺序快照入队（可限定设备） */
+  api.post("/browser/reorder", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { deviceId?: string };
+    return c.json(enqueueBrowserReorder(store, body.deviceId));
   });
 
   // ---------- A1-1 隐私规则下发（扩展端同步本地） ----------
@@ -700,6 +766,7 @@ export function buildApp(deps: AppDeps): Hono {
       l2Text: parsed.data.l2Text,
       description: parsed.data.description,
       faviconDataUrl: parsed.data.faviconDataUrl,
+      ogImage: parsed.data.ogImage,
       urlForPrivacyCheck: bm.url_canonical,
     });
     void semantic.embedBookmark(bm.id); // 语义索引（fire-and-forget）
@@ -715,6 +782,35 @@ export function buildApp(deps: AppDeps): Hono {
     const cache = store.getCache(c.req.param("bookmarkId"));
     if (!cache) return c.json({ error: "not_found" }, 404);
     return c.json(cache);
+  });
+
+  // ---------- 站点原始图标（favicon）回填 ----------
+  // 前端 SiteIcon 对缺图书签异步调用；成功后以 data URL 持久化到 bookmarks.favicon_url，
+  // 与扩展快照捕获通道同字段同语义——一次获取，列表/导航站/新标签页全部复用
+  api.get("/favicon", async (c) => {
+    const url = c.req.query("url") ?? "";
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(url);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
+      return c.json({ error: "invalid_url" }, 400);
+    }
+    const bm = store.findByCanonical(parsed.toString()) ?? store.findByCanonical(url);
+    if (bm?.favicon_url) return c.json({ favicon_url: bm.favicon_url });
+    // 红线②：隐私域名/私密书签不向站点发起取图请求（探测即泄露"该域名在册"）。
+    // 与死链探测同规则的唯一例外：部署显式 allowlist 且目标为字面内网 IP（NAS 自有服务需要图标）
+    const decision = pipeline.serverDecide("server_fetch", url, {
+      isPrivateBookmark: bm?.is_private === 1,
+    });
+    if (!decision.allowed && !ipCoveredByAllowlist(parsed.hostname.replace(/^\[|\]$/g, ""), guardConfig)) {
+      return c.json({ favicon_url: null, reason: `privacy_${decision.reason}` });
+    }
+    const icon = await resolveFavicon(url, guardConfig);
+    if (icon && bm) store.updateBookmark(bm.id, { favicon_url: icon });
+    return c.json({ favicon_url: icon });
   });
 
   // ---------- F2.2 服务端补漏抓取 ----------
@@ -778,6 +874,7 @@ export function buildApp(deps: AppDeps): Hono {
           store.updateBookmark(bm.id, { description: description.slice(0, 500) });
         }
         await pipeline.maybeSummarize(bm.id);
+        await pipeline.materialize(bm.id); // D61：补漏抓取成功后同步识别入库
         void semantic.embedBookmark(bm.id);
         results.push({ id: bm.id, ok: true });
       } catch (err) {
@@ -791,6 +888,72 @@ export function buildApp(deps: AppDeps): Hono {
       await new Promise((r) => setTimeout(r, 500));
     }
     return c.json({ processed: results.length, results });
+  });
+
+  // ---------- D61 资料库（收藏内容三级识别的实体面：文章已存全文显性化/视频元数据/图片主图） ----------
+  api.get("/materials", (c) => {
+    return c.json({
+      items: store.listMaterials({
+        type: c.req.query("type") || undefined,
+        q: c.req.query("q") || undefined,
+        limit: c.req.query("limit") ? Math.min(Number(c.req.query("limit")), 200) : undefined,
+        offset: c.req.query("offset") ? Math.max(Number(c.req.query("offset")), 0) : undefined,
+        includePrivate: privateVisible(c),
+      }),
+      counts: store.countMaterials(),
+    });
+  });
+
+  api.get("/materials/:id", (c) => {
+    const m = store.getMaterial(c.req.param("id"));
+    if (!m) return c.json({ error: "not_found" }, 404);
+    if (m.is_private === 1 && !privateVisible(c)) return c.json({ error: "not_found" }, 404);
+    return c.json(m);
+  });
+
+  // 封面文件（魔数嗅探后落盘的本地图）：nosniff + private 缓存；路径纵深校验防 traversal
+  api.get("/materials/:id/cover", (c) => {
+    const ref = store.getMaterialCoverPath(c.req.param("id"));
+    if (!ref) return c.json({ error: "not_found" }, 404);
+    const base = path.resolve(dataDir, "materials");
+    const abs = path.resolve(dataDir, ref.relPath);
+    if (!abs.startsWith(base + path.sep) || !existsSync(abs)) {
+      return c.json({ error: "not_found" }, 404);
+    }
+    const buf = readFileSync(abs);
+    return new Response(new Uint8Array(buf), {
+      headers: {
+        "content-type": ref.mime,
+        "cache-control": "private, max-age=86400",
+        "x-content-type-options": "nosniff",
+      },
+    });
+  });
+
+  // Markdown 导出（D61 首发：零 API 依赖的通用笔记应用出口）
+  api.get("/materials/:id/export", (c) => {
+    const m = store.getMaterial(c.req.param("id"));
+    if (!m) return c.json({ error: "not_found" }, 404);
+    if (m.is_private === 1 && !privateVisible(c)) return c.json({ error: "not_found" }, 404);
+    const md = buildMaterialMarkdown(m);
+    const rawTitle = String(m.title ?? "material").replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 60) || "material";
+    return new Response(md, {
+      headers: {
+        "content-type": "text/markdown; charset=utf-8",
+        "content-disposition": `attachment; filename="material-${m.id}.md"; filename*=UTF-8''${encodeURIComponent(`${rawTitle}.md`)}`,
+        "x-content-type-options": "nosniff",
+      },
+    });
+  });
+
+  // 移出资料库：软删（书签本体不动；防 capture/crawl 复活），封面文件即时清理
+  api.delete("/materials/:id", (c) => {
+    const id = c.req.param("id");
+    const ref = store.getMaterialCoverPath(id);
+    const ok = store.dismissMaterial(id);
+    if (!ok) return c.json({ error: "not_found" }, 404);
+    if (ref) removeCoverFile(dataDir, ref.relPath);
+    return c.json({ ok: true });
   });
 
   // ---------- F3 整理（D27 act + undo：一次调用直接生效，安全网 = 版本撤销） ----------
@@ -824,6 +987,23 @@ export function buildApp(deps: AppDeps): Hono {
       return c.json(organize.rollback(c.req.param("versionId")));
     } catch (err) {
       return c.json({ error: String(err) }, 400);
+    }
+  });
+
+  // D43 敏感内容旁路（tidy 功能点，点了就跑）：全库命中项标私密 + 移入「私人收藏」，单事务、可撤销
+  api.post("/tidy/sensitive", (c) => {
+    try {
+      const result = organize.sweepSensitive();
+      // D33 出站 Hook：整理完成事件（聚合计数，不含单条内容）
+      if (result.marked > 0) {
+        dispatchWebhooks(store, "bookmark.organized", {
+          versionId: result.versionId,
+          applied: result.marked,
+        });
+      }
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: String(err) }, 500);
     }
   });
 
@@ -948,6 +1128,7 @@ export function buildApp(deps: AppDeps): Hono {
         },
       );
       const site = store.getNavSiteFull(slug)!;
+      store.audit("nav.published", `发布导航站 /s/${slug}（公开 ${itemCount} 项）`, clientKeyOf(c));
       return c.json(
         { slug, url: `/s/${slug}`, template, itemCount, revision: site.revision, published: site.published === 1 },
         201,
@@ -965,8 +1146,10 @@ export function buildApp(deps: AppDeps): Hono {
   });
 
   api.post("/nav/sites/:slug/unpublish", (c) => {
-    const ok = store.unpublishNavSite(c.req.param("slug"));
+    const slug = c.req.param("slug");
+    const ok = store.unpublishNavSite(slug);
     if (!ok) return c.json({ error: "not_found" }, 404);
+    store.audit("nav.unpublished", `下线导航站 /s/${slug}`, clientKeyOf(c));
     return c.json({ unpublished: true });
   });
 
@@ -1163,6 +1346,60 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json(store.pullChanges(cursor, device));
   });
 
+  /**
+   * D50 变更事件流（SSE）：库侧任何改动即推「有事发生，来拉」给扩展——
+   * 管理台动作后浏览器秒级收敛的推送通道。不携带数据（真相仍是 changes 表+游标），
+   * 丢事件不丢正确性（兜底 = 扩展 1 分钟告警）。1 秒合并窗口防整理批次刷屏，
+   * 20 秒心跳保活（兼给 MV3 SW 续命）。
+   */
+  api.get("/events/stream", (c) => {
+    return streamSSE(c, async (stream) => {
+      let dirty = false;
+      const unsub = hub.subscribe(() => {
+        dirty = true;
+      });
+      try {
+        await stream.writeSSE({ event: "hello", data: "{}" });
+        let lastPing = Date.now();
+        while (!stream.aborted) {
+          await new Promise((r) => setTimeout(r, 1000));
+          if (dirty) {
+            dirty = false;
+            await stream.writeSSE({ event: "change", data: JSON.stringify({ at: Date.now() }) });
+            lastPing = Date.now();
+          } else if (Date.now() - lastPing > 20_000) {
+            lastPing = Date.now();
+            await stream.writeSSE({ event: "ping", data: "{}" });
+          }
+        }
+      } catch {
+        /* 断连/写入失败：正常收尾 */
+      } finally {
+        unsub();
+      }
+    });
+  });
+
+  /** D46 双向同步：浏览器侧 diff 落库（幂等；变更日志带发起设备，不回声） */
+  api.post("/sync/apply", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      deviceId?: string;
+      mutations?: unknown[];
+    } | null;
+    if (!body?.deviceId || !Array.isArray(body.mutations)) {
+      return c.json({ error: "deviceId_mutations_required" }, 400);
+    }
+    if (body.mutations.length > 2000) return c.json({ error: "too_many_mutations" }, 400);
+    return c.json(applySyncMutations(store, body.deviceId, body.mutations));
+  });
+
+  /** D46 首次对齐：本设备身份映射与应用侧存在性（孤儿映射 = 库已删，浏览器待清） */
+  api.get("/browser/identities", (c) => {
+    const deviceId = c.req.query("deviceId");
+    if (!deviceId) return c.json({ error: "deviceId_required" }, 400);
+    return c.json({ identities: store.identitiesWithState(deviceId) });
+  });
+
   // ---------- F5 维护（死链/查重/周报/体检） ----------
   api.post("/maintenance/links/run", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { limit?: number };
@@ -1245,6 +1482,12 @@ export function buildApp(deps: AppDeps): Hono {
       }
       throw err;
     }
+    // D58：配置变更入审计——detail 只落 providerId 与启停，绝不落 apiKey
+    store.audit(
+      "provider.saved",
+      `保存 AI 供应商配置：${body.providerId}${body.enabled === false ? "（已停用）" : ""}`,
+      clientKeyOf(c),
+    );
     return c.json({ id }, 201);
   });
 
@@ -1282,10 +1525,20 @@ export function buildApp(deps: AppDeps): Hono {
         ? { authorization: `Bearer ${row.api_key}` }
         : {};
     try {
-      const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
-      if (!res.ok) return c.json({ error: `provider_returned_${res.status}` }, 502);
-      const json = (await res.json().catch(() => ({}))) as { data?: Array<{ id?: string }> };
-      const models = (json.data ?? []).map((m) => String(m.id ?? "")).filter(Boolean);
+      // A1-4 统一出站守卫：管理员配置的 base_url 同样可能指向内网元数据端点（SSRF），
+      // 与 crawl/favicon 同规——guardedFetch（SSRF 校验+连接固定+字节上限），不用裸 fetch
+      const res = await guardedFetch(url, guardConfig, { headers }, {
+        maxBytes: 1_000_000,
+        timeoutMs: 10_000,
+        totalTimeoutMs: 15_000,
+      });
+      if (!res.ok) {
+        res.dispose();
+        return c.json({ error: `provider_returned_${res.status}` }, 502);
+      }
+      const body = await res.readBody(1_000_000);
+      const parsed = JSON.parse(body.toString("utf8")) as { data?: Array<{ id?: string }> };
+      const models = (parsed.data ?? []).map((m) => String(m.id ?? "")).filter(Boolean);
       return c.json({ models });
     } catch (err) {
       return c.json({ error: String(err).slice(0, 200) }, 502);
@@ -1316,6 +1569,13 @@ export function buildApp(deps: AppDeps): Hono {
       }
       store.setOrganizeRules(body.organizeRules as string[]);
     }
+    // D58：偏好变更入审计（记改了哪些项，不记值——规则列表可能很长）
+    {
+      const changed: string[] = [];
+      if (body.notifyStyle !== undefined) changed.push("通知方式");
+      if (body.organizeRules !== undefined) changed.push("整理偏好规则");
+      if (changed.length > 0) store.audit("settings.changed", `更新偏好：${changed.join("、")}`, clientKeyOf(c));
+    }
     return c.json({
       ok: true,
       notifyStyle: store.getPref("notify_style") ?? "toast",
@@ -1343,11 +1603,14 @@ export function buildApp(deps: AppDeps): Hono {
       secret: body.secret ?? undefined,
       enabled: body.enabled,
     });
+    store.audit("webhook.saved", `保存 Webhook「${body.label}」（${body.events.join("/")}）`, clientKeyOf(c));
     return c.json({ ok: true, id }, 201);
   });
 
   api.delete("/settings/webhooks/:id", (c) => {
+    const target = store.getHook(c.req.param("id"));
     const ok = store.deleteHook(c.req.param("id"));
+    if (ok) store.audit("webhook.removed", `删除 Webhook「${target?.label ?? c.req.param("id")}」`, clientKeyOf(c));
     return ok ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
   });
 
@@ -1397,8 +1660,11 @@ export function buildApp(deps: AppDeps): Hono {
   });
 
   api.delete("/auth/tokens/:tokenId", (c) => {
-    const ok = store.revokeTokenById(c.req.param("tokenId"));
+    const tokenId = c.req.param("tokenId");
+    const target = store.listTokens().find((t) => t.token_id === tokenId);
+    const ok = store.revokeTokenById(tokenId);
     if (!ok) return c.json({ error: "not_found_or_already_revoked" }, 404);
+    store.audit("token.revoked", `撤销令牌「${target?.label ?? tokenId}」`, clientKeyOf(c));
     return c.json({ revoked: true });
   });
 
@@ -1407,7 +1673,14 @@ export function buildApp(deps: AppDeps): Hono {
     const header = c.req.header("authorization") ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
     const revoked = token ? store.revokeByRawToken(token) : false;
+    if (revoked) store.audit("token.revoked", "退出登录（撤销当前令牌）", clientKeyOf(c));
     return c.json({ loggedOut: revoked });
+  });
+
+  // ---------- 操作审计日志（D58：设置页「操作日志」分区数据源；走上方鉴权中间件） ----------
+  api.get("/audit", (c) => {
+    const limit = c.req.query("limit") ? Math.min(Number(c.req.query("limit")), 500) : 100;
+    return c.json({ events: store.listAudit(limit) });
   });
 
   // ---------- stats ----------
@@ -1431,41 +1704,41 @@ export function buildApp(deps: AppDeps): Hono {
     }),
   );
 
-  // DEV-05 客户端标识：仅在显式信任代理（MF_TRUST_PROXY=1，自建反代白名单）时
-  // 采信 X-Forwarded-For；否则用 TCP 对端地址——伪造代理头不能绕过限速
-  const clientKeyOf = (c: { req: { header: (n: string) => string | undefined }; env: unknown }): string => {
-    if (process.env.MF_TRUST_PROXY === "1") {
-      const fwd = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-      if (fwd) return fwd;
-    }
-    const incoming = (c.env as { incoming?: { socket?: { remoteAddress?: string } } })?.incoming;
-    return incoming?.socket?.remoteAddress ?? "local";
-  };
-
   // F6.2/A4-1 + DEV-05 登录（环境变量密码或 DB hash；两种模式统一限速，key 区分模式）
   root.post("/auth/login", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { password?: string; label?: string };
     if (!body.password) return c.json({ error: "password_required" }, 400);
     const clientKey = clientKeyOf(c);
+    const label = body.label ?? "device";
+    // D58：登录三态入审计日志（限速/失败此前只在内存滑窗，重启即失、被爆破无感知）。
+    // detail 只落 label，绝不落密码。
     // 环境变量模式（兼容既有部署）：同样限速（修复 E07：env 密码无速率限制）
     if (authEnabled(adminPassword)) {
       const key = `admin-env:${clientKey}`;
-      if (loginRateLimited(key)) return c.json({ error: "rate_limited" }, 429);
-      const result = login(store, adminPassword, body.password, body.label ?? "device");
+      if (loginRateLimited(key)) {
+        store.audit("auth.rate_limited", `登录被限速（env 模式）`, clientKey);
+        return c.json({ error: "rate_limited" }, 429);
+      }
+      const result = login(store, adminPassword, body.password, label);
       if ("error" in result) {
         recordLoginFailure(key);
+        store.audit("auth.failed", `登录失败：密码错误（${label}）`, clientKey);
         return c.json(result, result.error === "auth_disabled" ? 400 : 401);
       }
       clearLoginFailures(key);
+      store.audit("auth.login", `登录成功（${label}）`, clientKey);
       return c.json(result);
     }
     // A4-1 DB hash 模式（生产语义首启 setup 后）
     if (isProductionLike() && !setupRequired(store)) {
-      const result = loginWithDbHash(store, body.password, body.label ?? "device", `admin-db:${clientKey}`);
+      const result = loginWithDbHash(store, body.password, label, `admin-db:${clientKey}`);
       if ("status" in result) {
         const status = result.status as 401 | 429;
+        if (result.error === "rate_limited") store.audit("auth.rate_limited", "登录被限速", clientKey);
+        else store.audit("auth.failed", `登录失败：密码错误（${label}）`, clientKey);
         return c.json({ error: result.error }, status);
       }
+      store.audit("auth.login", `登录成功（${label}）`, clientKey);
       return c.json(result);
     }
     return c.json({ error: "auth_disabled" }, 400);
@@ -1502,22 +1775,28 @@ export function buildApp(deps: AppDeps): Hono {
     };
     // index.html 每请求读取（不缓存进内存）：dev 场景 web 构建产物更新后无需重启即生效
     root.get("/", (c) => c.html(readFileSync(path.join(webDist, "index.html"), "utf8")));
-    root.get("/assets/*", (c) => {
-      const rel = c.req.path.replace(/^\/assets\//, "");
-      // 防目录穿越
-      const file = path.resolve(webDist, "assets", rel);
-      if (!file.startsWith(path.resolve(webDist, "assets"))) {
-        return c.json({ error: "forbidden" }, 403);
-      }
-      try {
-        const data = readFileSync(file);
-        c.header("content-type", ASSET_MIME[path.extname(file)] ?? "application/octet-stream");
-        c.header("cache-control", "public, max-age=86400"); // 带 hash 的产物可长缓存
-        return c.body(data);
-      } catch {
-        return c.json({ error: "not_found" }, 404);
-      }
-    });
+    // 静态目录白名单托管（2026-11-20 修复：此前只挂 /assets/*，/brand、/providers 全 404，
+    // 顶栏品牌标与管理台供应商 logo 破图）：assets/ 带 hash 可长缓存，其余固定文件名短缓存
+    const staticDirs = ["assets", "brand", "providers"] as const;
+    for (const dir of staticDirs) {
+      root.get(`/${dir}/*`, (c) => {
+        const rel = c.req.path.replace(`/${dir}/`, "");
+        // 防目录穿越
+        const rootDir = path.resolve(webDist, dir);
+        const file = path.resolve(rootDir, rel);
+        if (!file.startsWith(rootDir + path.sep)) {
+          return c.json({ error: "forbidden" }, 403);
+        }
+        try {
+          const data = readFileSync(file);
+          c.header("content-type", ASSET_MIME[path.extname(file)] ?? "application/octet-stream");
+          c.header("cache-control", dir === "assets" ? "public, max-age=86400" : "public, max-age=300");
+          return c.body(data);
+        } catch {
+          return c.json({ error: "not_found" }, 404);
+        }
+      });
+    }
     root.get("/favicon.ico", (c) => c.body(null, 204));
   }
 

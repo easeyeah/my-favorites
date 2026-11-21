@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { LlmClient, LlmUnavailableError } from "./llm-client";
+import { isLlmContentModeration, LlmClient, LlmUnavailableError } from "./llm-client";
 import http from "node:http";
 
 // 本地起一个最小 mock（与 docker/llm-mock.mjs 契约一致），测客户端而非网络
@@ -16,6 +16,18 @@ beforeAll(async () => {
         const payload = JSON.parse(body || "{}");
         if (payload.messages?.[0]?.content === "boom") {
           res.writeHead(500).end();
+          return;
+        }
+        // D43：模拟供应商内容审核拒收（OpenAI 兼容 envelope，带机器码）
+        if (payload.messages?.[0]?.content === "moderation-boom") {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { code: "data_inspection_failed", type: "invalid_request_error", message: "Content material may contain inappropriate content" } }));
+          return;
+        }
+        // 无 JSON envelope 的网关错误（纯文本 502 之类）
+        if (payload.messages?.[0]?.content === "plain-boom") {
+          res.writeHead(502, { "content-type": "text/plain" });
+          res.end("Upstream blocked by content moderation policy");
           return;
         }
         const content =
@@ -61,6 +73,33 @@ describe("LlmClient", () => {
     await expect(
       client.chat([{ role: "user", content: "boom" }]),
     ).rejects.toThrow(LlmUnavailableError);
+  });
+
+  it("D43：审核类 400 → 错误体带机器码，isLlmContentModeration 为真", async () => {
+    const err = await client
+      .chat([{ role: "user", content: "moderation-boom" }])
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LlmUnavailableError);
+    expect((err as LlmUnavailableError).message).toContain("data_inspection_failed");
+    expect(isLlmContentModeration(err)).toBe(true);
+  });
+
+  it("D43：纯文本网关错误也可识别审核措辞", async () => {
+    const err = await client
+      .chat([{ role: "user", content: "plain-boom" }])
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(isLlmContentModeration(err)).toBe(true);
+  });
+
+  it("D43：普通 500 故障不算审核（不误触隔离）", async () => {
+    const err = await client
+      .chat([{ role: "user", content: "boom" }])
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LlmUnavailableError);
+    expect(isLlmContentModeration(err)).toBe(false);
   });
 
   it("不可达端点 → LlmUnavailableError（不裸抛 fetch 错误）", async () => {

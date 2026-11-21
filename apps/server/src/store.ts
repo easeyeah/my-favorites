@@ -46,6 +46,13 @@ export interface BookmarkRow {
 export class Store {
   constructor(readonly db: Db) {}
 
+  /**
+   * D46 双向同步：sync-apply 执行期间的变更日志自动携带发起设备（device 列），
+   * 该设备 pullChanges 时被排除——浏览器→库的改动不再回声到浏览器（防回环）。
+   * 其他改动路径（整理/管理台）此值为 null，日志照旧全员下发。
+   */
+  syncApplyDevice: string | null = null;
+
   // ---------- folders ----------
   listFolders(): FolderRow[] {
     return this.db
@@ -156,6 +163,41 @@ export class Store {
     return true;
   }
 
+  /**
+   * D56：目录树删除（浏览器删目录 → 库同步）。子优先递归删「子目录 + 全部子书签 + 本目录」，
+   * 不受 deleteFolderIfEmpty 的"仅空目录"限制（那会导致父目录在子目录未删时删不掉而残留）。
+   * 系统收纳盒拒绝。事务包裹保证原子；书签走 deleteBookmark（记日志 + 给他设备排 remove，
+   * skipMirrorRemoveForDevice 跳过发起设备——其浏览器节点已删，无需回程）。
+   */
+  deleteFolderTree(id: string, opts: { skipMirrorRemoveForDevice?: string } = {}): { folders: number; bookmarks: number } {
+    const folder = this.getFolder(id);
+    if (!folder || folder.is_system_inbox === 1) return { folders: 0, bookmarks: 0 };
+    const acc = { folders: 0, bookmarks: 0 };
+    this.db.exec("BEGIN");
+    try {
+      this.deleteFolderTreeInner(id, opts, acc);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+    return acc;
+  }
+
+  /** 子优先递归（事务由外层 deleteFolderTree 统一管理，避免嵌套 BEGIN） */
+  private deleteFolderTreeInner(id: string, opts: { skipMirrorRemoveForDevice?: string }, acc: { folders: number; bookmarks: number }): void {
+    const children = this.db.prepare("SELECT id FROM folders WHERE parent_id = ?").all(id) as Array<{ id: string }>;
+    for (const c of children) this.deleteFolderTreeInner(c.id, opts, acc);
+    const bms = this.db.prepare("SELECT id FROM bookmarks WHERE folder_id = ?").all(id) as Array<{ id: string }>;
+    for (const b of bms) {
+      this.deleteBookmark(b.id, opts);
+      acc.bookmarks++;
+    }
+    this.db.prepare("DELETE FROM folders WHERE id = ?").run(id);
+    this.recordChange("folder", id, "delete", { id });
+    acc.folders++;
+  }
+
   // ---------- bookmarks ----------
   getBookmark(id: string): BookmarkRow | undefined {
     return this.db.prepare("SELECT * FROM bookmarks WHERE id = ?").get(id) as
@@ -233,30 +275,76 @@ export class Store {
       .prepare(`UPDATE bookmarks SET ${set} WHERE id = ?`)
       .run(...vals, id);
     // A3-4 冲突检测信号：用户手动修改（标题/目录/状态/固定/私密）递增修订版本
-    const manualCols = ["title", "folder_id", "status", "pinned", "is_private"];
+    const manualCols = ["title", "folder_id", "status", "pinned", "is_private", "url_raw", "description"];
     if (keys.some((k) => manualCols.includes(k))) {
       this.db
         .prepare("UPDATE bookmarks SET content_revision = content_revision + 1 WHERE id = ?")
         .run(id);
+    }
+    // D46 双向同步：同步相关字段的修改进变更日志（此前只 create/move/delete 有日志，
+    // 改名/置顶不会传播到浏览器侧）。folder_id 变化记 move（与 moveBookmark 同形）。
+    // D52：url_raw/description 编辑同样入日志（浏览器侧节点 URL/标题跟随）。
+    if (keys.some((k) => ["title", "status", "pinned", "is_private", "url_raw", "description"].includes(k))) {
+      const after = this.getBookmark(id);
+      if (after) this.recordChange("bookmark", id, "upsert", after);
+    }
+    if (keys.includes("folder_id") && fields.folder_id !== undefined) {
+      const after = this.getBookmark(id);
+      this.recordChange("bookmark", id, "move", {
+        from: null,
+        to: String(fields.folder_id),
+        url: after?.url_canonical,
+        title: after?.title,
+      });
     }
   }
 
   moveBookmark(id: string, toFolderId: string): BookmarkRow | undefined {
     const before = this.getBookmark(id);
     if (!before) return undefined;
+    // D46：move 变更日志由 updateBookmark(folder_id) 统一记录，此处不再重复
     this.updateBookmark(id, { folder_id: toFolderId });
-    const after = this.getBookmark(id);
-    this.recordChange("bookmark", id, "move", { from: before.folder_id, to: toFolderId, url: after?.url_canonical, title: after?.title });
     return before;
   }
 
-  deleteBookmark(id: string): BookmarkRow | undefined {
+  deleteBookmark(
+    id: string,
+    opts: { skipMirrorRemoveForDevice?: string } = {},
+  ): BookmarkRow | undefined {
     const before = this.getBookmark(id);
     if (!before) return undefined;
+    // D44 受控镜像删除 / D46：有浏览器身份映射（A2-1）的书签入队 remove 操作。
+    // 服务端只排队；是否真的动浏览器节点由扩展端同步开关决定（默认关）。
+    // skipMirrorRemoveForDevice：浏览器→库方向的删除不回程删发起方自己。
+    for (const ident of this.identitiesForApp(id)) {
+      if (opts.skipMirrorRemoveForDevice && ident.device_id === opts.skipMirrorRemoveForDevice) continue;
+      this.enqueueBrowserOpIdempotent({
+        deviceId: ident.device_id,
+        op: "remove",
+        browserBookmarkId: ident.browser_bookmark_id,
+        payload: { url: before.url_canonical, title: before.title },
+      });
+    }
     this.db.prepare("DELETE FROM content_cache WHERE bookmark_id = ?").run(id);
     this.db.prepare("DELETE FROM bookmarks WHERE id = ?").run(id);
     this.recordChange("bookmark", id, "delete", { url: before.url_canonical, title: before.title, folder_id: before.folder_id });
     return before;
+  }
+
+  /** D52：URL 编辑后正文缓存作废（快照是历史资产，保留） */
+  clearCache(bookmarkId: string): void {
+    this.db.prepare("DELETE FROM content_cache WHERE bookmark_id = ?").run(bookmarkId);
+  }
+
+  /** D46 首次对齐：本设备全部身份映射 + 应用侧书签是否仍存在（孤儿映射=库已删，浏览器侧待清） */
+  identitiesWithState(deviceId: string): Array<{ browser_bookmark_id: string; app_bookmark_id: string; app_exists: boolean }> {
+    return this.db
+      .prepare(
+        `SELECT i.browser_bookmark_id, i.app_bookmark_id,
+                (SELECT COUNT(*) FROM bookmarks b WHERE b.id = i.app_bookmark_id) > 0 AS app_exists
+         FROM bookmark_identity i WHERE i.device_id = ?`,
+      )
+      .all(deviceId) as unknown as Array<{ browser_bookmark_id: string; app_bookmark_id: string; app_exists: boolean }>;
   }
 
   listBookmarks(filter?: {
@@ -373,6 +461,210 @@ export class Store {
          WHERE c.bookmark_id IS NULL AND b.status = 'normal' LIMIT ?`,
       )
       .all(limit) as unknown as BookmarkRow[];
+  }
+
+  /**
+   * D63 摘要补扫候选：有正文（≥40 字，与 maybeSummarize 同阈值）但缺 L1 摘要。
+   * 可重试 = 无失败原因（fire-and-forget 丢失）或 llm_unavailable / stale_policy_discarded
+   * （当时不可用/过期丢弃，重跑安全——引擎内仍有现行策略判定兜底）；privacy_* 拒绝不重试。
+   */
+  bookmarksMissingSummary(limit = 5): BookmarkRow[] {
+    return this.db
+      .prepare(
+        `SELECT b.* FROM bookmarks b JOIN content_cache cc ON cc.bookmark_id = b.id
+         WHERE b.archived_into IS NULL AND b.is_private = 0
+           AND LENGTH(IFNULL(cc.l2_text,'')) >= 40
+           AND IFNULL(cc.l1_summary,'') = ''
+           AND (cc.fail_reason IS NULL OR cc.fail_reason NOT LIKE 'privacy_%')
+         ORDER BY b.added_at DESC LIMIT ?`,
+      )
+      .all(limit) as unknown as BookmarkRow[];
+  }
+
+  // ---------- material（资料库，D61：正文/摘要引用 content_cache 不复制，封面文件在 DATA_DIR/materials/） ----------
+  upsertMaterial(input: {
+    bookmarkId: string;
+    type: string;
+    signals?: string[];
+    meta?: Record<string, unknown>;
+  }): { id: string; created: boolean } {
+    const existing = this.db
+      .prepare("SELECT id FROM material WHERE bookmark_id = ?")
+      .get(input.bookmarkId) as { id: string } | undefined;
+    if (existing) {
+      // 已在库：刷新类型与信号（封面字段与创建时间保留；status 不动——dismissed 是用户的移出决定，防"复活"）
+      this.db
+        .prepare(
+          "UPDATE material SET type = ?, signals = ?, meta = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(
+          input.type,
+          JSON.stringify(input.signals ?? []),
+          JSON.stringify(input.meta ?? {}),
+          now(),
+          existing.id,
+        );
+      return { id: existing.id, created: false };
+    }
+    const id = newId();
+    this.db
+      .prepare(
+        "INSERT INTO material (id, bookmark_id, type, status, meta, signals, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        id,
+        input.bookmarkId,
+        input.type,
+        "active",
+        JSON.stringify(input.meta ?? {}),
+        JSON.stringify(input.signals ?? []),
+        now(),
+        now(),
+      );
+    return { id, created: true };
+  }
+
+  /**
+   * 资料库列表（JOIN 书签与内容缓存：标题/URL/目录/图标实时取自主数据，
+   * 摘要取 L1，正文只取长度——全文走 /materials/:id 详情，列表不拖 20KB 正文）。
+   * 默认排除私密书签（与 search/listBookmarks 同边界）；软归档书签的条目一并隐藏。
+   */
+  listMaterials(filter: {
+    type?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+    includePrivate?: boolean;
+  }): Array<Record<string, unknown>> {
+    const conds: string[] = ["m.status = 'active'", "b.archived_into IS NULL"];
+    const args: (string | number)[] = [];
+    if (!filter.includePrivate) conds.push("b.is_private = 0");
+    if (filter.type) {
+      conds.push("m.type = ?");
+      args.push(filter.type);
+    }
+    if (filter.q) {
+      const like = `%${filter.q.replace(/[%_]/g, "")}%`;
+      conds.push(
+        "(b.title LIKE ? OR b.url_canonical LIKE ? OR IFNULL(cc.l1_summary,'') LIKE ? OR IFNULL(cc.l2_text,'') LIKE ?)",
+      );
+      args.push(like, like, like, like);
+    }
+    const limit = filter.limit ?? 60;
+    const offset = filter.offset ?? 0;
+    const sql = [
+      "SELECT m.id, m.bookmark_id, m.type, m.cover_url, m.cover_mime, m.cover_size, m.meta, m.signals, m.created_at, m.updated_at,",
+      "  b.title, b.url_canonical, b.url_raw, b.favicon_url, b.folder_id, b.added_at,",
+      "  cc.l1_summary, cc.l1_tags, LENGTH(IFNULL(cc.l2_text,'')) AS l2_len,",
+      "  (SELECT COUNT(*) FROM snapshot s WHERE s.bookmark_id = b.id) AS snapshot_count,",
+      "  (SELECT name FROM folders f WHERE f.id = b.folder_id) AS folder_name",
+      "FROM material m",
+      "JOIN bookmarks b ON b.id = m.bookmark_id",
+      "LEFT JOIN content_cache cc ON cc.bookmark_id = b.id",
+      `WHERE ${conds.join(" AND ")}`,
+      "ORDER BY m.created_at DESC, m.id DESC",
+      `LIMIT ${limit} OFFSET ${offset}`,
+    ].join(" ");
+    const rows = this.db.prepare(sql).all(...args) as Array<Record<string, unknown>>;
+    for (const r of rows) {
+      r.signals = JSON.parse((r.signals as string) ?? "[]");
+      r.meta = JSON.parse((r.meta as string) ?? "{}");
+      r.l1_tags = JSON.parse((r.l1_tags as string) ?? "[]");
+      r.has_cover = r.cover_mime != null && (r.cover_size as number) > 0;
+    }
+    return rows;
+  }
+
+  /** 资料条目详情（含 l2 全文引用——阅读视图用）；不存在或已 dismiss 返回 undefined */
+  getMaterial(id: string): Record<string, unknown> | undefined {
+    const row = this.db
+      .prepare(
+        [
+          "SELECT m.*, b.title, b.url_canonical, b.url_raw, b.favicon_url, b.folder_id, b.is_private,",
+          "  cc.l1_summary, cc.l1_tags, cc.l2_text, LENGTH(IFNULL(cc.l2_text,'')) AS l2_len,",
+          "  (SELECT COUNT(*) FROM snapshot s WHERE s.bookmark_id = b.id) AS snapshot_count,",
+          "  (SELECT name FROM folders f WHERE f.id = b.folder_id) AS folder_name",
+          "FROM material m",
+          "JOIN bookmarks b ON b.id = m.bookmark_id",
+          "LEFT JOIN content_cache cc ON cc.bookmark_id = b.id",
+          "WHERE m.id = ? AND m.status = 'active' AND b.archived_into IS NULL",
+        ].join(" "),
+      )
+      .get(id) as Record<string, unknown> | undefined;
+    if (row) {
+      row.signals = JSON.parse((row.signals as string) ?? "[]");
+      row.meta = JSON.parse((row.meta as string) ?? "{}");
+      row.l1_tags = JSON.parse((row.l1_tags as string) ?? "[]");
+      row.has_cover = row.cover_mime != null && (row.cover_size as number) > 0;
+    }
+    return row;
+  }
+
+  /** 资料条目存在性（孤儿封面清理用：不看 status，行在即文件不清理） */
+  materialExists(id: string): boolean {
+    return (this.db.prepare("SELECT 1 FROM material WHERE id = ?").get(id) as unknown) != null;
+  }
+
+  /** 按书标记取资料条目（含 dismissed——封面回填对已移出条目照常写库，不展示） */
+  getMaterialByBookmark(bookmarkId: string): { id: string } | undefined {
+    return this.db
+      .prepare("SELECT id FROM material WHERE bookmark_id = ?")
+      .get(bookmarkId) as { id: string } | undefined;
+  }
+
+  /** 资料库计数（按类型；口径与列表一致：active + 非软归档 + 非私密） */
+  countMaterials(): { total: number; article: number; video: number; image: number } {
+    const row = this.db
+      .prepare(
+        [
+          "SELECT COUNT(*) AS total,",
+          "  SUM(m.type = 'article') AS article,",
+          "  SUM(m.type = 'video') AS video,",
+          "  SUM(m.type = 'image') AS image",
+          "FROM material m JOIN bookmarks b ON b.id = m.bookmark_id",
+          "WHERE m.status = 'active' AND b.archived_into IS NULL AND b.is_private = 0",
+        ].join(" "),
+      )
+      .get() as { total: number; article: number | null; video: number | null; image: number | null };
+    return {
+      total: row.total,
+      article: row.article ?? 0,
+      video: row.video ?? 0,
+      image: row.image ?? 0,
+    };
+  }
+
+  /** 用户主动移出资料库（软删：书签本体不动，防 capture/crawl 复活；幂等——重复 dismiss 计 404） */
+  dismissMaterial(id: string): boolean {
+    const res = this.db
+      .prepare("UPDATE material SET status = 'dismissed', updated_at = ? WHERE id = ? AND status = 'active'")
+      .run(now(), id);
+    return res.changes > 0;
+  }
+
+  /** 落盘封面信息（materials.ts 下载成功后回填） */
+  setMaterialCover(id: string, cover: { mime: string; size: number; url: string; relPath: string }): void {
+    this.db
+      .prepare(
+        "UPDATE material SET cover_path = ?, cover_mime = ?, cover_size = ?, cover_url = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(cover.relPath, cover.mime, cover.size, cover.url, now(), id);
+  }
+
+  /** 封面文件相对路径（DATA_DIR 相对），供路由层读文件 */
+  getMaterialCoverPath(id: string): { relPath: string; mime: string } | undefined {
+    const row = this.db
+      .prepare("SELECT cover_path, cover_mime FROM material WHERE id = ? AND status = 'active'")
+      .get(id) as { cover_path: string | null; cover_mime: string | null } | undefined;
+    if (!row?.cover_path || !row.cover_mime) return undefined;
+    return { relPath: row.cover_path, mime: row.cover_mime };
+  }
+
+  /** 清空封面引用（文件删除后调用） */
+  clearMaterialCover(id: string): void {
+    this.db
+      .prepare("UPDATE material SET cover_path = NULL, cover_mime = NULL, cover_size = NULL, updated_at = ? WHERE id = ?")
+      .run(now(), id);
   }
 
   // ---------- domain_cache ----------
@@ -658,7 +950,8 @@ export class Store {
   // ---------- 浏览器待执行操作（A2-3/A2-4 镜像模式 D20：持久队列，不与 DB 事务共用） ----------
   enqueueBrowserOp(input: {
     deviceId: string;
-    op: "move" | "create" | "remove";
+    /** move=归位镜像；remove=D44 受控镜像删除；reorder=D45 按管理台顺序重排浏览器文件夹 */
+    op: "move" | "create" | "remove" | "reorder";
     browserBookmarkId?: string | null;
     targetBrowserParentId?: string | null;
     payload?: unknown;
@@ -723,10 +1016,14 @@ export class Store {
     return rows.map((r) => ({ ...r, payload: r.payload ? JSON.parse(r.payload) : null }));
   }
 
-  completeBrowserOp(id: number, status: "done" | "failed" | "cancelled", lastError?: string): void {
-    this.db
-      .prepare("UPDATE pending_browser_ops SET status = ?, last_error = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?")
+  /** 回执终结：仅对 pending 生效；返回是否命中（防乱序/重复回执误终结已执行操作） */
+  completeBrowserOp(id: number, status: "done" | "failed" | "cancelled", lastError?: string): boolean {
+    const r = this.db
+      .prepare(
+        "UPDATE pending_browser_ops SET status = ?, last_error = ?, attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'pending'",
+      )
       .run(status, lastError ?? null, now(), id);
+    return Number(r.changes) > 0;
   }
 
   /**
@@ -741,6 +1038,17 @@ export class Store {
            AND (? IS NULL OR target_browser_parent_id != ?)`,
       )
       .run(now(), deviceId, browserBookmarkId, targetFolderName ?? null, `mf-folder:${targetFolderName ?? ""}`);
+    return Number(r.changes);
+  }
+
+  /** D45：重排操作以「最新顺序快照」为准——重新排队前先终结该设备+目录的旧 pending reorder */
+  cancelPendingReorderOps(deviceId: string, targetBrowserParentId: string): number {
+    const r = this.db
+      .prepare(
+        `UPDATE pending_browser_ops SET status = 'cancelled', last_error = 'superseded_by_requeue', updated_at = ?
+         WHERE device_id = ? AND op = 'reorder' AND target_browser_parent_id = ? AND status = 'pending'`,
+      )
+      .run(now(), deviceId, targetBrowserParentId);
     return Number(r.changes);
   }
 
@@ -836,12 +1144,21 @@ export class Store {
   }
 
   // ---------- 变更日志（多端同步） ----------
+  /** D50：变更日志落库后的进程内广播钩子（buildApp 挂 SSE 推送；异常绝不影响写入主路径） */
+  onRecorded?: (ch: { entity: string; entity_id: string; op: string; device: string | null }) => void;
+
   recordChange(entity: string, entityId: string, op: string, payload: unknown, device?: string): void {
+    const dev = device ?? this.syncApplyDevice ?? null;
     this.db
       .prepare(
         "INSERT INTO changes (entity, entity_id, op, payload, device, created_at) VALUES (?,?,?,?,?,?)",
       )
-      .run(entity, entityId, op, JSON.stringify(payload ?? null), device ?? null, now());
+      .run(entity, entityId, op, JSON.stringify(payload ?? null), dev, now());
+    try {
+      this.onRecorded?.({ entity, entity_id: entityId, op, device: dev });
+    } catch {
+      /* 广播失败不影响主路径；SSE 客户端靠兜底告警自愈 */
+    }
   }
 
   /** 拉取 device 之外、cursor 之后的变更（M1 上限 500 条/次，游标续传） */
@@ -870,6 +1187,56 @@ export class Store {
   maxChangeId(): number {
     const row = this.db.prepare("SELECT MAX(id) as m FROM changes").get() as { m: number | null };
     return row.m ?? 0;
+  }
+
+  // ---------- 操作审计日志（D58：认证/令牌/配置/发布四类事件） ----------
+  /**
+   * 记一条审计事件。红线：detail 是一行人类可读摘要，
+   * 绝不落密码/token 原值或摘要/apiKey——调用方负责脱敏。
+   * source = 客户端标识（IP 或 clientKey），单用户部署下用于追溯来源。
+   */
+  audit(kind: string, detail: string, source?: string | null): void {
+    this.db
+      .prepare("INSERT INTO audit_log (kind, detail, source, created_at) VALUES (?,?,?,?)")
+      .run(kind, detail.slice(0, 300), source?.slice(0, 100) ?? null, now());
+  }
+
+  listAudit(limit = 100): Array<{ id: number; kind: string; detail: string | null; source: string | null; created_at: string }> {
+    return this.db
+      .prepare(
+        `SELECT id, kind, detail, source, created_at FROM audit_log ORDER BY id DESC LIMIT ${Math.min(limit, 500)}`,
+      )
+      .all() as unknown as Array<{
+      id: number;
+      kind: string;
+      detail: string | null;
+      source: string | null;
+      created_at: string;
+    }>;
+  }
+
+  /**
+   * 增长表保留裁剪（D58，NAS 单文件 SQLite 红线——三张只增不减的表此前无任何清理）：
+   *  - changes：同步游标日志，保 14 天（设备长期离线漏拉由 D53 treesDiffer catch-up 全量对齐兜底，裁剪安全）；
+   *  - events：产品埋点，保 90 天；
+   *  - idempotency：导入幂等缓存，保 7 天；
+   *  - audit_log：保最近 1000 条。
+   * 幂等可重跑：调用点 = 启动一次 + startScheduler 每日一次。
+   */
+  pruneRetention(): { changes: number; events: number; idempotency: number; audit: number } {
+    const count = (sql: string, ...args: Array<string | number>): number => {
+      const r = this.db.prepare(sql).run(...args);
+      return Number(r.changes);
+    };
+    const daysAgo = (d: number): string => new Date(Date.now() - d * 86400_000).toISOString();
+    return {
+      changes: count("DELETE FROM changes WHERE created_at < ?", daysAgo(14)),
+      events: count("DELETE FROM events WHERE created_at < ?", daysAgo(90)),
+      idempotency: count("DELETE FROM idempotency WHERE created_at < ?", daysAgo(7)),
+      audit: count(
+        "DELETE FROM audit_log WHERE id <= (SELECT MAX(id) - 1000 FROM audit_log)",
+      ),
+    };
   }
 
   // ---------- 维护报告 ----------
@@ -1489,18 +1856,22 @@ export class Store {
   /** 收纳盒面板「已自动归位」区：最近 placed 条目（已移出箱，含撤销入口的版本） */
   listInboxRecentPlaced(limit = 5): Array<{
     bookmark_id: string; title: string; url_canonical: string; reason: string | null;
-    updated_at: string; version_id: string | null;
+    updated_at: string; version_id: string | null; folder_name: string | null;
   }> {
+    // D54：带归位目标目录名（用户的核心问题「它去哪了」）
     return this.db
       .prepare(
-        `SELECT s.bookmark_id, b.title, b.url_canonical, s.reason, s.updated_at, s.version_id
-         FROM inbox_state s JOIN bookmarks b ON b.id = s.bookmark_id
+        `SELECT s.bookmark_id, b.title, b.url_canonical, s.reason, s.updated_at, s.version_id,
+                f.name AS folder_name
+         FROM inbox_state s
+         JOIN bookmarks b ON b.id = s.bookmark_id
+         LEFT JOIN folders f ON f.id = b.folder_id
          WHERE s.state = 'placed' AND b.archived_into IS NULL
          ORDER BY s.updated_at DESC LIMIT ?`,
       )
       .all(limit) as Array<{
       bookmark_id: string; title: string; url_canonical: string; reason: string | null;
-      updated_at: string; version_id: string | null;
+      updated_at: string; version_id: string | null; folder_name: string | null;
     }>;
   }
 

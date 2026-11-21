@@ -10,7 +10,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { browser } from "wxt/browser";
-import { api, type FolderDto } from "../../src/lib/api";
+import { api, getConfig, type FolderDto } from "../../src/lib/api";
+import { getDeviceId } from "../../src/lib/device";
 import { parseNetscapeBookmarks } from "@mf/shared";
 import { BrandHeader } from "../../src/components/skeleton";
 import "./panel.css";
@@ -40,15 +41,22 @@ function countTreeBookmarks(nodes: Array<{ url?: string; children?: Array<unknow
   return n;
 }
 
-/** 浏览器书签树 → ingest 条目（保留层级；系统书签栏根节点忽略） */
-async function flattenTree(): Promise<Array<{ url: string; title: string; folderPath: string[] }>> {
-  type BmNode = { title: string; url?: string; children?: BmNode[] };
+/** 浏览器书签树 → ingest 条目（保留层级；系统书签栏根节点忽略；browserId 供 D44 身份映射） */
+interface IngestEntry {
+  url: string;
+  title: string;
+  folderPath: string[];
+  /** Netscape HTML 导入无浏览器节点，不带此字段 */
+  browserId?: string;
+}
+async function flattenTree(): Promise<IngestEntry[]> {
+  type BmNode = { id: string; title: string; url?: string; children?: BmNode[] };
   const tree = (await browser.bookmarks.getTree()) as unknown as BmNode[];
-  const out: Array<{ url: string; title: string; folderPath: string[] }> = [];
+  const out: IngestEntry[] = [];
   const walk = (nodes: BmNode[], path: string[]): void => {
     for (const n of nodes) {
       if (n.url) {
-        if (/^https?:/.test(n.url)) out.push({ url: n.url, title: n.title || n.url, folderPath: path });
+        if (/^https?:/.test(n.url)) out.push({ url: n.url, title: n.title || n.url, folderPath: path, browserId: n.id });
       } else if (n.children) {
         // 书签栏 / 其他书签这两层不作为目录名（落映射根）
         const next = path.length === 0 ? [] : [...path, n.title];
@@ -63,7 +71,7 @@ async function flattenTree(): Promise<Array<{ url: string; title: string; folder
 const BATCH = 100;
 
 async function importItems(
-  items: Array<{ url: string; title: string; folderPath: string[] }>,
+  items: IngestEntry[],
   onProgress: (stat: ImportStat) => void,
 ): Promise<ImportStat> {
   const stat: ImportStat = {
@@ -76,6 +84,8 @@ async function importItems(
     done: false,
   };
   const baseKey = `welcome-${Date.now()}`;
+  // D44：带设备 ID，服务端为 browserId 建立身份映射（管理台删除才能镜像回浏览器）
+  const deviceId = await getDeviceId().catch(() => undefined);
   for (let i = 0; i < items.length; i += BATCH) {
     const batch = items.slice(i, i + BATCH);
     const r = await api<{ imported: number; skipped_duplicate: number; skipped_invalid?: number }>(
@@ -83,7 +93,7 @@ async function importItems(
       {
         method: "POST",
         headers: { "Idempotency-Key": `${baseKey}-${i / BATCH}` },
-        body: JSON.stringify({ idempotencyKey: `${baseKey}-${i / BATCH}`, items: batch }),
+        body: JSON.stringify({ idempotencyKey: `${baseKey}-${i / BATCH}`, ...(deviceId ? { deviceId } : {}), items: batch }),
       },
     );
     stat.imported += r.imported;
@@ -372,6 +382,15 @@ function Welcome() {
                   }}
                 >
                   打开新标签页 →
+                </button>
+                <button
+                  className="rounded-lg border border-white/40 px-3 py-1.5 text-xs"
+                  onClick={() => {
+                    void getConfig().then((c) => browser.tabs.create({ url: `${c.serverUrl.replace(/\/$/, "")}/#overview` }));
+                    window.close();
+                  }}
+                >
+                  打开管理台
                 </button>
                 <button className="rounded-lg border border-white/40 px-3 py-1.5 text-xs" onClick={() => window.close()}>
                   完成

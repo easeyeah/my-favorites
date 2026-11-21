@@ -4,6 +4,7 @@ import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { apiCall, type AdminConfig } from "@/lib/api";
+import { resolveSiteIcon } from "@/lib/favicon";
 import { cn } from "@/lib/utils";
 
 // ---------- 按钮 ----------
@@ -262,29 +263,42 @@ export function LetterAvatar({ title, url, size = "md" }: { title: string; url?:
   );
 }
 
-export function SiteIcon({ title, url, size = "md" }: { title: string; url?: string; size?: "sm" | "md" | "lg" }) {
-  // "loading" 超过 2.5s（离线/外网受限）也回退字母块，不留空框
-  const [phase, setPhase] = useState<"loading" | "ok" | "fail">("loading");
+/**
+ * 站点图标：原始 favicon 优先（入库的 favicon_url → /api/favicon 异步回填），
+ * 解析失败/隐私拦截/图片损坏时回退字母块——不再依赖第三方图标服务。
+ */
+export function SiteIcon({
+  title,
+  url,
+  faviconUrl,
+  size = "md",
+}: {
+  title: string;
+  url?: string;
+  /** 书签行已入库的图标（data URL）；缺省时按 url 异步回填 */
+  faviconUrl?: string | null;
+  size?: "sm" | "md" | "lg";
+}) {
+  const [resolved, setResolved] = useState<string | null>(null);
+  const [broken, setBroken] = useState(false);
   const cls = { sm: "size-7 rounded-md", md: "size-8 rounded-lg", lg: "size-9 rounded-lg" }[size];
-  const host = url ? hostOf(url) : "";
-  const src = host ? `https://icons.duckduckgo.com/ip3/${host}.ico` : "";
   useEffect(() => {
-    setPhase("loading");
-    if (!src) return;
-    const t = window.setTimeout(() => setPhase((p) => (p === "loading" ? "fail" : p)), 2500);
-    return () => window.clearTimeout(t);
-  }, [src]);
-  if (!src || phase === "fail") return <LetterAvatar title={title} url={url} size={size} />;
+    setResolved(null);
+    setBroken(false);
+    if (faviconUrl || !url) return;
+    let alive = true;
+    void resolveSiteIcon(url).then((v) => {
+      if (alive && v) setResolved(v);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [url, faviconUrl]);
+  const src = faviconUrl || resolved || "";
+  if (!src || broken) return <LetterAvatar title={title} url={url} size={size} />;
   return (
     <span className={cn("bg-card flex shrink-0 items-center justify-center overflow-hidden border border-border/60", cls)} aria-hidden>
-      <img
-        src={src}
-        alt=""
-        className={cn("size-[60%] object-contain transition-opacity", phase === "ok" ? "opacity-100" : "opacity-0")}
-        loading="lazy"
-        onLoad={() => setPhase("ok")}
-        onError={() => setPhase("fail")}
-      />
+      <img src={src} alt="" className="size-[80%] object-contain" loading="lazy" onError={() => setBroken(true)} />
     </span>
   );
 }

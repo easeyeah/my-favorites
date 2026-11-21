@@ -237,7 +237,7 @@ export function CommandPalette({
                     i === active ? "bg-accent" : "hover:bg-accent/50",
                   )}
                 >
-                  <SiteIcon title={item.bm.title} url={item.bm.url_canonical} size="sm" />
+                  <SiteIcon title={item.bm.title} url={item.bm.url_canonical} faviconUrl={item.bm.favicon_url} size="sm" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13px] font-medium">{item.bm.title}</span>
                     <span className="text-muted-foreground block truncate text-[11px]">{folderPath(item.bm.folder_id)}</span>

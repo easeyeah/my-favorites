@@ -18,6 +18,11 @@ export interface ExtensionConfig {
   notifyStyle?: NotifyStyle;
   /** 原型 07：收纳盒投递口位置（1=书签栏 默认 / 2=其他书签） */
   inboxParent?: string;
+  /** D44：管理台删除书签时是否同步删除浏览器书签（默认关；仅对有身份映射的条目生效）。
+   *  D46 起由总开关 favoritesSync 接管，此字段仅作旧配置兼容（保留=尊重用户历史选择）。 */
+  syncDeleteToBrowser?: boolean;
+  /** D46：收藏夹双向直接同步总开关（默认关；开启即全量对齐 + 每 10 分钟/事件后增量收敛） */
+  favoritesSync?: boolean;
 }
 
 const DEFAULTS: ExtensionConfig = { serverUrl: "http://127.0.0.1:3000" };
@@ -31,6 +36,8 @@ export async function getConfig(): Promise<ExtensionConfig> {
     "reportReadDate",
     "notifyStyle",
     "inboxParent",
+    "syncDeleteToBrowser",
+    "favoritesSync",
   ]);
   return {
     ...DEFAULTS,
@@ -41,6 +48,10 @@ export async function getConfig(): Promise<ExtensionConfig> {
     ...(stored.reportReadDate ? { reportReadDate: stored.reportReadDate as string } : {}),
     ...(stored.notifyStyle ? { notifyStyle: stored.notifyStyle as NotifyStyle } : {}),
     ...(stored.inboxParent ? { inboxParent: stored.inboxParent as string } : {}),
+    ...(stored.syncDeleteToBrowser !== undefined
+      ? { syncDeleteToBrowser: stored.syncDeleteToBrowser as boolean }
+      : {}),
+    ...(stored.favoritesSync !== undefined ? { favoritesSync: stored.favoritesSync as boolean } : {}),
   };
 }
 
@@ -74,6 +85,7 @@ const EVENTS = [
   "inbox_auto_sorted",
   "snapshot_created",
   "weekly_report_clicked",
+  "browser_reordered", // D45：按管理台顺序重排浏览器书签
 ] as const;
 export type EventName = (typeof EVENTS)[number];
 
@@ -167,6 +179,8 @@ export interface InboxPlacedDto {
   reason: string | null;
   updated_at: string;
   version_id: string | null;
+  /** D54：归位目标目录名（回答「它去哪了」） */
+  folder_name: string | null;
 }
 
 export interface VersionDto {

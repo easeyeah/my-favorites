@@ -11,12 +11,16 @@ import {
   canonicalizeUrl,
   checkPrivacy,
   classifyByRules,
+  classifyMaterialKind,
   isPrivacyDomain,
+  MATERIAL_ARTICLE_MIN_TEXT,
   type PrivacyRules,
 } from "@mf/shared";
 import type { LlmClient } from "@mf/ai/llm-client";
 import type { Store } from "./store";
 import { enqueueMirrorMoves } from "./organize";
+import { fetchMaterialCover, saveCoverFile } from "./materials";
+import type { FetchGuardConfig } from "./fetch-guard";
 
 export interface SuggestResult {
   category: string;
@@ -27,15 +31,32 @@ export interface SuggestResult {
   privacy: boolean;
 }
 
+/** 封面抓取函数签名（fetchMaterialCover 的注入缝：测试替身用） */
+export type CoverFetcher = (
+  url: string,
+  guard?: FetchGuardConfig,
+) => Promise<{ buf: Buffer; mime: string } | null>;
+
 export class Pipeline {
   constructor(
     private store: Store,
     private llmFor: (purpose: "organize" | "summarize" | "embedding") => LlmClient | null,
-    private opts: { syncAi?: boolean } = {},
+    private opts: {
+      syncAi?: boolean;
+      dataDir?: string;
+      guardConfig?: FetchGuardConfig;
+      /** 测试缝：默认真实出站 fetchMaterialCover（loopback 属内置隐私域，集成测试注入替身） */
+      coverFetcher?: CoverFetcher;
+    } = {},
   ) {}
 
   privacyCheck(url: string): boolean {
     return isPrivacyDomain(url, { patterns: this.store.privacyPatterns() });
+  }
+
+  /** 测试确定性开关：MF_SYNC_AI=1 时异步链路（摘要/资料库物化）在请求内等待完成 */
+  get syncMode(): boolean {
+    return this.opts.syncAi === true;
   }
 
   /** A1-1/A1-3：服务端侧统一策略判定（不信任客户端"已经检查"声明） */
@@ -116,12 +137,13 @@ export class Pipeline {
     };
   }
 
-  /** 内容捕获（F2.1 通道A 上行）：隐私校验 → 截断 → 存储 → （可选）AI 摘要 */
+  /** 内容捕获（F2.1 通道A 上行）：隐私校验 → 截断 → 存储 → （可选）AI 摘要 → （D61）资料库识别入库 */
   async capture(input: {
     bookmarkId: string;
     l2Text?: string;
     description?: string;
     faviconDataUrl?: string;
+    ogImage?: string;
     urlForPrivacyCheck: string;
   }): Promise<{ summarized: boolean; skippedPrivacy?: boolean; skipReason?: string }> {
     // A1-3 服务端纵深校验：独立判定，不信任扩展端"已检查"（扩展端校验是第一道，这是第二道）
@@ -156,8 +178,51 @@ export class Pipeline {
     if (input.faviconDataUrl) {
       this.store.updateBookmark(input.bookmarkId, { favicon_url: input.faviconDataUrl });
     }
+    if (this.opts.syncAi) {
+      await this.materialize(input.bookmarkId, input.ogImage);
+    } else {
+      void this.materialize(input.bookmarkId, input.ogImage);
+    }
     const summarized = await this.maybeSummarize(input.bookmarkId);
     return { summarized };
+  }
+
+  /**
+   * D61 资料库入库：三级识别（shared classifyMaterialKind，纯规则）+ 条目覆盖式维护。
+   *  - 文章仅在已存全文（l2_text ≥ 阈值）时显性化入库；视频/图片无条件入库（视频不下载本体）；
+   *  - 隐私域名/私密书签不入内容库（与「隐私条目仅存 URL」原则一致）；
+   *  - 封面下载是 server_fetch 出站动作，独立隐私判定后异步执行（不阻塞捕获链路）。
+   */
+  async materialize(bookmarkId: string, ogImage?: string): Promise<void> {
+    const bm = this.store.getBookmark(bookmarkId);
+    if (!bm || bm.archived_into) return;
+    if (bm.is_private === 1 || this.privacyCheck(bm.url_raw)) return;
+    const cls = classifyMaterialKind(bm.url_canonical);
+    if (!cls) return;
+    const cache = this.store.getCache(bookmarkId);
+    const l2 = typeof cache?.l2_text === "string" ? (cache.l2_text as string) : "";
+    if (cls.kind === "article" && l2.length < MATERIAL_ARTICLE_MIN_TEXT) return;
+    const meta: Record<string, unknown> = {};
+    if (l2) meta.textLen = l2.length;
+    this.store.upsertMaterial({ bookmarkId, type: cls.kind, signals: cls.signals, meta });
+    // 封面线索：图片条目 = URL 本体；视频/文章 = og:image（扩展捕获上行）
+    const coverSource = cls.kind === "image" ? bm.url_raw : ogImage;
+    if (coverSource) void this.fetchCover(bookmarkId, coverSource);
+  }
+
+  /** 封面下载落盘（网络执行者；server_fetch 策略判定在此前置——不信任任何上游"已检查"声明） */
+  private async fetchCover(bookmarkId: string, coverUrl: string): Promise<void> {
+    if (!this.opts.dataDir) return;
+    const decision = checkPrivacy("server_fetch", coverUrl, this.serverRules(), {});
+    if (!decision.allowed) return;
+    const got = await (this.opts.coverFetcher ?? fetchMaterialCover)(coverUrl, this.opts.guardConfig);
+    if (!got) return;
+    const row = this.store.getMaterialByBookmark(bookmarkId);
+    if (!row) return;
+    const rel = saveCoverFile(this.opts.dataDir, row.id, got.buf, got.mime);
+    if (rel) {
+      this.store.setMaterialCover(row.id, { mime: got.mime, size: got.buf.length, url: coverUrl, relPath: rel });
+    }
   }
 
   /** F2.3 AI 摘要：有 LLM 且有正文时生成 L1；syncAi 模式供测试确定性 */
@@ -170,6 +235,8 @@ export class Pipeline {
     if (!bm) return false;
     // A1-3：调用模型前独立判定 call_model（隐私域/私密书签不外发内容）
     if (!this.serverDecide("call_model", bm.url_raw, { isPrivateBookmark: bm.is_private === 1 }).allowed) {
+      // D63：拒绝也留痕（异步规范③失败可观测；privacy_* 前缀被补扫排除，不会反复重试）
+      this.store.upsertCache({ bookmarkId, fetchedVia: "extension_capture", failReason: "privacy_call_model_denied" });
       return false;
     }
     // DEV-03：记录提交前的规则修订与实体修订（LLM 等待期间可能变化）
@@ -228,6 +295,23 @@ export class Pipeline {
     if (this.opts.syncAi) return await run();
     void run();
     return false;
+  }
+
+  /**
+   * D63 L1 摘要兜底补扫：摘要本就 fire-and-forget（async 模式 void run 不阻塞捕获），
+   * 进程重启丢在途、LLM 当时不可用都会让摘要永久缺失——常驻补扫涓流找回。
+   * 无 LLM 配置时零开销跳过；隐私/失败原因由 maybeSummarize 内部现行策略判定兜底。
+   */
+  backfillSummaries(limit = 5): number {
+    if (!this.llmFor("summarize")) return 0; // 无 LLM：零开销（规则引擎形态全靠 manual，无摘要承诺）
+    const rows = this.store.bookmarksMissingSummary(limit);
+    for (const row of rows) {
+      // maybeSummarize 内部 catch 已落 fail_reason；此处 .catch 仅防极端异常冒泡（不静默，留日志）
+      void this.maybeSummarize(row.id).catch((err: unknown) => {
+        console.warn("[summary-backfill] retry failed:", String(err).slice(0, 120));
+      });
+    }
+    return rows.length;
   }
 
   /**

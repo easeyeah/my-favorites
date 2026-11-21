@@ -11,6 +11,8 @@ export interface BookmarkImportItem {
   url: string;
   title: string;
   folderPath: string[];
+  /** D44：浏览器书签节点 id（服务端据此建 A2-1 身份映射，供镜像删除精确定位） */
+  browserId?: string;
 }
 
 interface TreeNode {
@@ -39,6 +41,7 @@ export function flattenBookmarkTree(root: TreeNode[]): BookmarkImportItem[] {
           url: node.url,
           title: (node.title ?? node.url).slice(0, MAX_TITLE) || node.url,
           folderPath: path.length > 0 ? [...path] : [],
+          browserId: node.id,
         });
         continue;
       }

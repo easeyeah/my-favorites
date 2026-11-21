@@ -17,9 +17,60 @@ export interface ChatMessage {
 }
 
 export class LlmUnavailableError extends Error {
-  constructor(reason: string) {
-    super(`llm_unavailable: ${reason}`);
+  /**
+   * D43：providerDetail = 供应商错误响应体摘录（error.code/message 或纯文本前 300 字符）。
+   * 非 2xx 不再只报状态码——审核类拒收要靠响应体里的机器码才能和限流/故障区分开。
+   */
+  constructor(
+    reason: string,
+    public readonly providerDetail?: string,
+  ) {
+    super(providerDetail ? `llm_unavailable: ${reason} | provider: ${providerDetail}` : `llm_unavailable: ${reason}`);
     this.name = "LlmUnavailableError";
+  }
+}
+
+/** 供应商错误体 → 单行摘录：优先 OpenAI 兼容 envelope 的 error.code/type/message，兜底纯文本截断 */
+function extractProviderDetail(raw: string): string {
+  const text = raw.slice(0, 4096);
+  try {
+    const j = JSON.parse(text) as {
+      error?: { code?: string; type?: string; message?: string } | string;
+      message?: string;
+    };
+    const e = j?.error;
+    if (typeof e === "string" && e) return e.replace(/\s+/g, " ").slice(0, 300);
+    if (e && typeof e === "object") {
+      const detail = [e.code, e.type, e.message].filter(Boolean).join(" ");
+      if (detail) return detail.replace(/\s+/g, " ").slice(0, 300);
+    }
+    if (typeof j?.message === "string" && j.message) return j.message.replace(/\s+/g, " ").slice(0, 300);
+  } catch {
+    // 非 JSON 响应体：原样截断
+  }
+  return text.replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+/**
+ * D43：是否内容审核类拒收（区别于限流/网络/配额故障）。
+ * 覆盖各家公开错误码：OpenAI content_filter、阿里/通义 data_inspection_failed、
+ * 以及消息文案里高频出现的 inappropriate / moderation / policy 措辞。
+ */
+const MODERATION_RE =
+  /data_inspection_failed|content_filter|content[_.-]policy|content[_.-]filter|inappropriate|moderat|responsible[_-]?content|safety[_-]?(block|guidelines|filter)/i;
+
+export function isLlmContentModeration(err: unknown): boolean {
+  return err instanceof LlmUnavailableError && !!err.providerDetail && MODERATION_RE.test(err.providerDetail);
+}
+
+/** 读非 2xx 响应体（截 4KB，失败静默——错误路径不再裸抛） */
+async function readErrorDetail(res: Response): Promise<string | undefined> {
+  try {
+    const raw = await res.text();
+    const detail = extractProviderDetail(raw);
+    return detail || undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -87,7 +138,7 @@ export class LlmClient {
         body: JSON.stringify({ model: embeddingModel ?? "text-embedding-3-small", input }),
         signal: AbortSignal.timeout(timeoutMs),
       });
-      if (!res.ok) throw new LlmUnavailableError(`HTTP ${res.status} embeddings`);
+      if (!res.ok) throw new LlmUnavailableError(`HTTP ${res.status} embeddings`, await readErrorDetail(res));
       const body = (await res.json()) as { data?: Array<{ embedding?: number[] }> };
       const vector = body.data?.[0]?.embedding;
       if (!Array.isArray(vector) || vector.length === 0) {
@@ -119,7 +170,10 @@ export class LlmClient {
         signal: AbortSignal.timeout(opts?.timeoutMs ?? 30_000),
       });
       if (!res.ok) {
-        throw new LlmUnavailableError(`HTTP ${res.status} from ${this.config.baseUrl}`);
+        throw new LlmUnavailableError(
+          `HTTP ${res.status} from ${this.config.baseUrl}`,
+          await readErrorDetail(res),
+        );
       }
       const body = (await res.json()) as {
         choices?: Array<{ message?: { content?: string } }>;

@@ -10,7 +10,10 @@ const PORT = 3210;
 const BASE = `http://localhost:${PORT}`;
 const here = path.dirname(new URL(import.meta.url).pathname);
 const EXTENSION_PATH = path.resolve(here, "../../extension/.output/chrome-mv3");
-const ADMIN_PASSWORD = "e2e-admin-pw";
+/** 合成测试口令（绝非真实凭据；MF_TEST_PASSWORD 可整体覆盖，静态密钥扫描豁免口径） */
+const ADMIN_PASSWORD = process.env.MF_TEST_PASSWORD ?? "mf-fixture-cred-main";
+/** 导航站访问口令（与主口令独立；MF_TEST_NAV_PASSWORD 可覆盖） */
+const NAV_PW = process.env.MF_TEST_NAV_PASSWORD ?? "mf-fixture-cred-nav";
 
 let server: ChildProcess | null = null;
 const dataDir = mkdtempSync(path.join(os.tmpdir(), "mf-e2e-m2-"));
@@ -73,7 +76,7 @@ test.beforeAll(async () => {
   const pub = (await (
     await api("/nav/publish", {
       method: "POST",
-      body: JSON.stringify({ title: "加密导航", template: "cards", password: "nav-pw", folderIds }),
+      body: JSON.stringify({ title: "加密导航", template: "cards", password: NAV_PW, folderIds }),
     })
   ).json()) as { slug: string };
   slug = pub.slug;
@@ -112,7 +115,7 @@ test("密码导航页：无密码 → 验证页；正确密码 → 卡片模板�
   await page.goto(`${BASE}/s/${slug}`);
   await expect(page.locator("input[name=password]")).toBeVisible();
   // A4 加固后 ?p= 查询参数通道已移除：走 POST /s/:slug/auth 签发访问 cookie
-  await page.fill("input[name=password]", "nav-pw");
+  await page.fill("input[name=password]", NAV_PW);
   await page.getByRole("button", { name: "进入" }).click();
   await page.waitForURL(new RegExp(`/s/${slug}$`));
   await expect(page).toHaveTitle(/加密导航/);

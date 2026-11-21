@@ -7,6 +7,7 @@
  *  - 监听循环保护：自己执行的移动不再触发收件箱处理（mirrorGuard）
  */
 import { browser } from "wxt/browser";
+import { VIRTUAL_BOOKMARK_ROOT_TITLES as VIRTUAL_SHELL_TITLES } from "@mf/shared";
 import { api, getConfig, saveConfig } from "./api";
 
 const DEVICE_ID_KEY = "mfDeviceId";
@@ -128,24 +129,44 @@ async function ensureMirrorFolder(folderName: string): Promise<string> {
 }
 
 /** 拉取并执行浏览器镜像操作（每条回执） */
-export async function runMirrorOps(): Promise<{ executed: number; failed: number }> {
+export async function runMirrorOps(): Promise<{
+  executed: number;
+  failed: number;
+  cancelled: number;
+  reorderedNodes: number;
+}> {
   const deviceId = await getDeviceId();
   let executed = 0;
   let failed = 0;
+  let cancelled = 0;
+  let reorderedNodes = 0;
   let ops: Array<{
     id: number;
     op: string;
     browser_bookmark_id: string | null;
     target_browser_parent_id: string | null;
-    payload: { folderName?: string } | null;
+    payload: { folderName?: string; url?: string; title?: string; order?: string[] } | null;
   }>;
   try {
     ops = (await api<{ ops: typeof ops }>(`/browser/ops?deviceId=${encodeURIComponent(deviceId)}`, {})).ops;
   } catch {
-    return { executed: 0, failed: 0 }; // 服务端不可达：下次再试
+    return { executed: 0, failed: 0, cancelled: 0, reorderedNodes: 0 }; // 服务端不可达：下次再试
   }
+  // D46：总开关状态决定旧镜像操作的处置（循环外读一次）
+  const { favoritesSync = false, syncDeleteToBrowser = false } = await getConfig();
   for (const o of ops) {
     try {
+      // 总开关开启时，放置/排序由同步引擎负责——旧镜像 move/reorder 操作直接终结，
+      // 避免两套机制互相搬动同一节点（引擎每 tick 会按库状态收敛，结果一致且更完整）
+      if (favoritesSync && (o.op === "move" || o.op === "reorder")) {
+        await api(`/browser/ops/${o.id}/result`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "cancelled", error: "superseded_by_full_sync" }),
+        });
+        cancelled++;
+        continue;
+      }
       if (o.op === "move" && o.browser_bookmark_id && o.target_browser_parent_id?.startsWith("mf-folder:")) {
         const folderName = o.payload?.folderName ?? o.target_browser_parent_id.slice("mf-folder:".length);
         await withMirrorGuard(async () => {
@@ -154,6 +175,47 @@ export async function runMirrorOps(): Promise<{ executed: number; failed: number
           if (node[0]) {
             await browser.bookmarks.move(o.browser_bookmark_id!, { parentId: targetParent });
           }
+        });
+      } else if (o.op === "reorder") {
+        // D45：按管理台顺序就地重排——书签可能在自己的浏览器原生文件夹（导入而来），
+        // 也可能在 mf-整理 镜像文件夹（归位移动而来）。一律「不搬家」：按各节点
+        // 实际所在父文件夹分组，在组内按管理台顺序移到连续位次（置顶/新入库在前，
+        // 未映射书签顺延其后）。绝不预建镜像文件夹（旧实现空跑也会建出空壳）。
+        const order = o.payload?.order ?? [];
+        if (order.length > 0) {
+          const moved = await withMirrorGuard(async () => {
+            const seenPerParent = new Map<string, number>();
+            let n = 0;
+            for (const nodeId of order) {
+              if (!nodeId) continue;
+              const node = (await browser.bookmarks.get(nodeId).catch(() => []))[0];
+              const parentId = node?.parentId;
+              if (!parentId || node?.url === undefined) continue; // 仅书签叶子
+              const idx = seenPerParent.get(parentId) ?? 0;
+              seenPerParent.set(parentId, idx + 1);
+              await browser.bookmarks.move(nodeId, { parentId, index: idx });
+              n++;
+            }
+            return n;
+          });
+          reorderedNodes += moved;
+        }
+      } else if (o.op === "remove" && o.browser_bookmark_id) {
+        // D44 受控镜像删除（D46 起并入总开关）：未开启同步 → 显式回执 cancelled
+        //（不留 pending：否则日后开启会「补删」历史删除，违背当时用户意图）
+        if (!favoritesSync && !syncDeleteToBrowser) {
+          await api(`/browser/ops/${o.id}/result`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status: "cancelled", error: "sync_delete_disabled" }),
+          });
+          cancelled++;
+          continue;
+        }
+        await withMirrorGuard(async () => {
+          const node = (await browser.bookmarks.get(o.browser_bookmark_id!).catch(() => []))[0];
+          // 只删书签叶子；节点已不存在视为已删（幂等），文件夹形态身份异常则不动
+          if (node?.url) await browser.bookmarks.remove(o.browser_bookmark_id!);
         });
       }
       await api(`/browser/ops/${o.id}/result`, {
@@ -171,5 +233,48 @@ export async function runMirrorOps(): Promise<{ executed: number; failed: number
       }).catch(() => undefined);
     }
   }
-  return { executed, failed };
+  return { executed, failed, cancelled, reorderedNodes };
+}
+
+/**
+ * D45 清理：删除扩展落地点文件夹中「没有任何内容」的空壳——
+ *  - mf-整理 下的空子文件夹（历史 reorder 空跑会误建）；mf-整理 根全空则连根删；
+ *  - 「my-favorites 同步」空根（F1.7 反向同步旧实现先建文件夹后判断，0 条也留壳）。
+ * 只删真空文件夹，真实归位/同步书签所在目录不受影响。
+ */
+export async function pruneEmptyMirrorFolders(): Promise<number> {
+  const barChildren = await browser.bookmarks.getChildren("1").catch(() => []);
+  let pruned = 0;
+  const isEmptyFolder = async (id: string): Promise<boolean> =>
+    (await browser.bookmarks.getChildren(id).catch(() => [])).length === 0;
+  // D55：清理引擎误建的虚拟根名空壳（如顶层「收藏夹栏」文件夹——正常浏览器不存在此物）
+  for (const n of barChildren) {
+    if (!n.url && n.id !== "1" && n.id !== "2" && (n.title ?? "").trim() && (await isEmptyFolder(n.id))) {
+      const isVirtShell = VIRTUAL_SHELL_TITLES.has((n.title ?? "").trim());
+      if (isVirtShell) {
+        await browser.bookmarks.removeTree(n.id).catch(() => undefined);
+        pruned++;
+      }
+    }
+  }
+  const syncRoot = barChildren.find((n) => !n.url && n.title === "my-favorites 同步");
+  if (syncRoot && (await isEmptyFolder(syncRoot.id))) {
+    await browser.bookmarks.removeTree(syncRoot.id).catch(() => undefined);
+    pruned++;
+  }
+  const root = barChildren.find((n) => !n.url && n.title === "mf-整理");
+  if (root) {
+    const children = await browser.bookmarks.getChildren(root.id).catch(() => []);
+    for (const child of children) {
+      if (child.url) continue;
+      if (await isEmptyFolder(child.id)) {
+        await browser.bookmarks.removeTree(child.id).catch(() => undefined);
+        pruned++;
+      }
+    }
+    if (await isEmptyFolder(root.id)) {
+      await browser.bookmarks.removeTree(root.id).catch(() => undefined);
+    }
+  }
+  return pruned;
 }

@@ -188,7 +188,7 @@ export function Overview() {
                 className="hover:bg-accent/50 flex w-full items-center gap-2.5 px-1.5 py-1.5 text-left transition-colors"
                 onClick={() => go("bookmarks")}
               >
-                <SiteIcon title={b.title} url={b.url_canonical} size="sm" />
+                <SiteIcon title={b.title} url={b.url_canonical} faviconUrl={b.favicon_url} size="sm" />
                 <span className="min-w-0 flex-1 truncate text-[13px]">
                   {b.is_private === 1 && <span className="mr-0.5 text-xs">🛡</span>}
                   {b.title}

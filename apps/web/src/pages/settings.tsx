@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { Bell, Check, ChevronRight, Cloud, Database, Download, FileUp, HardDrive, Loader2, Plug, Plus, ShieldCheck, Sparkles, Trash2, Upload, Webhook } from "lucide-react";
+import { Bell, Check, ChevronRight, Cloud, Database, Download, FileUp, HardDrive, Loader2, Plug, Plus, ScrollText, ShieldCheck, Sparkles, Trash2, Upload, Webhook } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Btn, EmptyHint, PageScroll, Switch, downloadBlob, setNotifyStyle, toast } from "@/components/shared";
+import { Btn, EmptyHint, PageScroll, Switch, downloadBlob, setNotifyStyle, timeAgo, toast } from "@/components/shared";
 import { useRoute, useShell } from "@/components/layout";
 import { PROVIDERS } from "@mf/ai";
 import { MODULES } from "@/lib/modules";
@@ -46,6 +46,7 @@ const SECTIONS: Array<{ sub: string; icon: ReactNode; title: string; desc: strin
   { sub: "privacy", icon: <ShieldCheck className="size-4" />, title: "隐私保护", desc: "域名清单：不抓取、不送 AI、不出站", content: () => <PrivacyCard /> },
   { sub: "data", icon: <Download className="size-4" />, title: "数据", desc: "JSON / HTML 导入导出，随时带走", content: () => <DataCard /> },
   { sub: "webhooks", icon: <Webhook className="size-4" />, title: "集成与自动化", desc: "出站 Webhook：收藏动作触发外部工具", content: () => <WebhooksCard /> },
+  { sub: "audit", icon: <ScrollText className="size-4" />, title: "操作日志", desc: "登录 / 令牌 / 配置 / 发布的审计记录（只读，D58）", content: () => <AuditCard /> },
 ];
 
 export function Settings() {
@@ -1485,5 +1486,89 @@ function ImportDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ---------- 操作日志（D58：审计只读视图，服务端保留最近 1000 条） ----------
+
+interface AuditEvent {
+  id: number;
+  kind: string;
+  detail: string | null;
+  source: string | null;
+  created_at: string;
+}
+
+/** kind → 徽章文案 + 语义色（失效=红 / 限速=琥珀 / 正常=绿，规范同状态点） */
+const AUDIT_KINDS: Record<string, { label: string; badge: "destructive" | "warning" | "success" | "secondary" | "outline" }> = {
+  "auth.login": { label: "登录", badge: "success" },
+  "auth.failed": { label: "登录失败", badge: "destructive" },
+  "auth.rate_limited": { label: "限速", badge: "warning" },
+  "setup.done": { label: "初始化", badge: "secondary" },
+  "token.revoked": { label: "令牌", badge: "secondary" },
+  "provider.saved": { label: "AI 配置", badge: "outline" },
+  "settings.changed": { label: "偏好", badge: "outline" },
+  "webhook.saved": { label: "Webhook", badge: "outline" },
+  "webhook.removed": { label: "Webhook", badge: "outline" },
+  "nav.published": { label: "发布", badge: "outline" },
+  "nav.unpublished": { label: "下线", badge: "outline" },
+};
+
+function AuditCard() {
+  const { cfg } = useShell();
+  const [events, setEvents] = useState<AuditEvent[] | null>(null);
+
+  const load = useCallback(() => {
+    apiCall<{ events: AuditEvent[] }>(cfg, "/audit?limit=200")
+      .then((r) => setEvents(r.events))
+      .catch(() => setEvents([]));
+  }, [cfg]);
+
+  useEffect(load, [load]);
+
+  return (
+    <div className="text-sm">
+      <SectionTitle
+        right={
+          <Btn onClick={load} disabled={events === null}>
+            刷新
+          </Btn>
+        }
+      >
+        最近动作 · 只读
+      </SectionTitle>
+      {events === null ? (
+        <EmptyHint>加载中…</EmptyHint>
+      ) : events.length === 0 ? (
+        <EmptyHint>暂无记录</EmptyHint>
+      ) : (
+        <ul className="divide-border/60 divide-y">
+          {events.map((e) => {
+            const k = AUDIT_KINDS[e.kind] ?? { label: e.kind, badge: "outline" as const };
+            return (
+              <li key={e.id} className="flex items-center gap-3 py-2.5">
+                <Badge variant={k.badge} className="w-[64px] shrink-0 justify-center px-1.5 py-0 text-[10px] font-normal">
+                  {k.label}
+                </Badge>
+                <span className="min-w-0 flex-1 truncate" title={e.detail ?? undefined}>
+                  {e.detail ?? e.kind}
+                </span>
+                <span className="text-muted-foreground hidden shrink-0 text-xs sm:inline">{e.source ?? ""}</span>
+                <time
+                  className="text-muted-foreground w-[76px] shrink-0 text-right text-xs"
+                  title={e.created_at}
+                  dateTime={e.created_at}
+                >
+                  {timeAgo(e.created_at)}
+                </time>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <p className="text-muted-foreground mt-2 text-[11px]">
+        服务端记录登录、令牌、配置与发布动作；不含书签内容，绝不落密码与令牌，保留最近 1000 条。
+      </p>
+    </div>
   );
 }

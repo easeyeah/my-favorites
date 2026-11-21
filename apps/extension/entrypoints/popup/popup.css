@@ -1,23 +1,19 @@
 @import "tailwindcss" source("../../");
 
-/* popup 顶部标签页（原型 06：窄容器统一导航语法） */
-.ptabs {
-  display: flex;
-  gap: 2px;
-  padding: 8px 10px 0;
-  border-bottom: 1px solid rgb(229 229 234);
-  align-items: center;
+/* 明暗双主题显式声明：原生表单控件（下拉/复选框/输入框/滚动条）与画布跟随浏览器当前主题
+ * ——「与浏览器融为一体」的最后一环（Chrome 不让扩展读浏览器主题色，但 color-scheme 有效） */
+:root {
+  color-scheme: light dark;
 }
-.dark .ptabs { border-bottom-color: rgb(63 63 70); }
-.ptab {
-  padding: 7px 10px;
-  font-size: 12.5px;
-  color: rgb(113 113 122);
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.ptab.on { color: rgb(24 24 27); border-bottom-color: rgb(24 24 27); }
-.dark .ptab.on { color: rgb(244 244 245); border-bottom-color: rgb(244 244 245); }
-.ptab.right { margin-left: auto; }
+
+/* popup 融合策略（2026-11-20 定稿，替换同日「内层卡片」方案——外框既然不可定制，自绘窗体两头不靠）：
+ * 内容贴边、交由浏览器原生气泡裁切；白底即气泡底色；
+ * 分层只用浅底填充 + 细分隔线，边框仅保留功能件（输入框/下拉/kbd）。 */
+
+/* 定高面板内容区细滚动条（与管理台 .scroll-slim 同款：固定高度区允许内部滚动） */
+.scroll-slim::-webkit-scrollbar { width: 6px; }
+.scroll-slim::-webkit-scrollbar-track { background: transparent; }
+.scroll-slim::-webkit-scrollbar-thumb { background: rgb(212 212 216); border-radius: 3px; }
+.scroll-slim::-webkit-scrollbar-thumb:hover { background: rgb(161 161 170); }
+
+/* 页签制已取消（2026-11-20 单面化）：.ptabs/.ptab 样式随之删除 */

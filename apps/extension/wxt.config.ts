@@ -14,7 +14,7 @@ export default defineConfig({
       "48": "/icon/48.png",
       "128": "/icon/128.png",
     },
-    permissions: ["bookmarks", "activeTab", "contextMenus", "storage", "unlimitedStorage", "scripting", "tabs", "pageCapture"],
+    permissions: ["bookmarks", "activeTab", "contextMenus", "storage", "unlimitedStorage", "scripting", "tabs", "pageCapture", "alarms"],
     // 快速收藏快捷键（原型 02：Ctrl+Shift+S）
     commands: {
       "quick-save": {

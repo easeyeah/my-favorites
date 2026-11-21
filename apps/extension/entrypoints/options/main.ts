@@ -2,6 +2,7 @@
  * options 页逻辑（DOM 操作版——页面自带样式，无需 React）。
  * 与 popup 共享 src/lib/api 的 storage 配置。
  */
+import { browser } from "wxt/browser";
 import { api, getConfig, saveConfig } from "../../src/lib/api";
 
 const $ = (id: string) => document.getElementById(id) as HTMLInputElement;
@@ -24,6 +25,17 @@ $("save").addEventListener("click", async () => {
   await saveConfig({ serverUrl: serverInput.value.replace(/\/$/, "") });
   msg($("msg-connect"), "✅ 已保存");
   setTimeout(() => ($("msg-connect").textContent = ""), 2000);
+});
+
+// 打开管理台：web 管理台由服务端同源托管，地址 = 当前配置的 serverUrl（深链到概览页）
+$("open-admin").addEventListener("click", async () => {
+  const el = $("msg-connect");
+  const { serverUrl } = await getConfig();
+  if (!serverUrl) {
+    msg(el, "请先填写并保存服务端地址", false);
+    return;
+  }
+  await browser.tabs.create({ url: `${serverUrl.replace(/\/$/, "")}/#overview` });
 });
 
 $("test").addEventListener("click", async () => {
@@ -90,36 +102,101 @@ $("login").addEventListener("click", async () => {
   }
 });
 
-$("import").addEventListener("click", async () => {
-  const el = $("msg-data");
-  msg(el, "导入中…");
-  await browser.runtime.sendMessage(
-    { type: "import-bookmarks" },
-    (res: { imported?: number; total?: number; skipped_duplicate?: number; error?: string } | undefined) => {
-      // MV3：background 异常时回调收到 undefined + lastError
-      const lastErr = (globalThis as unknown as { chrome?: { runtime?: { lastError?: { message?: string } } } }).chrome?.runtime?.lastError?.message;
-      if (res?.imported !== undefined) {
-        msg(el, `✅ 已导入 ${res.imported}/${res.total} 条（重复 ${res.skipped_duplicate ?? 0} 跳过）`);
-      } else {
-        msg(el, `❌ 导入失败：${res?.error ?? lastErr ?? "服务端未连接（先启动 Docker 并点上方「测试连接」）"}`, false);
-      }
-    },
-  );
+// ---------- D46 收藏夹双向同步（总开关 + 立即同步 + 状态行 + 删除保险丝确认） ----------
+interface SyncInfoView {
+  at?: number;
+  phase?: string;
+  ok?: boolean;
+  error?: string;
+  deleteGuard?: { side: "browser" | "library"; count: number };
+  stats?: Record<string, number | undefined>;
+}
+const syncMaster = $("sync-master");
+const syncStatusLine = $("sync-status-line");
+const guardRow = $("sync-guard-row");
+let syncActionInFlight = false; // 开关/立即同步进行中：禁止状态刷新覆写 checkbox
+
+function paintSyncStatus(info: SyncInfoView | undefined, on: boolean): void {
+  if (!on) {
+    syncStatusLine.textContent = "同步已关闭。开启后浏览器收藏夹将自动与管理台保持一致。";
+    guardRow.style.display = "none";
+    return;
+  }
+  const parts: string[] = [];
+  if (info?.at) parts.push(`上次同步 ${new Date(info.at).toLocaleString()}`);
+  if (info && !info.ok) parts.push(`⚠️ ${info.error ?? "上次同步失败"}`);
+  const s = info?.stats ?? {};
+  const detail = [
+    s.pulledApplied ? `库→浏览器 ${s.pulledApplied}` : "",
+    s.pushedOk ? `浏览器→库 ${s.pushedOk}` : "",
+    s.createdInBrowser ? `浏览器新建 ${s.createdInBrowser}` : "",
+    s.deletedBrowser ? `浏览器删除 ${s.deletedBrowser}` : "",
+    s.deletedLibrary ? `库删除 ${s.deletedLibrary}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (detail) parts.push(detail);
+  syncStatusLine.textContent = parts.length > 0 ? parts.join(" ｜ ") : "同步已开启，等待首次收敛…";
+  if (info?.deleteGuard) {
+    guardRow.style.display = "flex";
+    msg(
+      $("msg-sync"),
+      `⚠️ 检测到 ${info.deleteGuard.count} 条${info.deleteGuard.side === "browser" ? "浏览器侧" : "库侧"}批量删除，已暂停以防误删。确认无误后点下方按钮放行。`,
+      false,
+    );
+  } else {
+    guardRow.style.display = "none";
+  }
+}
+
+async function refreshSyncStatus(): Promise<void> {
+  await browser.runtime.sendMessage({ type: "sync-status" }, (res: { on?: boolean; info?: SyncInfoView } | undefined) => {
+    if (!syncActionInFlight) syncMaster.checked = res?.on === true;
+    paintSyncStatus(res?.info, syncMaster.checked);
+  });
+}
+void refreshSyncStatus();
+
+syncMaster.addEventListener("change", async () => {
+  const on = syncMaster.checked;
+  syncActionInFlight = true;
+  msg($("msg-sync"), on ? "正在全量对齐（首次可能需数十秒，请勿关闭本页）…" : "正在关闭…");
+  await browser.runtime.sendMessage({ type: "sync-set", on }, (res: { info?: SyncInfoView; error?: string } | undefined) => {
+    if (!res || res.error) {
+      msg($("msg-sync"), `❌ ${res?.error ?? "同步服务不可达（先测试连接）"}`, false);
+      syncActionInFlight = false;
+      void refreshSyncStatus();
+      return;
+    }
+    msg($("msg-sync"), on ? "✅ 已开启并完成全量对齐" : "✅ 已关闭同步（浏览器现有书签保留）");
+    setTimeout(() => ($("msg-sync").textContent = ""), 3000);
+    syncActionInFlight = false;
+  });
+  await refreshSyncStatus();
 });
 
-$("sync").addEventListener("click", async () => {
-  const el = $("msg-data");
-  msg(el, "同步中…");
-  await browser.runtime.sendMessage(
-    { type: "sync-mirror" },
-    (res: { added?: number; error?: string } | undefined) => {
-      if (res?.added !== undefined) {
-        msg(el, `✅ 已镜像 ${res.added} 条到浏览器「my-favorites 同步」`);
-      } else {
-        msg(el, `❌ 同步失败：${res?.error ?? "未知"}`, false);
-      }
-    },
-  );
+$("sync-now").addEventListener("click", async () => {
+  syncActionInFlight = true;
+  msg($("msg-sync"), "同步中…");
+  await browser.runtime.sendMessage({ type: "sync-now" }, (res: { info?: SyncInfoView; error?: string } | undefined) => {
+    if (!res || res.error) {
+      msg($("msg-sync"), `❌ ${res?.error ?? "同步服务不可达"}`, false);
+      syncActionInFlight = false;
+      return;
+    }
+    msg($("msg-sync"), res.info?.ok === false ? `❌ ${res.info.error ?? "同步失败"}` : "✅ 同步完成");
+    setTimeout(() => ($("msg-sync").textContent = ""), 3000);
+    syncActionInFlight = false;
+  });
+  await refreshSyncStatus();
+});
+
+$("sync-confirm-delete").addEventListener("click", async () => {
+  msg($("msg-sync"), "正在执行确认的批量删除…");
+  await browser.runtime.sendMessage({ type: "sync-now", confirmDeletes: true }, () => undefined);
+  msg($("msg-sync"), "✅ 已按确认放行删除并完成同步");
+  setTimeout(() => ($("msg-sync").textContent = ""), 3000);
+  await refreshSyncStatus();
 });
 
 $("inbox").addEventListener("click", async () => {

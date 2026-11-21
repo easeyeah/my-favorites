@@ -1,7 +1,7 @@
 /** M2/M3：鉴权/同步/死链/查重/体检/语义/BYOK/偏好/模板/密码/配额/私密/迁移 */
 import http from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { makeEnv, type TestEnv } from "./test-env";
+import { fixtureDummyApiKey, fixturePassword, makeEnv, type TestEnv } from "./test-env";
 import { checkLink } from "./maintenance";
 
 let env: TestEnv;
@@ -27,7 +27,7 @@ async function seed(env: TestEnv): Promise<void> {
 
 describe("鉴权（F6.2 ADMIN_PASSWORD）", () => {
   it("启用后：未带 token 全部 401；登录后放行", async () => {
-    env = makeEnv(null, false, { adminPassword: "secret-123" });
+    env = makeEnv(null, false, { adminPassword: fixturePassword("main") });
     await seed(env);
     const noAuth = await env.app.request("/api/v1/bookmarks");
     expect(noAuth.status).toBe(401);
@@ -35,14 +35,14 @@ describe("鉴权（F6.2 ADMIN_PASSWORD）", () => {
     const badLogin = await env.app.request("/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ password: "wrong" }),
+      body: JSON.stringify({ password: fixturePassword("wrong") }),
     });
     expect(badLogin.status).toBe(401);
 
     const goodLogin = await env.app.request("/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ password: "secret-123", label: "e2e" }),
+      body: JSON.stringify({ password: fixturePassword("main"), label: "e2e" }),
     });
     const { token } = (await goodLogin.json()) as { token: string };
     // DEV-05：随机 32 字节 base64url（43 字符）；库内仅摘要
@@ -211,7 +211,7 @@ describe("语义搜索 + BYOK（F7.2 / F3.7）", () => {
         body: JSON.stringify({
           providerId: "deepseek",
           baseUrl: "http://127.0.0.1:31809/v1",
-          apiKey: "sk-secret",
+          apiKey: fixtureDummyApiKey(),
           purposeModels: { organize: "deepseek-chat", embedding: "deepseek-emb" },
         }),
       })
@@ -357,24 +357,24 @@ describe("导航模板 + 密码访问（F4.2/F4.4 + DEV-01 显式发布集合）
   it("密码访问：POST 验证 + HttpOnly cookie；?p= 查询参数通道已移除", async () => {
     env = makeEnv();
     await seed(env);
-    const pub = await publishAll(env, { title: "加密站", password: "pass123" });
+    const pub = await publishAll(env, { title: "加密站", password: fixturePassword("pass") });
     const locked = await (await env.app.request(`/s/${pub.slug}`)).text();
     expect(locked).toContain("访问验证");
 
     // 旧查询参数通道：不再放行（带 ?p= 仍显示验证页）
-    const viaQuery = await (await env.app.request(`/s/${pub.slug}?p=pass123`)).text();
+    const viaQuery = await (await env.app.request(`/s/${pub.slug}?p=${fixturePassword("pass")}`)).text();
     expect(viaQuery).toContain("访问验证");
 
     // POST 正确密码 → 303 + Set-Cookie（HttpOnly）→ 带 cookie 可进入
     const auth = await env.app.request(`/s/${pub.slug}/auth`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: "password=pass123",
+      body: `password=${fixturePassword("pass")}`,
     });
     expect(auth.status).toBe(303);
     const setCookie = auth.headers.get("set-cookie") ?? "";
     expect(setCookie).toContain("HttpOnly");
-    expect(setCookie).not.toContain("pass123"); // cookie 不含密码本身
+    expect(setCookie).not.toContain(fixturePassword("pass")); // cookie 不含密码本身
     const cookie = setCookie.split(";")[0]!;
     const opened = await env.app.request(`/s/${pub.slug}`, {
       headers: { cookie },
@@ -388,7 +388,7 @@ describe("导航模板 + 密码访问（F4.2/F4.4 + DEV-01 显式发布集合）
     const wrong = await env.app.request(`/s/${pub.slug}/auth`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: "password=wrongpass",
+      body: `password=${fixturePassword("wrongpass")}`,
     });
     expect(wrong.status).toBe(401);
     expect(await wrong.text()).toContain("访问验证");

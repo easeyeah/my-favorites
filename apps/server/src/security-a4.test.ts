@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeEnv, type TestEnv } from "./test-env";
+import { fixtureDummyApiKey, fixtureInvalidSetupToken, fixturePassword, makeEnv, type TestEnv } from "./test-env";
 import { clearLoginFailures } from "./security";
 import {
   extractHtmlFromMhtml,
@@ -34,7 +34,7 @@ describe("A4-1 + DEV-05 非开发部署首启强制凭据与引导流程", () =>
     await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ password: "a-strong-password-123" }),
+      body: JSON.stringify({ password: fixturePassword("main") }),
     });
     return readFileSync(path.join(env.dataDir, "bootstrap-token.txt"), "utf8").trim();
   }
@@ -52,7 +52,7 @@ describe("A4-1 + DEV-05 非开发部署首启强制凭据与引导流程", () =>
     const noToken = await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ password: "a-strong-password-123" }),
+      body: JSON.stringify({ password: fixturePassword("main") }),
     });
     expect(noToken.status).toBe(403);
 
@@ -64,13 +64,13 @@ describe("A4-1 + DEV-05 非开发部署首启强制凭据与引导流程", () =>
     const setup = await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json", "x-mf-setup-token": bootstrap },
-      body: JSON.stringify({ password: "a-strong-password-123" }),
+      body: JSON.stringify({ password: fixturePassword("main") }),
     });
     expect(setup.status).toBe(200);
     const replay = await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json", "x-mf-setup-token": bootstrap },
-      body: JSON.stringify({ password: "another-password-456" }),
+      body: JSON.stringify({ password: fixturePassword("second") }),
     });
     expect(replay.status).toBe(400);
     expect(((await replay.json()) as { error: string }).error).toBe("already_initialized");
@@ -81,7 +81,7 @@ describe("A4-1 + DEV-05 非开发部署首启强制凭据与引导流程", () =>
     const loginRes = await env.app.request("/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ password: "a-strong-password-123", label: "test" }),
+      body: JSON.stringify({ password: fixturePassword("main"), label: "test" }),
     });
     const { token } = (await loginRes.json()) as { token: string };
     const ok = await env.app.request("/api/v1/bookmarks", {
@@ -96,24 +96,24 @@ describe("A4-1 + DEV-05 非开发部署首启强制凭据与引导流程", () =>
     const weak = await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json", "x-mf-setup-token": await bootstrapOf(env) },
-      body: JSON.stringify({ password: "short" }),
+      body: JSON.stringify({ password: fixturePassword("short") }),
     });
     expect(weak.status).toBe(400);
     const badToken = await env.app.request("/api/v1/admin/setup", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-mf-setup-token": "wrong-token-xxx" },
-      body: JSON.stringify({ password: "a-strong-password-123" }),
+      headers: { "content-type": "application/json", "x-mf-setup-token": fixtureInvalidSetupToken() },
+      body: JSON.stringify({ password: fixturePassword("main") }),
     });
     expect(badToken.status).toBe(403);
     await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json", "x-mf-setup-token": await bootstrapOf(env) },
-      body: JSON.stringify({ password: "a-strong-password-123" }),
+      body: JSON.stringify({ password: fixturePassword("main") }),
     });
     const again = await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json", "x-mf-setup-token": await bootstrapOf(env) },
-      body: JSON.stringify({ password: "another-password-456" }),
+      body: JSON.stringify({ password: fixturePassword("second") }),
     });
     expect(again.status).toBe(400);
   });
@@ -124,14 +124,14 @@ describe("A4-1 + DEV-05 非开发部署首启强制凭据与引导流程", () =>
     await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json", "x-mf-setup-token": await bootstrapOf(env) },
-      body: JSON.stringify({ password: "a-strong-password-123" }),
+      body: JSON.stringify({ password: fixturePassword("main") }),
     });
     let last = 0;
     for (let i = 0; i < 6; i++) {
       const res = await env.app.request("/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ password: "wrong-password" }),
+        body: JSON.stringify({ password: fixturePassword("wrong") }),
       });
       last = res.status;
     }
@@ -144,12 +144,12 @@ describe("A4-1 + DEV-05 非开发部署首启强制凭据与引导流程", () =>
     await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json", "x-mf-setup-token": await bootstrapOf(env) },
-      body: JSON.stringify({ password: "a-strong-password-123" }),
+      body: JSON.stringify({ password: fixturePassword("main") }),
     });
     const loginBody = {
       method: "POST",
       headers: { "content-type": "application/json", "x-forwarded-for": "10.9.9.9" },
-      body: JSON.stringify({ password: "a-strong-password-123" }),
+      body: JSON.stringify({ password: fixturePassword("main") }),
     };
     const { token } = (await (await env.app.request("/auth/login", loginBody)).json()) as { token: string };
     const logout = await env.app.request("/api/v1/auth/logout", {
@@ -242,20 +242,20 @@ describe("A4-2 Provider Key 加密", () => {
       body: JSON.stringify({
         providerId: "deepseek",
         baseUrl: "https://api.deepseek.com/v1",
-        apiKey: "sk-live-secret-999",
+        apiKey: fixtureDummyApiKey(),
         purposeModels: { organize: "deepseek-chat" },
       }),
     });
     const raw = env.store.db
       .prepare("SELECT api_key FROM provider_config")
       .get() as { api_key: string | null };
-    expect(raw.api_key).not.toContain("sk-live-secret-999");
+    expect(raw.api_key).not.toContain(fixtureDummyApiKey());
     expect(raw.api_key?.startsWith("v1:")).toBe(true);
     const list = (await (
       await env.app.request("/api/v1/settings/providers")
     ).json()) as Array<{ api_key: string | null }>;
     expect(list[0]?.api_key).toBe("********");
-    expect(env.store.enabledProviderConfigs()[0]?.api_key).toBe("sk-live-secret-999"); // 使用时解密
+    expect(env.store.enabledProviderConfigs()[0]?.api_key).toBe(fixtureDummyApiKey()); // 使用时解密
   });
 });
 

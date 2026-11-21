@@ -57,10 +57,16 @@ import {
     type BookmarkDetail,
     type FolderTreeNode,
     type LinkCheckReport,
+    type InboxPlaced,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 const PAGE = 100
+
+// 收纳盒显示名唯一出口（E2E inbox-label.spec 回归锁死）：数据层目录名已固化「📥 收纳盒」（D36），
+// mock 演示数据为裸「收纳盒」——先剥前导图标（含历史脏数据的多层重复），再统一补恰好一个。
+// 新增渲染点禁止手拼 `📥 ${name}`，一律调用本函数。
+const inboxLabel = (name: string): string => `📥 ${name.replace(/^(?:\u{1F4E5}\s*)+/u, "")}`
 
 type StatusFilter = 'all' | 'dead' | 'normal' | 'archived' | 'duplicate'
 // 「正常」不设筛选：全部 vs 正常 只差那几条坏链接，而坏链接正是需要看见的（有圆点标记 + 自动化动态播报），
@@ -123,6 +129,29 @@ export function Library() {
     const listWrapRef = useRef<HTMLDivElement | null>(null)
     const anchorFolder = useRef<string | null>(null)
     const [addOpen, setAddOpen] = useState(false)
+    // ---- D52 编辑：详情面板内联编辑表单 + 列表行右键菜单 ----
+    const [editing, setEditing] = useState(false)
+    const [editForm, setEditForm] = useState({ title: '', url: '', description: '' })
+    const [savingEdit, setSavingEdit] = useState(false)
+    const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; b: Bookmark } | null>(null)
+    // D54：收纳盒「最近自动归位」区（去向可见 + 可撤销）
+    const [placedRows, setPlacedRows] = useState<InboxPlaced[] | null>(null)
+
+    useEffect(() => {
+        if (!ctxMenu) return
+        const close = () => setCtxMenu(null)
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setCtxMenu(null)
+        }
+        window.addEventListener('mousedown', close)
+        window.addEventListener('resize', close)
+        window.addEventListener('keydown', onKey)
+        return () => {
+            window.removeEventListener('mousedown', close)
+            window.removeEventListener('resize', close)
+            window.removeEventListener('keydown', onKey)
+        }
+    }, [ctxMenu])
 
     // 树的行内编辑状态
     const [creating, setCreating] = useState<{ parentId: string | null } | null>(null)
@@ -297,6 +326,8 @@ export function Library() {
         setQ('')
         setReorgActive(false)
         setHistoryActive(false)
+        // 收纳盒视图没有失效/重复/已归档语义，进入时清掉残留状态筛选，防右上按钮被收起后无处取消
+        if (inboxNode && id === inboxNode.id) setStatusFilter('all')
     }
 
     const doSearch = async (kw?: string) => {
@@ -335,10 +366,10 @@ export function Library() {
     const flatFolders = useMemo(() => {
         const byId = new Map(tree.map(f => [f.id, f]))
         return tree.map(f => {
-            const parts = [f.is_system_inbox === 1 ? `📥 ${f.name}` : f.name]
+            const parts = [f.is_system_inbox === 1 ? inboxLabel(f.name) : f.name]
             let p = f.parent_id ? byId.get(f.parent_id) : undefined
             while (p) {
-                parts.unshift(p.is_system_inbox === 1 ? `📥 ${p.name}` : p.name)
+                parts.unshift(p.is_system_inbox === 1 ? inboxLabel(p.name) : p.name)
                 p = p.parent_id ? byId.get(p.parent_id) : undefined
             }
             return { id: f.id, path: parts.join(' / ') }
@@ -494,15 +525,101 @@ export function Library() {
         if (detailId === b.id) {
             setDetailId(null)
             setDetail(null)
+            setEditing(false)
             return
         }
         setDetailId(b.id)
         setDetail(null)
+        setEditing(false)
         setDetailLoading(true)
         const d = await fetchers.bookmarkDetail(cfg, b.id).catch(() => null)
         setDetail(d)
         setDetailLoading(false)
     }
+
+    // ---- D52 编辑 ----
+    const startEdit = (b: { title: string; url_raw: string; description: string | null }) => {
+        setEditForm({ title: b.title, url: b.url_raw, description: b.description ?? '' })
+        setEditing(true)
+    }
+    const saveEdit = async () => {
+        if (!detail || savingEdit) return
+        const body: Record<string, unknown> = {}
+        const ttl = editForm.title.trim()
+        const u = editForm.url.trim()
+        if (ttl && ttl !== detail.title) body.title = ttl
+        if (u && u !== detail.url_raw) body.url = u
+        if (editForm.description !== (detail.description ?? '')) body.description = editForm.description
+        if (Object.keys(body).length === 0) {
+            setEditing(false)
+            return
+        }
+        setSavingEdit(true)
+        try {
+            await apiCall(cfg, `/bookmarks/${detail.id}`, { method: 'PATCH', body: JSON.stringify(body) })
+            toast.ok('已保存')
+            setEditing(false)
+            setDetailId(null)
+            setDetail(null)
+            reloadView()
+            loadTree()
+        } catch (e) {
+            if (e instanceof ApiError && e.message.includes('duplicate_url')) {
+                toast.err('该 URL 与库内其他书签查重冲突（规范化后同一条），可直接打开那条')
+            } else if (e instanceof ApiError && e.message.includes('invalid_url')) {
+                toast.err('URL 格式不合法')
+            } else {
+                toast.err(`保存失败：${e instanceof ApiError ? e.message : String(e)}`)
+            }
+        } finally {
+            setSavingEdit(false)
+        }
+    }
+
+    /** 右键菜单动作（全部复用现有单点动作，不新增状态机） */
+    const ctxActions = (b: Bookmark) => [
+        {
+            label: '编辑',
+            icon: <Pencil className="size-3.5" />,
+            run: () => {
+                if (detailId !== b.id) void openDetail(b)
+                startEdit(b)
+            },
+        },
+        {
+            label: '移动到…',
+            icon: <FolderInput className="size-3.5" />,
+            run: () => {
+                setChecked(new Set([b.id]))
+                setBatchTarget('')
+                setBatchMoveOpen(true)
+            },
+        },
+        {
+            label: b.pinned === 1 ? '取消置顶' : '置顶',
+            icon: <Sparkles className="size-3.5" />,
+            run: () => void patch(b.id, { pinned: b.pinned !== 1 }, b.pinned === 1 ? '已取消置顶' : '已置顶'),
+        },
+        b.status === 'archived'
+            ? {
+                label: '取消归档',
+                icon: <ArchiveRestore className="size-3.5" />,
+                run: () => void patch(b.id, { status: 'normal' }, '已取消归档'),
+            }
+            : {
+                label: '归档',
+                icon: <Archive className="size-3.5" />,
+                run: () => void patch(b.id, { status: 'archived' }, '已归档（可恢复）'),
+            },
+        {
+            label: '复制链接',
+            icon: <Check className="size-3.5" />,
+            run: () => {
+                void navigator.clipboard?.writeText(b.url_canonical)
+                toast.ok('已复制 URL')
+            },
+        },
+    ]
 
     const patch = async (id: string, body: Record<string, unknown>, okText: string) => {
         try {
@@ -600,12 +717,24 @@ export function Library() {
         }
     }
 
+      const loadPlaced = useCallback(() => {
+          fetchers
+              .inboxItems(cfg)
+              .then((r) => setPlacedRows(r.placed))
+              .catch(() => setPlacedRows([]))
+      }, [cfg])
+
+      useEffect(() => {
+          if (inboxNode && selected === inboxNode.id && !searching) loadPlaced()
+      }, [selected, inboxNode, searching, loadPlaced])
+
       const processInbox = async (folderId: string) => {
         setProcessing(true)
         try {
             const r = await apiCall<{ moved?: number }>(cfg, '/inbox/process', { method: 'POST', body: '{}' })
             toast.ok(`已归位 ${r.moved ?? 0} 条（记入版本历史，可撤销）`)
             window.dispatchEvent(new Event('mf:versions-changed'))
+            loadPlaced()
             loadTree()
             void loadPage(folderId, 0, false, statusFilter)
             refreshBadges()
@@ -630,6 +759,9 @@ export function Library() {
     const totalCount =
         tree.filter(f => !f.is_system_inbox && f.parent_id === null).reduce((s, f) => s + f.totalCount, 0) +
         tree.filter(f => f.is_system_inbox).reduce((s, f) => s + f.totalCount, 0)
+    // 收纳盒视图：失效/重复/已归档筛选无意义，右上角换成「说明 + AI 归位」操作区
+    const inboxView =
+        !!inboxNode && selected === inboxNode.id && !searching && !reorgActive && !historyActive
 
     // ---------- 目录树渲染 ----------
     const toggle = (id: string) => {
@@ -798,27 +930,43 @@ export function Library() {
                         }}
                     />
                 </div>
-                <div className="bg-muted/60 flex items-center gap-0.5 rounded-full p-1">
-                    {STATUS_CHIPS.map(([value, label]) => (
-                        <button
-                            key={value}
-                            onClick={() => {
-                                setStatusFilter(s => (s === value ? 'all' : value))
-                                setSearching(false)
-                                setReorgActive(false)
-                                setHistoryActive(false)
-                            }}
-                            className={cn(
-                                'rounded-full px-3 py-1 text-xs transition-all',
-                                statusFilter === value
-                                    ? 'bg-card text-foreground shadow-xs font-medium'
-                                    : 'text-muted-foreground hover:text-foreground',
-                            )}
+                {inboxView && inboxNode ? (
+                    <div className="bg-muted/60 flex items-center gap-3 rounded-full py-1 pr-1 pl-3">
+                        <p className="text-muted-foreground text-xs">
+                            随手丢进来的增量。点「AI 归位」自动分拣到各目录——只移动，不删除。
+                        </p>
+                        <Btn
+                            primary
+                            className="h-6 rounded-full bg-card px-2.5 text-xs text-primary hover:bg-card hover:text-primary/80"
+                            onClick={() => void processInbox(inboxNode.id)}
+                            disabled={processing || !items?.length}
                         >
-                            {label}
-                        </button>
-                    ))}
-                </div>
+                            {processing ? <Loader2 className="animate-spin" /> : <Sparkles className="size-3" />} AI 归位
+                        </Btn>
+                    </div>
+                ) : (
+                    <div className="bg-muted/60 flex items-center gap-0.5 rounded-full p-1">
+                        {STATUS_CHIPS.map(([value, label]) => (
+                            <button
+                                key={value}
+                                onClick={() => {
+                                    setStatusFilter(s => (s === value ? 'all' : value))
+                                    setSearching(false)
+                                    setReorgActive(false)
+                                    setHistoryActive(false)
+                                }}
+                                className={cn(
+                                    'rounded-full px-3 py-1 text-xs transition-all',
+                                    statusFilter === value
+                                        ? 'bg-card text-foreground shadow-xs font-medium'
+                                        : 'text-muted-foreground hover:text-foreground',
+                                )}
+                            >
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                )}
             </div>
 
       {/* 移动端目录 chips（桌面端用左侧树） */}
@@ -843,7 +991,7 @@ export function Library() {
                 {inboxNode && (
                     <MobileChip
                         active={selected === inboxNode.id && !searching}
-                        label={`📥 ${inboxNode.name}`}
+                        label={inboxLabel(inboxNode.name)}
                         onClick={() => selectFolder(inboxNode.id)}
                     />
                 )}
@@ -897,7 +1045,7 @@ export function Library() {
                                     if (id) void moveBookmark(id, inboxNode.id)
                                 }}
                             >
-                                <span className="truncate">📥 {inboxNode.name}</span>
+                                <span className="truncate">{inboxLabel(inboxNode.name)}</span>
                                 <span className="tabular ml-auto text-[11px] opacity-70">{inboxNode.totalCount}</span>
                             </button>
                         )}
@@ -956,18 +1104,6 @@ export function Library() {
                                 reloadFindings()
                             }}
                         />
-                    )}
-                    {inboxNode && selected === inboxNode.id && !searching && (
-                        <div className="bg-muted/40 mx-2 mb-3 flex items-center justify-between gap-3 rounded-xl px-4 py-3">
-                            <p className="text-muted-foreground text-[13px]">随手丢进来的增量。点「AI 归位」自动分拣到各目录——只移动，不删除。</p>
-                            <Btn
-                                primary
-                                onClick={() => void processInbox(inboxNode.id)}
-                                disabled={processing || !items?.length}
-                            >
-                                {processing ? <Loader2 className="animate-spin" /> : <Sparkles className="size-3.5" />} AI 归位
-                            </Btn>
-                        </div>
                     )}
                     {items === null ? (
                         <div className="py-2">
@@ -1074,6 +1210,12 @@ export function Library() {
                                                 setDragId(b.id)
                                             }}
                                             onDragEnd={() => setDragId(null)}
+                                            onContextMenu={e => {
+                                                // D52：行右键 = 操作菜单（复用现有单点动作）
+                                                if (e.ctrlKey) return
+                                                e.preventDefault()
+                                                setCtxMenu({ x: e.clientX, y: e.clientY, b })
+                                            }}
                                             className={cn(
                                                 'group hover:bg-accent/40 m-1 cursor-pointer rounded-xl px-3 py-2.5 transition-colors',
                                                 checked.has(b.id) && 'bg-primary/5',
@@ -1214,6 +1356,57 @@ export function Library() {
                                                                 )}
                                                             </div>
 
+                                                            {/* D52 编辑区：安静一行入口，点开变三条内联输入（标题/URL/备注） */}
+                                                            <div className="mt-2 max-w-[560px] pr-7">
+                                                                {editing ? (
+                                                                    <div className="space-y-1.5">
+                                                                        <Input
+                                                                            value={editForm.title}
+                                                                            onChange={e => setEditForm(sf => ({ ...sf, title: e.target.value }))}
+                                                                            placeholder="标题"
+                                                                            className="h-8 bg-background text-[13px]"
+                                                                        />
+                                                                        <Input
+                                                                            value={editForm.url}
+                                                                            onChange={e => setEditForm(sf => ({ ...sf, url: e.target.value }))}
+                                                                            placeholder="URL"
+                                                                            spellCheck={false}
+                                                                            className="h-8 bg-background font-mono text-[12px]"
+                                                                        />
+                                                                        <Input
+                                                                            value={editForm.description}
+                                                                            onChange={e => setEditForm(sf => ({ ...sf, description: e.target.value }))}
+                                                                            placeholder="备注（可选）：为什么收藏它？"
+                                                                            className="h-8 bg-background text-[13px]"
+                                                                        />
+                                                                        <div className="flex items-center gap-2 pt-0.5">
+                                                                            <Btn primary onClick={() => void saveEdit()} disabled={savingEdit}>
+                                                                                {savingEdit ? <Loader2 className="animate-spin" /> : <Check />}
+                                                                                <span>保存</span>
+                                                                            </Btn>
+                                                                            <Btn onClick={() => setEditing(false)}>取消</Btn>
+                                                                            <span className="text-muted-foreground ml-1 text-[11px]">
+                                                                                改动将同步到浏览器收藏夹（若已开启双向同步）
+                                                                            </span>
+                                                                        </div>
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="flex items-center gap-2">
+                                                                        {detail.description && (
+                                                                            <span className="text-muted-foreground min-w-0 flex-1 truncate text-[12px]" title={detail.description}>
+                                                                                ✎ {detail.description}
+                                                                            </span>
+                                                                        )}
+                                                                        <button
+                                                                            className="text-muted-foreground hover:bg-accent/60 hover:text-foreground flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors"
+                                                                            onClick={() => startEdit(detail)}
+                                                                        >
+                                                                            <Pencil className="size-3.5" /> 编辑
+                                                                        </button>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+
                                                             {/* AI 摘要：有内容才显示，没有就安静；纯文本与上方元信息同列对齐 */}
                                                             {(detail.cache?.l1_summary || (detail.cache?.l1_tags ?? []).length > 0) && (
                                                                 <div className="mt-2.5 space-y-2">
@@ -1322,7 +1515,43 @@ export function Library() {
                                     </Button>
                                 </div>
                             )}
-                        </div>
+
+                            {/* D54 最近自动归位（待处理列表下方）：回答「AI 把它放哪了」——去向目录 + 理由 + 一键进版本历史撤销
+                                mx-2 = 对齐行盒缩进（ul p-1 4px + li m-1 4px，与行 hover 背景左右缘齐平） */}
+                            {inboxNode && selected === inboxNode.id && !searching && placedRows && placedRows.length > 0 && (
+                                <div data-marquee-skip className="bg-muted/40 mx-2 mt-3 rounded-xl px-4 py-2.5">
+                                    <p className="text-muted-foreground mb-1 text-[11px] font-medium">最近自动归位</p>
+                                    <ul className="divide-y divide-border/40">
+                                        {placedRows.map((p) => (
+                                            <li key={p.bookmark_id} className="flex items-center gap-2.5 py-1.5 text-[13px]">
+                                                <a
+                                                    href={p.url_canonical}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="min-w-0 flex-1 truncate underline-offset-2 hover:text-primary hover:underline"
+                                                >
+                                                    {p.title}
+                                                </a>
+                                                {p.folder_name && (
+                                                    <span className="shrink-0 text-xs">
+                                                        →「<span className="font-medium">{p.folder_name}</span>」
+                                                    </span>
+                                                )}
+                                                {p.reason && <span className="text-muted-foreground shrink-0 text-[11px]">{p.reason}</span>}
+                                                {p.version_id && (
+                                                    <button
+                                                        className="text-muted-foreground hover:text-foreground shrink-0 text-[11px] underline-offset-2 hover:underline"
+                                                        title="归位记入版本历史，可精确撤销这一次"
+                                                        onClick={activateHistory}
+                                                    >
+                                                        撤销…
+                                                    </button>
+                                                )}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}                        </div>
                     )}
                         </>
                     )}
@@ -1330,6 +1559,60 @@ export function Library() {
             </div>
 
             {/* 详情抽屉 */}
+            {/* D52 行右键菜单：轻量浮层（shadow 分层，动作全部复用现有 handler） */}
+            {ctxMenu && (
+                <div
+                    role="menu"
+                    aria-label="书签操作"
+                    className="bg-popover text-popover-foreground shadow-lg z-50 fixed min-w-[172px] rounded-xl border p-1"
+                    style={{
+                        left: Math.min(ctxMenu.x, window.innerWidth - 190),
+                        top: Math.min(ctxMenu.y, window.innerHeight - 260),
+                    }}
+                    onMouseDown={e => {
+                        // 阻止冒泡到 window 的关闭监听：否则菜单先卸载，menuitem 的 click 落在脱离节点上永不触发
+                        e.preventDefault()
+                        e.stopPropagation()
+                    }}
+                    onContextMenu={e => e.preventDefault()}
+                >
+                    <button
+                        role="menuitem"
+                        className="hover:bg-accent flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] transition-colors"
+                        onClick={() => {
+                            window.open(ctxMenu.b.url_canonical, '_blank', 'noreferrer')
+                            setCtxMenu(null)
+                        }}
+                    >
+                        <ChevronRight className="text-muted-foreground size-3.5" /> 打开原页
+                    </button>
+                    {ctxActions(ctxMenu.b).map(a => (
+                        <button
+                            key={a.label}
+                            role="menuitem"
+                            className="hover:bg-accent flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] transition-colors"
+                            onClick={() => {
+                                setCtxMenu(null)
+                                a.run()
+                            }}
+                        >
+                            <span className="text-muted-foreground">{a.icon}</span> {a.label}
+                        </button>
+                    ))}
+                    <div className="border-border/50 my-1 border-t" />
+                    <button
+                        role="menuitem"
+                        className="text-destructive hover:bg-destructive/10 flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] transition-colors"
+                        onClick={() => {
+                            setCtxMenu(null)
+                            setPendingDelete(ctxMenu.b)
+                        }}
+                    >
+                        <Trash2 className="size-3.5" /> 删除…
+                    </button>
+                </div>
+            )}
+
             {/* 删除确认（不可逆操作显式二次确认；删除只由用户手动发起） */}
             <Dialog open={pendingDelete !== null} onOpenChange={open => !open && setPendingDelete(null)}>
                 <DialogContent className="sm:max-w-md">

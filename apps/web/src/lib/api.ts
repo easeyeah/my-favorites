@@ -107,12 +107,40 @@ export function apiUrl(cfg: AdminConfig, path: string): string {
   return `${cfg.serverUrl.replace(/\/$/, "")}${path}`;
 }
 
+// ---------- D43「显示私密」：管理台可见性开关（服务端边界 = X-MF-Private 请求头） ----------
+
+/** localStorage 键名（「显示私密」开关的持久化位；非凭据） */
+const PRIVATE_VISIBLE_STORAGE_KEY = "mf-show-private";
+
+export function loadPrivateVisible(): boolean {
+  try {
+    return localStorage.getItem(PRIVATE_VISIBLE_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** 状态持久：刷新后保持上次的私密可见性 */
+export function savePrivateVisible(v: boolean): void {
+  try {
+    localStorage.setItem(PRIVATE_VISIBLE_STORAGE_KEY, v ? "1" : "0");
+  } catch {
+    /* 忽略存储失败 */
+  }
+}
+
+/** 读类接口统一携带：开 → 显示私密项；关（默认）→ 服务端过滤（DEV-02 边界不变） */
+function privateHeaders(): Record<string, string> {
+  return loadPrivateVisible() ? { "X-MF-Private": "1" } : {};
+}
+
 async function api<T>(cfg: AdminConfig, path: string, init?: RequestInit, timeoutMs = 10 * 60_000): Promise<T> {
   if (isMock()) {
     const bodyStr = typeof init?.body === "string" ? init.body : undefined;
     const data = await mockRequestAsync(init?.method ?? "GET", path, {
       query: new URLSearchParams(path.split("?")[1] ?? ""),
       body: bodyStr ? (JSON.parse(bodyStr) as unknown) : undefined,
+      headers: init?.headers as Record<string, string> | undefined,
     });
     if (data === undefined) throw new ApiError(404, path, "演示模式未覆盖该接口");
     return data as T;
@@ -295,6 +323,17 @@ export interface BookmarkDetail extends Bookmark {
   cache: CacheInfo | null;
 }
 
+/** D54 收纳盒「最近归位」行（去向目录 + 理由 + 可撤销版本） */
+export interface InboxPlaced {
+  bookmark_id: string;
+  title: string;
+  url_canonical: string;
+  reason: string | null;
+  updated_at: string;
+  version_id: string | null;
+  folder_name: string | null;
+}
+
 export interface Stats {
   total: number;
   dead: number;
@@ -438,12 +477,49 @@ export interface TokenRow {
   last_used_at: string | null;
 }
 
+/** D61 资料库条目（列表行）：正文/摘要引用 content_cache，title/folder 实时 JOIN 主数据 */
+export interface MaterialRow {
+  id: string;
+  bookmark_id: string;
+  type: "article" | "video" | "image";
+  title: string;
+  url_canonical: string;
+  url_raw: string;
+  favicon_url: string | null;
+  folder_id: string;
+  folder_name: string | null;
+  added_at: string;
+  l1_summary: string | null;
+  l1_tags: string[];
+  l2_len: number;
+  snapshot_count: number;
+  cover_url: string | null;
+  cover_mime: string | null;
+  has_cover: boolean;
+  signals: string[];
+  meta: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface MaterialDetail extends MaterialRow {
+  is_private: number;
+  l2_text: string | null;
+}
+
+export interface MaterialCounts {
+  total: number;
+  article: number;
+  video: number;
+  image: number;
+}
+
 // ---------- 常用便捷封装 ----------
 
 export const fetchers = {
   stats: (cfg: AdminConfig) => api<Stats>(cfg, "/stats"),
   healthReport: (cfg: AdminConfig) => api<HealthReport>(cfg, "/health-report"),
-  folderTree: (cfg: AdminConfig) => api<FolderTreeNode[]>(cfg, "/folders/tree"),
+  folderTree: (cfg: AdminConfig) =>
+    api<FolderTreeNode[]>(cfg, "/folders/tree", { headers: privateHeaders() }),
   bookmarks: (
     cfg: AdminConfig,
     q: {
@@ -462,9 +538,11 @@ export const fetchers = {
     if (q.hasSnapshot) p.set("hasSnapshot", "1");
     if (q.limit !== undefined) p.set("limit", String(q.limit));
     if (q.offset !== undefined) p.set("offset", String(q.offset));
-    return api<Bookmark[]>(cfg, `/bookmarks?${p}`);
+    return api<Bookmark[]>(cfg, `/bookmarks?${p}`, { headers: privateHeaders() });
   },
   bookmarkDetail: (cfg: AdminConfig, id: string) => api<BookmarkDetail>(cfg, `/bookmarks/${id}`),
+  inboxItems: (cfg: AdminConfig) =>
+    api<{ items: unknown[]; placed: InboxPlaced[]; ambiguousCount: number }>(cfg, "/inbox/items"),
   snapshots: (cfg: AdminConfig, bookmarkId: string) =>
     api<{ snapshots: Array<{ id: string; created_at: string; size: number; via: string }> }>(
       cfg,
@@ -475,6 +553,7 @@ export const fetchers = {
     api<{ results: Bookmark[]; mode?: string }>(
       cfg,
       `/search?q=${encodeURIComponent(q)}${semantic ? "&semantic=1" : ""}`,
+      { headers: privateHeaders() },
     ),
   versions: (cfg: AdminConfig) => api<{ versions: VersionRow[] }>(cfg, "/organize/versions"),
   linkReport: (cfg: AdminConfig) => api<LinkCheckReport>(cfg, "/maintenance/report/latest?type=link_check"),
@@ -484,4 +563,24 @@ export const fetchers = {
   providers: (cfg: AdminConfig) => api<ProviderConfigRow[]>(cfg, "/settings/providers"),
   tokens: (cfg: AdminConfig) => api<{ tokens: TokenRow[] }>(cfg, "/auth/tokens"),
   privacyRules: (cfg: AdminConfig) => api<{ patterns: string[]; revision: number }>(cfg, "/privacy/rules"),
+  // ---------- D61 资料库 ----------
+  materials: (
+    cfg: AdminConfig,
+    q: { type?: string; q?: string; limit?: number; offset?: number } = {},
+  ) => {
+    const p = new URLSearchParams();
+    if (q.type) p.set("type", q.type);
+    if (q.q) p.set("q", q.q);
+    if (q.limit !== undefined) p.set("limit", String(q.limit));
+    if (q.offset !== undefined) p.set("offset", String(q.offset));
+    return api<{ items: MaterialRow[]; counts: MaterialCounts }>(cfg, `/materials?${p}`, {
+      headers: privateHeaders(),
+    });
+  },
+  materialDetail: (cfg: AdminConfig, id: string) =>
+    api<MaterialDetail>(cfg, `/materials/${id}`, { headers: privateHeaders() }),
+  materialCover: (cfg: AdminConfig, id: string) => apiDownload(cfg, `/materials/${id}/cover`),
+  materialExport: (cfg: AdminConfig, id: string) => apiDownload(cfg, `/materials/${id}/export`),
+  materialDismiss: (cfg: AdminConfig, id: string) =>
+    api<{ ok: boolean }>(cfg, `/materials/${id}`, { method: "DELETE" }),
 };

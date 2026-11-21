@@ -259,6 +259,45 @@ export class MaintenanceService {
   }
 }
 
+/**
+ * D58：增长表保留裁剪（常驻，不依赖 MF_MAINTENANCE_INTERVAL_HOURS——
+ * 未设 env 的部署同样不能让 changes/events/idempotency 无限增长）。
+ * 启动即跑一次 + 每日一次；幂等可重跑。
+ */
+export function startRetentionPrune(store: Store): void {
+  const prune = (): void => {
+    try {
+      const r = store.pruneRetention();
+      const total = r.changes + r.events + r.idempotency + r.audit;
+      if (total > 0) console.log(`[retention] pruned ${total} rows (${JSON.stringify(r)})`);
+    } catch (err) {
+      console.error("[retention] prune failed:", String(err));
+    }
+  };
+  prune();
+  setInterval(prune, 86400_000);
+}
+
+/**
+ * D63：L1 摘要兜底补扫（常驻，不依赖 MF_MAINTENANCE_INTERVAL_HOURS——
+ * capture 摘要本就 fire-and-forget（async 模式 void run 不阻塞捕获响应），
+ * 进程重启丢在途、LLM 当时不可用都会让摘要永久缺失；D57 教训：自动承诺必须有兜底）。
+ * 启动即跑一次 + 每 30 分钟一次；每次最多 5 条（涓流，不与整理抢 LLM 配额）；
+ * 无 LLM 配置时 backfillSummaries 返回 0（零网络零开销）。
+ */
+export function startSummaryBackfill(pipeline: { backfillSummaries(limit?: number): number }): void {
+  const kick = (): void => {
+    try {
+      const kicked = pipeline.backfillSummaries(5);
+      if (kicked > 0) console.log(`[summary-backfill] kicked ${kicked} summaries`);
+    } catch (err) {
+      console.error("[summary-backfill] sweep failed:", String(err));
+    }
+  };
+  kick();
+  setInterval(kick, 1800_000);
+}
+
 /** 进程内调度器（自建端 compose 通过 env 启用；默认关闭便于测试） */
 export function startScheduler(store: Store, maintenance: MaintenanceService, pipeline?: { processInbox(bookmarkIds: string[], inboxFolderId: string, opts?: { deviceId?: string }): Promise<unknown> }): void {
   const hours = Number(process.env.MF_MAINTENANCE_INTERVAL_HOURS ?? 0);

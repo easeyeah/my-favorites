@@ -80,6 +80,14 @@ describe("POST /inbox/process（F1.5 收件箱流水线）", () => {
     expect(body.moved).toHaveLength(1);
     expect(body.moved[0]?.source).toBe("rule");
     expect(body.versionId).not.toBeNull();
+
+    // D54：/inbox/items 的「最近归位」必须带目标目录名（用户可见「它去哪了」）
+    const panel = (await (await env.app.request("/api/v1/inbox/items")).json()) as {
+      placed: Array<{ bookmark_id: string; folder_name: string | null; version_id: string | null }>;
+    };
+    const placedRow = panel.placed.find((p) => p.bookmark_id === bmId);
+    expect(placedRow?.folder_name).toBeTruthy();
+    expect(placedRow?.version_id).toBe(body.versionId);
   });
 
   it("低置信度留在收件箱（永不丢书签）", async () => {

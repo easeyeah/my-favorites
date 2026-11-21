@@ -9,6 +9,8 @@ import type {
   FolderTreeNode,
   HealthReport,
   LinkCheckReport,
+  MaterialDetail,
+  MaterialRow,
   NavSite,
   NavSiteDetail,
   ProviderConfigRow,
@@ -16,6 +18,7 @@ import type {
   TokenRow,
   VersionRow,
 } from "./api";
+import { isSensitiveHost, PRIVATE_FOLDER_NAME } from "@mf/shared";
 
 const MOCK_KEY = "mf-mock-demo";
 
@@ -39,12 +42,26 @@ interface MockVersion extends VersionRow {
   moves?: Array<{ id: string; from: string }>;
   /** 本批 AI 新建的目录（rollback 时已空则删——与服务端 deleteFolderIfEmpty 同口径） */
   createdFolders?: string[];
+  /** D43：本批标私密的条目（撤销时还原 is_private=0，与服务端 markPrivate 逆放同口径） */
+  unmarkPrivate?: string[];
+}
+
+/** D61 资料库条目（演示态）：正文/摘要不复制，读时从 bookmark.cache 派生 */
+interface MockMaterial {
+  id: string;
+  bookmark_id: string;
+  type: "article" | "video" | "image";
+  created_at: string;
+  signals: string[];
+  textLen: number;
+  cover: boolean;
 }
 
 interface MockDb {
   seq: number;
   folders: Array<{ id: string; name: string; parent_id: string | null; is_system_inbox: number }>;
   bookmarks: Bookmark[];
+  materials: MockMaterial[];
   versions: MockVersion[];
   sites: NavSite[];
   siteDetail: Record<string, NavSiteDetail>;
@@ -56,6 +73,8 @@ interface MockDb {
   organizeRules: string[];
   privacy: string[];
   webhooks: Array<{ id: string; url: string; events: string[]; enabled: boolean }>;
+  /** D58 操作审计日志（演示态） */
+  audit: Array<{ id: number; kind: string; detail: string; source: string | null; created_at: string }>;
   lastLink: LinkCheckReport;
   lastDup: DupScanReport;
 }
@@ -146,9 +165,15 @@ function seed(): MockDb {
     B("b-19", "f-read", "漫谈程序员的三种成长曲线", "https://blog.example-curve.dev/growth", { status: "dead", added_at: d(900), fail: "HTTP 410 Gone" }),
     B("b-20", "f-read", "Hacker News", "https://news.ycombinator.com/", { fail: "403（反爬拦截）" }),
 
-    // 影音娱乐
+    // 影音娱乐（含 D61 资料库演示样本：视频凭 URL 形态入库）
     B("b-21", "f-media", "豆瓣电影 Top250", "https://movie.douban.com/top250", { is_private: 1, added_at: d(700) }),
     B("b-22", "f-media", "B 站收藏夹：纪录片区", "https://space.bilibili.com/favlist", {}),
+    B("b-v1", "f-media", "【中文字幕】从零构建一个浏览器扩展的完整过程", "https://www.bilibili.com/video/BV1demo01", { added_at: h(9) }),
+    B("b-v2", "f-learn", "MIT 6.006 Lecture 1: Algorithmic Thinking", "https://www.youtube.com/watch?v=HgNb4rot", { added_at: d(2) }),
+    B("b-img1", "f-design", "中国传统色·海天霞（色谱参考图）", "https://zhongguose.com/colors/haitianxia.png", { added_at: d(1) }),
+    // D43 敏感旁路演示样本：合成域名（词表命中），不引用任何真实站点
+    B("b-sens1", "f-media", "敏感样例·命中站点甲", "https://pornclips.example", { added_at: d(60) }),
+    B("b-sens2", "f-media", "敏感样例·命中站点乙", "https://hd-xxx-video.example", { added_at: d(58) }),
 
     // 学习课程
     B("b-23", "f-learn", "MIT 6.006 算法导论", "https://ocw.mit.edu/courses/6-006", { tags: ["算法", "课程"] }),
@@ -215,10 +240,43 @@ function seed(): MockDb {
     { id: "ver-c9d0e1f2", session_id: null, kind: "合并重复", reverted: 1, created_at: d(3), actionCount: 1, moves: [] },
   ];
 
+  // D61 资料库演示：文章须已存全文（summary 即有内容），视频/图片凭 URL 形态入库
+  const materials: MockMaterial[] = bookmarks
+    .filter((b) => {
+      const c = (b as Bookmark & { cache?: { l1_summary?: string } }).cache;
+      if (b.is_private === 1 || b.status === "dead" || b.status === "archived") return false;
+      if (/\.(jpe?g|png|webp|gif)(\?|#|$)/i.test(new URL(b.url_canonical).pathname)) return true;
+      if (/bilibili\.com\/video|youtube\.com\/watch|youtu\.be\/|b23\.tv/i.test(b.url_canonical)) return true;
+      return Boolean(c?.l1_summary);
+    })
+    .map((b) => {
+      let type: MockMaterial["type"] = "article";
+      const signals = [];
+      const path = new URL(b.url_canonical).pathname;
+      if (/\.(jpe?g|png|webp|gif)(\?|#|$)/i.test(path)) {
+        type = "image";
+        signals.push("图片直链");
+      } else if (/bilibili\.com\/video|youtube\.com\/watch|youtu\.be\/|b23\.tv/i.test(b.url_canonical)) {
+        type = "video";
+        signals.push(b.url_canonical.includes("bilibili") ? "哔哩哔哩" : "YouTube");
+      }
+      const summary = (b as Bookmark & { cache?: { l1_summary?: string } }).cache?.l1_summary ?? "";
+      return {
+        id: `mat-${b.id}`,
+        bookmark_id: b.id,
+        type,
+        created_at: b.added_at,
+        signals,
+        textLen: summary ? 1800 + (b.id.length % 7) * 260 : 0,
+        cover: type !== "article",
+      };
+    });
+
   return {
     seq: 100,
     folders,
     bookmarks,
+    materials,
     versions,
     sites: [{ slug: "x7k2pq9m", title: "我的导航站", template: "grid", published: 1, revision: 3 }],
     siteDetail: {
@@ -255,9 +313,32 @@ function seed(): MockDb {
     webhooks: [
       { id: "wh-1", url: "https://hooks.example.com/mf", events: ["bookmark.added"], enabled: true },
     ],
+    audit: [
+      { id: 9, kind: "auth.login", detail: "登录成功（web-admin）", source: "192.168.1.8", created_at: h(1) },
+      { id: 8, kind: "settings.changed", detail: "更新偏好：通知方式", source: "192.168.1.8", created_at: h(3) },
+      { id: 7, kind: "nav.published", detail: "发布导航站 /s/k7x2m9（公开 12 项）", source: "192.168.1.8", created_at: h(6) },
+      { id: 6, kind: "provider.saved", detail: "保存 AI 供应商配置：deepseek", source: "192.168.1.8", created_at: h(26) },
+      { id: 5, kind: "auth.failed", detail: "登录失败：密码错误（admin）", source: "203.0.113.44", created_at: h(31) },
+      { id: 4, kind: "auth.failed", detail: "登录失败：密码错误（admin）", source: "203.0.113.44", created_at: h(31) },
+      { id: 3, kind: "auth.rate_limited", detail: "登录被限速", source: "203.0.113.44", created_at: h(31) },
+      { id: 2, kind: "token.revoked", detail: "退出登录（撤销当前令牌）", source: "192.168.1.8", created_at: d(2) },
+      { id: 1, kind: "setup.done", detail: "管理员密码初始化完成（引导凭据已失效）", source: "192.168.1.8", created_at: d(17) },
+    ],
     lastLink,
     lastDup,
   };
+}
+
+/** 演示模式图标：域名哈希定色 + 首字母 SVG（离线可复现，模拟真实 favicon 的观感） */
+function demoFavicon(host: string): string {
+  let h = 0;
+  for (const ch of host) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const letter = (host[0] ?? "?").toUpperCase();
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">` +
+    `<rect width="32" height="32" rx="7" fill="hsl(${h % 360} 55% 50%)"/>` +
+    `<text x="16" y="22" font-family="system-ui,sans-serif" font-size="16" font-weight="700" fill="#fff" text-anchor="middle">${letter}</text></svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
 function cacheFail(b: Bookmark): string | undefined {
@@ -265,7 +346,7 @@ function cacheFail(b: Bookmark): string | undefined {
 }
 
 // globalThis 单例：HMR / 路由切换不丢；数据结构变更时升版本自动重播种
-const DB_VERSION = 4;
+const DB_VERSION = 7;
 const g = globalThis as typeof globalThis & { __mfMockDb?: MockDb; __mfMockDbV?: number };
 const db: MockDb = (() => {
   if (g.__mfMockDb && g.__mfMockDbV === DB_VERSION) return g.__mfMockDb;
@@ -414,7 +495,12 @@ export interface MockCtx {
   query: URLSearchParams;
   body?: unknown;
   html?: string;
+  /** D43：api 层透传请求头——X-MF-Private 与服务端边界同语义（缺省不显示私密） */
+  headers?: Record<string, string>;
 }
+
+const privateVisibleIn = (ctx: MockCtx): boolean =>
+  Object.entries(ctx.headers ?? {}).some(([k, v]) => k.toLowerCase() === "x-mf-private" && v === "1");
 
 const subtreeIds = (folderId: string): Set<string> => {
   const ids = new Set<string>([folderId]);
@@ -435,6 +521,80 @@ const subtreeIds = (folderId: string): Set<string> => {
 export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unknown {
   const path = rawPath.replace(/^\/api\/v1/, "").split("?")[0] ?? "";
   const seg = path.split("/").filter(Boolean);
+
+  // ---------- D61 资料库 ----------
+  const materialRow = (m: MockMaterial, detail: boolean): MaterialRow | MaterialDetail | null => {
+    const b = db.bookmarks.find((x) => x.id === m.bookmark_id);
+    if (!b) return null;
+    const cache = (b as Bookmark & { cache?: { l1_summary?: string | null; l1_tags?: string[] } }).cache;
+    const folder = db.folders.find((f) => f.id === b.folder_id);
+    const base: MaterialRow = {
+      id: m.id,
+      bookmark_id: b.id,
+      type: m.type,
+      title: b.title,
+      url_canonical: b.url_canonical,
+      url_raw: b.url_raw,
+      favicon_url: b.favicon_url,
+      folder_id: b.folder_id,
+      folder_name: folder?.name ?? null,
+      added_at: b.added_at,
+      l1_summary: cache?.l1_summary ?? null,
+      l1_tags: cache?.l1_tags ?? [],
+      l2_len: m.textLen,
+      snapshot_count: 0,
+      cover_url: null,
+      cover_mime: m.cover ? "image/svg+xml" : null,
+      has_cover: m.cover,
+      signals: m.signals,
+      meta: {},
+      created_at: m.created_at,
+    };
+    if (!detail) return base;
+    // 演示正文：文章给生成段；视频/图片仅元数据（与服务端语义一致）
+    const body =
+      m.type === "article" && m.textLen > 0
+        ? `${cache?.l1_summary ?? b.title}。\n\n这是一段演示正文：资料库条目引用内容缓存，不在条目内复制全文。真机上此处展示扩展就地捕获（或服务端补漏抓取）的正文文本，上限 2 万字。`.repeat(
+            3,
+          )
+        : null;
+    return { ...base, is_private: b.is_private, l2_text: body };
+  };
+  if (method === "GET" && path === "/materials") {
+    const type = ctx.query.get("type") ?? "";
+    const q = (ctx.query.get("q") ?? "").trim().toLowerCase();
+    const all = db.materials
+      .map((m) => materialRow(m, false))
+      .filter((r): r is MaterialRow => r !== null)
+      .filter((r) => {
+        const b = db.bookmarks.find((x) => x.id === r.bookmark_id);
+        return privateVisibleIn(ctx) || b?.is_private !== 1;
+      });
+    const counts = {
+      total: all.length,
+      article: all.filter((r) => r.type === "article").length,
+      video: all.filter((r) => r.type === "video").length,
+      image: all.filter((r) => r.type === "image").length,
+    };
+    const items = all
+      .filter((r) => (type ? r.type === type : true))
+      .filter((r) =>
+        q ? `${r.title} ${r.url_canonical} ${r.l1_summary ?? ""}`.toLowerCase().includes(q) : true,
+      )
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+    return { items, counts };
+  }
+  if (method === "GET" && seg[0] === "materials" && seg.length === 2) {
+    const m = db.materials.find((x) => x.id === seg[1]);
+    const row = m ? materialRow(m, true) : null;
+    return row ?? undefined;
+  }
+  if (method === "DELETE" && seg[0] === "materials" && seg.length === 2) {
+    const idx = db.materials.findIndex((x) => x.id === seg[1]);
+    if (idx < 0) return undefined;
+    db.materials.splice(idx, 1);
+    return { ok: true };
+  }
 
   // ---------- GET ----------
   if (method === "GET" && path === "/stats") {
@@ -459,12 +619,30 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
     return r;
   }
   if (method === "GET" && (path === "/folders/tree" || path === "/folders")) return folderTree();
+  if (method === "GET" && path === "/favicon") {
+    // 演示模式不出网：按域名生成确定性品牌色字母图标，模拟服务端"抓取原始 favicon 并入库"
+    const url = ctx.query.get("url") ?? "";
+    let host = "";
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      return { favicon_url: null };
+    }
+    if (db.privacy.some((p) => host.endsWith(p.replace(/^\*/, ".")))) return { favicon_url: null };
+    const bm = db.bookmarks.find((b) => b.url_canonical === url);
+    if (bm?.favicon_url) return { favicon_url: bm.favicon_url };
+    const icon = demoFavicon(host);
+    if (bm) bm.favicon_url = icon;
+    return { favicon_url: icon };
+  }
   if (method === "GET" && path === "/bookmarks") {
     const folderId = ctx.query.get("folderId") ?? undefined;
     const status = ctx.query.get("status") ?? undefined;
     const limit = Number(ctx.query.get("limit") ?? 100);
     const offset = Number(ctx.query.get("offset") ?? 0);
     let list = db.bookmarks;
+    // D43 边界与服务端一致：默认过滤私密，X-MF-Private 为已鉴权管理面的显式显示开关
+    if (!privateVisibleIn(ctx)) list = list.filter((b) => b.is_private !== 1);
     if (folderId) {
       const ids = subtreeIds(folderId);
       list = list.filter((b) => ids.has(b.folder_id));
@@ -484,7 +662,11 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
   if (method === "GET" && path === "/search") {
     const q = (ctx.query.get("q") ?? "").toLowerCase();
     return {
-      results: db.bookmarks.filter((b) => b.title.toLowerCase().includes(q) || b.url_canonical.toLowerCase().includes(q)),
+      results: db.bookmarks.filter(
+        (b) =>
+          (privateVisibleIn(ctx) || b.is_private !== 1) &&
+          (b.title.toLowerCase().includes(q) || b.url_canonical.toLowerCase().includes(q)),
+      ),
     };
   }
   if (method === "GET" && path === "/organize/versions") return { versions: db.versions };
@@ -509,6 +691,7 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
     return { models: ["deepseek-chat", "deepseek-reasoner", "deepseek-v3-0324", "deepseek-r1-0528", "deepseek-coder"] };
   }
   if (method === "GET" && path === "/auth/tokens") return { tokens: db.tokens };
+  if (method === "GET" && path === "/audit") return { events: db.audit };
   if (method === "GET" && path === "/privacy/rules") return { patterns: [...db.privacy], revision: 7 };
   if (method === "GET" && path === "/stats/storage") {
     const marks = db.bookmarks.length
@@ -554,6 +737,16 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
     if (typeof body.status === "string") b.status = body.status;
     if (body.isPrivate !== undefined) b.is_private = body.isPrivate ? 1 : 0;
     if (typeof body.title === "string") b.title = body.title;
+    if (typeof body.pinned === "boolean") b.pinned = body.pinned ? 1 : 0;
+    // D52 编辑：mock 简化处理 url/description（不做查重冲突模拟）
+    if (typeof body.url === "string" && body.url.trim()) {
+      const next = body.url.trim().replace(/\/$/, "");
+      if (db.bookmarks.some((x) => x.id !== b.id && x.url_canonical.replace(/\/$/, "") === next))
+        return { error: "duplicate_url" };
+      b.url_raw = body.url.trim();
+      b.url_canonical = next;
+    }
+    if (typeof body.description === "string") b.description = body.description || null;
     return b;
   }
   if (method === "DELETE" && seg[0] === "bookmarks" && seg.length === 2) {
@@ -633,7 +826,21 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
         suggestCategory: i % 4 === 0 ? "生活" : null,
         domainRuleFolderId: null,
       }));
-    return { items, placed: [], ambiguousCount: items.filter((x) => x.state === "ambiguous").length };
+    // D54：mock 收纳盒视图也要能演示「最近自动归位」区（去向目录名 + 理由 + 版本可撤销）
+    const folderNameOf = (fid: string) => db.folders.find((x) => x.id === fid)?.name ?? "未整理";
+    const placed = db.bookmarks
+      .filter((b) => b.folder_id !== "f-inbox" && !b.archived_into)
+      .slice(0, 5)
+      .map((b, i) => ({
+        bookmark_id: b.id,
+        title: b.title,
+        url_canonical: b.url_canonical,
+        reason: ["域名映射", "标题关键词", "域名映射", null, "LLM 分类"][i] ?? null,
+        updated_at: b.added_at,
+        version_id: `v-demo-${i}`,
+        folder_name: folderNameOf(b.folder_id),
+      }));
+    return { items, placed, ambiguousCount: items.filter((x) => x.state === "ambiguous").length };
   }
   if (method === "POST" && path === "/inbox/assign") {
     const { bookmarkId, folderId } = (ctx.body ?? {}) as { bookmarkId?: string; folderId?: string };
@@ -781,10 +988,51 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
       applied: v.actionCount,
     };
   }
+  // D43 敏感内容旁路功能点：词表命中且未标私密 → 标私密 + 移入「私人收藏」（幂等，撤销走通用 rollback）
+  if (method === "POST" && path === "/tidy/sensitive") {
+    const hits = db.bookmarks.filter((b) => b.is_private !== 1 && isSensitiveHost(b.url_canonical));
+    if (hits.length === 0) {
+      return { scanned: db.bookmarks.length, marked: 0, versionId: null, folderName: PRIVATE_FOLDER_NAME };
+    }
+    let pf = db.folders.find((f) => f.name === PRIVATE_FOLDER_NAME);
+    const createdFolders: string[] = [];
+    if (!pf) {
+      pf = { id: nid("f"), name: PRIVATE_FOLDER_NAME, parent_id: null, is_system_inbox: 0 };
+      db.folders.push(pf);
+      createdFolders.push(pf.id);
+    }
+    const pfId = pf.id;
+    const moves = hits.map((b) => {
+      const from = b.folder_id;
+      b.is_private = 1;
+      b.folder_id = pfId;
+      return { id: b.id, from };
+    });
+    const v: MockVersion = {
+      id: nid("ver"),
+      session_id: null,
+      kind: "敏感内容旁路",
+      reverted: 0,
+      created_at: now(),
+      actionCount: moves.length + createdFolders.length,
+      moves,
+      createdFolders,
+      unmarkPrivate: hits.map((b) => b.id),
+    };
+    db.versions.unshift(v);
+    return { scanned: db.bookmarks.length, marked: hits.length, versionId: v.id, folderName: PRIVATE_FOLDER_NAME };
+  }
   if (method === "POST" && seg[0] === "organize" && seg[1] === "rollback" && seg.length === 3) {
     const v = db.versions.find((x) => x.id === seg[2]);
     if (!v) return undefined;
     let n = 0;
+    // D43：先还原本批标过私密的条目（与服务端 markPrivate 逆放同口径）
+    for (const id of v.unmarkPrivate ?? []) {
+      const b = db.bookmarks.find((x) => x.id === id);
+      if (b && b.is_private === 1) {
+        b.is_private = 0;
+      }
+    }
     for (const mv of v.moves ?? []) {
       const b = db.bookmarks.find((x) => x.id === mv.id);
       if (b) {
@@ -928,6 +1176,45 @@ export function mockRootPost(path: string, body: unknown): unknown {
 /** 导出类接口：返回真实 blob，可下载打开 */
 export function mockBlob(path: string): Blob {
   const p = path.split("?")[0] ?? "";
+  // D61 资料库封面（演示态：确定性 SVG 占位图）与 Markdown 导出
+  const coverMatch = p.match(/^\/api\/v1\/materials\/([\w-]+)\/cover$/) ?? p.match(/^\/materials\/([\w-]+)\/cover$/);
+  if (coverMatch) {
+    const svg = [
+      '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">',
+      '<rect width="640" height="360" fill="#e4e4e7"/>',
+      '<circle cx="320" cy="180" r="72" fill="#d4d4d8"/>',
+      '<circle cx="298" cy="160" r="12" fill="#a1a1aa"/>',
+      '<circle cx="342" cy="160" r="12" fill="#a1a1aa"/>',
+      '<path d="M290 200 Q320 226 350 200" stroke="#a1a1aa" stroke-width="8" fill="none" stroke-linecap="round"/>',
+      "</svg>",
+    ].join("");
+    return new Blob([svg], { type: "image/svg+xml" });
+  }
+  const exportMatch = p.match(/^\/api\/v1\/materials\/([\w-]+)\/export$/) ?? p.match(/^\/materials\/([\w-]+)\/export$/);
+  if (exportMatch) {
+    const m = db.materials.find((x) => x.id === exportMatch[1]);
+    const b = m ? db.bookmarks.find((x) => x.id === m.bookmark_id) : undefined;
+    const cache = (b as (Bookmark & { cache?: { l1_summary?: string } }) | undefined)?.cache;
+    const md = [
+      "---",
+      `title: "${b?.title ?? "演示条目"}"`,
+      `source: "${b?.url_canonical ?? ""}"`,
+      `kind: ${m?.type ?? "article"}`,
+      `collected: "${m?.created_at ?? now()}"`,
+      "---",
+      "",
+      `# ${b?.title ?? "演示条目"}`,
+      "",
+      ...(cache?.l1_summary ? [`> ${cache.l1_summary}`, ""] : []),
+      "（演示模式导出：真机导出包含已存全文与来源链接。）",
+      "",
+      "---",
+      "",
+      `原文：${b?.url_raw ?? ""}`,
+      "",
+    ].join("\n");
+    return new Blob([md], { type: "text/markdown" });
+  }
   if (p.endsWith("/export/json")) {
     const payload = { exported_at: now(), version: "mock", folders: db.folders, bookmarks: db.bookmarks };
     return new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });

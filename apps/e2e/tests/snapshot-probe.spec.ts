@@ -1,6 +1,6 @@
 /**
  * A4-3 pageCapture 真实兼容性探针（需真实 Chrome/Edge 运行；CI 中自动跳过）。
- * 验证矩阵见 docs/开发工作/A4-3-pageCapture探针.md。
+ * 验证矩阵见 docs/归档/开发工作/A4-3-pageCapture探针.md。
  * 运行：pnpm --filter extension build && pnpm --filter @mf/e2e test -- snapshot-probe
  * 真实执行前需在有外网与真实浏览器的环境跑（CI 用 SKIP_REAL_PROBE=1 跳过）。
  */

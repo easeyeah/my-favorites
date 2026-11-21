@@ -6,7 +6,6 @@
 import { browser } from "wxt/browser";
 import { INBOX_FOLDER_TITLE } from "@mf/shared";
 import { api, fetchWeeklyReport, getConfig, saveConfig, sendEvent } from "../src/lib/api";
-import { flattenBookmarkTree, type BookmarkImportItem } from "../src/lib/import";
 import type { BookmarkDto } from "../src/lib/api";
 import { decidePrivacy } from "../src/lib/privacy";
 import {
@@ -16,6 +15,7 @@ import {
   isMirrorMove,
   runMirrorOps,
 } from "../src/lib/device";
+import { getSyncInfo, runSyncTick, scheduleSyncTick, setFavoritesSync, startEventStream } from "../src/lib/sync";
 
 const MENU_SAVE_ID = "mf-save";
 const MENU_INBOX_ID = "mf-save-inbox";
@@ -69,6 +69,7 @@ interface PageCapture {
   description: string | null;
   favicon: string | null;
   text: string | null;
+  ogImage: string | null;
 }
 
 /** 在页面内执行的自包含捕获（executeScript func 不可引用外部闭包） */
@@ -79,9 +80,19 @@ function captureInPage(): PageCapture {
     meta('meta[name="description"]') ?? meta('meta[property="og:description"]');
   const favicon =
     (document.querySelector('link[rel~="icon"]') as HTMLLinkElement | null)?.href ?? null;
+  // D61 资料库：og:image 作为视频封面/文章封面/图片主图线索（绝对 URL 上行，服务端 server_fetch 落盘）
+  const ogRaw = meta('meta[property="og:image"]') ?? meta('meta[name="twitter:image"]');
+  let ogImage: string | null = null;
+  if (ogRaw) {
+    try {
+      ogImage = new URL(ogRaw, location.href).toString();
+    } catch {
+      ogImage = null;
+    }
+  }
   const root = document.querySelector("article") ?? document.body;
   const text = (root?.innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 20000);
-  return { title: document.title, description, favicon, text };
+  return { title: document.title, description, favicon, text, ogImage };
 }
 
 async function saveFromTab(
@@ -134,6 +145,7 @@ async function saveFromTab(
           l2Text: capture.text,
           description: capture.description,
           faviconDataUrl: capture.favicon,
+          ...(capture.ogImage ? { ogImage: capture.ogImage } : {}),
         }),
       }).catch(() => undefined);
     }
@@ -258,31 +270,7 @@ async function snapshotCurrentTab(tab: chrome.tabs.Tab | undefined): Promise<{ o
   return { ok };
 }
 
-/** F1.7 多端同步镜像：把服务端书签镜像到浏览器「my-favorites 同步」文件夹 */
-async function syncMirror(): Promise<{ added: number }> {
-  const { syncCursor = 0 } = await getConfig();
-  const pull = await api<{
-    items: Array<{ entity: string; entity_id: string; op: string; payload: unknown }>;
-    cursor: number;
-  }>(`/sync/pull?cursor=${syncCursor}&device=extension`, {});
-  let added = 0;
-  // 找/建同步根目录
-  const barChildren = await browser.bookmarks.getChildren("1");
-  let root = barChildren.find((n) => !n.url && n.title === "my-favorites 同步");
-  if (!root) root = await browser.bookmarks.create({ parentId: "1", title: "my-favorites 同步" });
-  for (const item of pull.items) {
-    if (item.entity !== "bookmark") continue;
-    const payload = item.payload as { url?: string; title?: string } | null;
-    if (item.op === "delete" || !payload?.url) continue;
-    // 幂等：按 URL 查重
-    const existing = await browser.bookmarks.search({ url: payload.url }).catch(() => []);
-    if (existing.length > 0) continue;
-    await browser.bookmarks.create({ parentId: root.id, title: payload.title ?? payload.url, url: payload.url });
-    added++;
-  }
-  await saveConfig({ syncCursor: pull.cursor });
-  return { added };
-}
+// D46：F1.7「my-favorites 同步」单向补拷已退役——由收藏夹双向直接同步引擎（src/lib/sync.ts）取代。
 
 // ---------- 收件箱监听（A2 改造：持久队列 + 身份映射 + 镜像） ----------
 
@@ -344,6 +332,20 @@ async function flushInbox(): Promise<void> {
     // 服务端不可达：事件留在持久队列，等下次唤醒（A2 验收：离线不丢操作）
   }
   void drained;
+}
+
+/**
+ * D57：收纳盒定时清扫兜底。即时 flush（丢入后 1.2s）可能因 MV3 SW 被杀 / 网络抖动 /
+ * LLM 超时而静默失败，条目卡 pending；此函数由独立 alarm 周期调用，确保最终一定分类。
+ * 用服务端 /inbox/count 门控（不依赖客户端 inboxExtId 是否失配、不会误建收纳盒）。
+ */
+async function maybeSweepInbox(): Promise<void> {
+  try {
+    const { count } = await api<{ count: number }>("/inbox/count", {});
+    if (count > 0) await flushInbox();
+  } catch {
+    // 服务端不可达：下个周期再试
+  }
 }
 
 export default defineBackground((): void => {
@@ -480,6 +482,19 @@ export default defineBackground((): void => {
     })();
   });
 
+  // D46：书签任何变动（增删改移动）→ 防抖触发双向同步 tick（关闭时 runSyncTick 自动空转）
+  const touchSync = () => void scheduleSyncTick();
+  browser.bookmarks.onCreated.addListener(touchSync);
+  browser.bookmarks.onMoved.addListener(touchSync);
+  browser.bookmarks.onRemoved.addListener(touchSync);
+  browser.bookmarks.onChanged.addListener(touchSync);
+
+  // D46：同步周期收敛；D57：收纳盒定时清扫兜底（独立于同步开关）
+  browser.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === "mf-sync-tick") void runSyncTick().catch(() => undefined);
+    if (alarm.name === "mf-inbox-sweep") void maybeSweepInbox();
+  });
+
   // A2-3：SW 每次启动恢复持久队列 + 镜像操作（内存队列丢失 ≠ 操作丢失）
   void (async () => {
     const drainResult = await drainQueue();
@@ -487,6 +502,21 @@ export default defineBackground((): void => {
       scheduleFlush(0); // 恢复了积压事件 → 立即处理
     }
     await runMirrorOps();
+    // D57：收纳盒定时清扫兜底 alarm（独立于同步开关，常驻）。即时 flush 失败时靠它兜底，
+    // 避免「丢入收纳盒却永远卡 pending」。启动即补扫一遍已配置的收纳盒。
+    if (!(await browser.alarms.get("mf-inbox-sweep"))) {
+      await browser.alarms.create("mf-inbox-sweep", { periodInMinutes: 1 });
+    }
+    void maybeSweepInbox(); // 启动即补扫一遍（含上次 SW 被杀时卡 pending 的条目）
+    // D46/D50：开关开着但告警/SSE 循环丢了（SW 重启、浏览器重启）→ 补挂 + 重连 + 延迟补一轮
+    const { favoritesSync } = await getConfig();
+    if (favoritesSync) {
+      if (!(await browser.alarms.get("mf-sync-tick"))) {
+        await browser.alarms.create("mf-sync-tick", { periodInMinutes: 1 });
+      }
+      startEventStream();
+      scheduleSyncTick(15_000);
+    }
   })();
 
   // ---------- 消息路由（popup/options → background） ----------
@@ -543,7 +573,7 @@ export default defineBackground((): void => {
         } else if (msg.type === "setup-inbox") {
           sendResponse(await ensureInboxFolder());
         } else if (msg.type === "sweep-inbox") {
-          // 原型 07「立即清扫」：手动触发整箱归位 + 镜像同步（与每小时清扫同路径）
+          // 原型 07「立即清扫」：手动触发整箱归位 + 镜像同步（与 D57 定时清扫同路径）
           try {
             const deviceId = await getDeviceId();
             const inbox = await ensureInboxFolder();
@@ -564,60 +594,27 @@ export default defineBackground((): void => {
           } catch (err) {
             sendResponse({ moved: 0, error: String(err) });
           }
-        } else if (msg.type === "import-bookmarks") {
+        } else if (msg.type === "sync-set") {
+          // D46 总开关：开 = 立即全量对齐；关 = 停止引擎（浏览器数据保留）
           try {
-            const tree = await browser.bookmarks.getTree();
-            const items = flattenBookmarkTree(
-              tree as unknown as Parameters<typeof flattenBookmarkTree>[0],
-            );
-            if (items.length === 0) {
-              sendResponse({ imported: 0, total: 0, skipped_duplicate: 0, error: "浏览器书签树为空" });
-              return;
-            }
-            // 服务端 zod 限单批 ≤100 条 → 分批提交（幂等键每批独立）
-            const baseKey = `browser-tree-${Date.now()}`;
-            const BATCH = 100;
-            let imported = 0;
-            let skipped = 0;
-            let invalid = 0;
-            for (let i = 0; i < items.length; i += BATCH) {
-              const batch = items.slice(i, i + BATCH);
-              const result = await api<{
-                imported: number;
-                skipped_duplicate: number;
-                skipped_invalid?: number;
-              }>("/bookmarks/ingest", {
-                method: "POST",
-                headers: {
-                  "content-type": "application/json",
-                  "Idempotency-Key": `${baseKey}-${i / BATCH}`,
-                },
-                body: JSON.stringify({ idempotencyKey: `${baseKey}-${i / BATCH}`, items: batch as BookmarkImportItem[] }),
-              });
-              imported += result.imported;
-              skipped += result.skipped_duplicate;
-              invalid += result.skipped_invalid ?? 0;
-            }
-            void sendEvent("import_completed", { imported, total: items.length });
-            sendResponse({
-              imported,
-              total: items.length,
-              skipped_duplicate: skipped,
-              skipped_invalid: invalid,
-            });
+            const info = await setFavoritesSync(msg.on === true);
+            sendResponse({ info });
           } catch (err) {
-            // 服务端不可达/鉴权失败等：必须回传错误，否则 UI 永远卡在"导入中…"
             sendResponse({ error: String(err).slice(0, 200) });
           }
+        } else if (msg.type === "sync-now") {
+          try {
+            const info = await runSyncTick({ confirmDeletes: msg.confirmDeletes === true });
+            sendResponse({ info });
+          } catch (err) {
+            sendResponse({ error: String(err).slice(0, 200) });
+          }
+        } else if (msg.type === "sync-status") {
+          const { favoritesSync } = await getConfig();
+          sendResponse({ on: favoritesSync === true, info: await getSyncInfo() });
         } else if (msg.type === "snapshot-current") {
           const tab = (await browser.tabs.query({ active: true, currentWindow: true }))[0];
           sendResponse(await snapshotCurrentTab(tab));
-        } else if (msg.type === "sync-mirror") {
-          try {
-            sendResponse(await syncMirror());
-          } catch (err) {
-            sendResponse({ error: String(err) });
-          }
         }
         } catch (err) {
           // 兜底回包：任何未捕获异常都回 {error}，popup 不再卡死、SW 不产生未处理拒绝

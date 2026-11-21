@@ -11,6 +11,7 @@ import { Btn, EmptyState, PageScroll } from '@/components/shared'
 import { LoginPage } from '@/pages/login'
 import { Overview } from '@/pages/overview'
 import { Library } from '@/pages/library'
+import { Materials } from '@/pages/materials'
 import { NavSites } from '@/pages/navsites'
 import { Settings } from '@/pages/settings'
 import { MODULES, type ModuleId } from '@/lib/modules'
@@ -135,9 +136,10 @@ function RoutePages() {
     return (
         <>
             {tab === 'bookmarks' && <Library />}
+            {tab === 'materials' && <Materials />}
             {tab === 'nav' && <NavSites />}
             {tab === 'settings' && <Settings />}
-            {(tab === 'overview' || !['bookmarks', 'nav', 'settings'].includes(tab)) && <Overview />}
+            {(tab === 'overview' || !['bookmarks', 'materials', 'nav', 'settings'].includes(tab)) && <Overview />}
         </>
     )
 }

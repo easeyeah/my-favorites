@@ -9,6 +9,7 @@ import {
   BookMarked,
   Globe,
   House,
+  LibraryBig,
   Search,
   Settings,
 } from "lucide-react";
@@ -24,7 +25,7 @@ import {
   type FolderTreeNode,
 } from "@/lib/api";
 
-export const TAB_KEYS = ["overview", "bookmarks", "inbox", "nav", "settings"] as const;
+export const TAB_KEYS = ["overview", "bookmarks", "materials", "inbox", "nav", "settings"] as const;
 export type TabKey = (typeof TAB_KEYS)[number];
 
 export interface Route {
@@ -82,9 +83,11 @@ export const useShell = () => useContext(ShellContext);
 
 // 收纳盒不设独立页签（昨日定案）：它是书签库内置视图，随 core 存在——
 // 入口 = 书签页左树置顶「📥 收纳盒」节点（带待处理角标）+ 首页自动化动态；见 lib/modules.ts 注释。
+// 资料库（D61）是独立页签：卡片流形态与书签树形列表差异大，用户拍板单独立面。
 const NAV: Array<{ key: TabKey; label: string; icon: typeof House; module?: ModuleId }> = [
   { key: "overview", label: "今天", icon: House },
   { key: "bookmarks", label: "书签", icon: BookMarked },
+  { key: "materials", label: "资料", icon: LibraryBig },
   { key: "nav", label: "导航站", icon: Globe, module: "navsite" },
 ];
 

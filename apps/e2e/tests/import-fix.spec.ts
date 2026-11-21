@@ -34,7 +34,7 @@ test.afterAll(async () => {
   } catch {}
 });
 
-test("options 一键导入：真实书签树 → 分批入库 → 成功反馈", async () => {
+test("options 总开关：开启双向同步 → 全量对齐入库 → 成功反馈（D46 取代旧一键导入）", async () => {
   const ctx = await chromium.launchPersistentContext("", {
     channel: "msedge",
     headless: true,
@@ -66,20 +66,19 @@ test("options 一键导入：真实书签树 → 分批入库 → 成功反馈",
     );
   });
 
-  // 打开 options 页 → 指向本 spec 的 server → 保存 → 点导入按钮 → 断言成功反馈出现
+  // 打开 options 页 → 指向本 spec 的 server → 保存 → 开总开关 → 断言对齐成功反馈
   const page = await ctx.newPage();
   await page.goto(`chrome-extension://${extId}/options.html`);
   await page.waitForLoadState();
   await page.locator("#server").fill(BASE);
   await page.getByRole("button", { name: "保存" }).click();
   await page.waitForTimeout(500);
-  await page.getByRole("button", { name: "一键导入浏览器全部书签" }).click();
-  // 关键断言：不再是"导入中…"卡住，而是出现 ✅ 成功反馈（含 3 条）
-  await expect(page.locator("#msg-data")).toContainText("已导入", { timeout: 20_000 });
-  const feedback = await page.locator("#msg-data").textContent();
-  expect(feedback).toContain("3");
+  await expect(page.locator("#sync-status-line")).toBeVisible();
+  await page.waitForTimeout(800); // 等首次状态刷新回执，避免覆写竞态
+  await page.locator("#sync-master").check();
+  await expect(page.locator("#msg-sync")).toContainText("已开启并完成全量对齐", { timeout: 90_000 });
 
-  // 服务端确实有数据
+  // 服务端确实收到了 3 条书签（对齐 = 导入的超集）
   const stats = (await (
     await fetch(`${BASE}/api/v1/stats`)
   ).json()) as { total: number };

@@ -36,7 +36,7 @@ test.afterAll(async () => {
   try { rmSync(dataDir, { recursive: true, force: true }); } catch {}
 });
 
-test("导入入口：onboarding 引导页 + options 数据迁移（原型 01/07；导入按钮已从 popup 移入引导与设置）", async () => {
+test("导入入口：onboarding 引导页 + options 收藏夹双向同步总开关（原型 01；D46 起 options 数据迁移卡收敛为同步开关）", async () => {
   let sw = context.serviceWorkers().find((w) => w.url().startsWith("chrome-extension://"));
   for (let i = 0; i < 120 && !sw; i++) {
     await new Promise((r) => setTimeout(r, 500));
@@ -51,5 +51,11 @@ test("导入入口：onboarding 引导页 + options 数据迁移（原型 01/07�
   await page.goto(`chrome-extension://${extId}/options.html`);
   await page.waitForLoadState();
   await page.waitForTimeout(400);
-  await expect(page.getByText("一键导入浏览器全部书签")).toBeVisible();
+  await expect(page.getByText("收藏夹双向同步")).toBeVisible();
+  await expect(page.locator("#sync-master")).toBeAttached();
+  await expect(page.getByRole("button", { name: "立即同步" })).toBeVisible();
+  // D46 退役入口不再出现
+  await expect(page.getByText("一键导入浏览器全部书签")).toHaveCount(0);
+  await expect(page.getByText("反向同步到浏览器")).toHaveCount(0);
+  await expect(page.getByText("按管理台顺序重排浏览器书签")).toHaveCount(0);
 }, 90_000);

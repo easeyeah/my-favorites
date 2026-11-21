@@ -24,7 +24,15 @@ test("options 页现代 UI 截图", async () => {
   await page.waitForTimeout(400);
   // 关键元素验证
   await expect(page.getByRole("heading", { name: "my-favorites" })).toBeVisible();
-  await expect(page.getByText("一键导入浏览器全部书签")).toBeVisible();
+  await expect(page.getByText("收藏夹双向同步")).toBeVisible();
   await page.screenshot({ path: "/tmp/options-redesign.png", fullPage: true });
+
+  // 管理台入口（用户反馈补齐）：点击「打开管理台」→ 新标签页打开服务端地址（深链 #overview）
+  const adminPagePromise = ctx.waitForEvent("page");
+  await page.getByRole("button", { name: "打开管理台" }).click();
+  const adminPage = await adminPagePromise;
+  await expect(adminPage).toHaveURL(/127\.0\.0\.1:3000\/#overview/, { timeout: 10_000 });
+  await adminPage.close();
+
   await ctx.close();
 }, 90_000);

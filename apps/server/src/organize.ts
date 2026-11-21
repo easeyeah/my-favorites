@@ -23,15 +23,24 @@
  *    撤销同时入队反向镜像操作（撤销与镜像同事务，崩溃无空窗）；
  *  - 隐私重查：LLM 等待期间用户新增隐私规则或设私密 → 结果丢弃（原因码 stale_policy）。
  */
-import { canonicalizeUrl, classifyByRules, isPrivacyDomain } from "@mf/shared";
-import type { LlmClient } from "@mf/ai/llm-client";
+import { canonicalizeUrl, classifyByRules, isPrivacyDomain, isSensitiveHost, PRIVATE_FOLDER_NAME } from "@mf/shared";
+import { isLlmContentModeration, type LlmClient } from "@mf/ai/llm-client";
 import type { Store } from "./store";
 import { now, newId } from "./db";
 
 const MAX_SCOPE = 500;
+/** D43 二分隔离的额外 LLM 调用预算上限（一颗毒丸 ≈ log2(批量) 次调用；防雪崩） */
+const MAX_ISOLATE_CALLS = 12;
+
+interface PendingItem {
+  id: string;
+  title: string;
+  url: string;
+  folderId: string;
+}
 
 export interface OrganizeActionView {
-  type: "move" | "rename" | "merge" | "createFolder";
+  type: "move" | "rename" | "merge" | "createFolder" | "markPrivate";
   bookmarkId?: string;
   bookmarkTitle?: string;
   fromFolder?: string;
@@ -116,6 +125,48 @@ export function enqueueMirrorMoves(
       payload: { folderName: target.name, appFolderId: target.id },
     });
   }
+}
+
+/**
+ * D45 浏览器书签重排排队：为每个含身份映射书签的目录，按管理台列表口径
+ * （pinned DESC, added_at DESC, id）生成浏览器节点顺序快照，入队 reorder 操作。
+ * 重排以最新快照为准：同设备+目录的旧 pending reorder 先终结再入队（防过期顺序）。
+ * 返回各设备入队的目录操作数；无映射设备自然零操作。
+ */
+export function enqueueBrowserReorder(
+  store: Store,
+  deviceId?: string,
+): { queued: number; folders: number } {
+  let queued = 0;
+  let folders = 0;
+  for (const folder of store.listFolders()) {
+    const bms = store.listBookmarks({ folderId: folder.id, limit: 5000 });
+    if (bms.length === 0) continue;
+    // 浏览器节点 id 按管理台顺序排列（仅收录该目录下有身份映射的书签）
+    const byDevice = new Map<string, string[]>();
+    for (const bm of bms) {
+      for (const ident of store.identitiesForApp(bm.id)) {
+        if (deviceId && ident.device_id !== deviceId) continue;
+        const arr = byDevice.get(ident.device_id) ?? [];
+        arr.push(ident.browser_bookmark_id);
+        byDevice.set(ident.device_id, arr);
+      }
+    }
+    if (byDevice.size === 0) continue;
+    folders++;
+    const target = `mf-folder:${folder.name}`;
+    for (const [dev, order] of byDevice) {
+      store.cancelPendingReorderOps(dev, target);
+      store.enqueueBrowserOp({
+        deviceId: dev,
+        op: "reorder",
+        targetBrowserParentId: target,
+        payload: { folderName: folder.name, order },
+      });
+      queued++;
+    }
+  }
+  return { queued, folders };
 }
 
 export class OrganizeService {
@@ -220,9 +271,13 @@ export class OrganizeService {
     }
 
     const proposal: OrganizeActionView[] = [];
-    const pending: Array<{ id: string; title: string; url: string; folderId: string }> = [];
+    const pending: PendingItem[] = [];
 
     for (const bm of scope) {
+      // D43 事前旁路：敏感宿主不进 LLM 批次（供应商审核整包拒收），保持原位不动
+      if (isSensitiveHost(bm.url_canonical)) {
+        continue;
+      }
       if (this.store.db.prepare("SELECT 1 FROM privacy_domain").all().length > 0) {
         // 隐私域名不外推分类
         const { isPrivacyDomain } = await import("@mf/shared");
@@ -255,6 +310,7 @@ export class OrganizeService {
     // F3.8 偏好记忆注入 + LLM 批量分类（无 LLM 时保留原位并在 summary 说明）
     const llm = this.llmFor("organize");
     const prefs = this.store.topCategories();
+    let quarantined: PendingItem[] = [];
     if (pending.length > 0 && llm) {
       const folderNames = this.store
         .listFolders()
@@ -262,58 +318,132 @@ export class OrganizeService {
         .map((f) => f.name);
       try {
         const userRules = this.store.getOrganizeRules();
-        const out = await llm.chatJson<{
-          results: Array<{ index: number; category: string; confidence: number }>;
-        }>([
-          {
-            role: "system",
-            content:
-              "你是书签分类助手。现有目录：" +
-              JSON.stringify(folderNames) +
-              (prefs.length > 0 ? `。用户常用目录（优先参考）：${JSON.stringify(prefs)}` : "") +
-              (userRules.length > 0 ? `。用户整理偏好（必须遵守）：${JSON.stringify(userRules)}` : "") +
-              '。为每条书签选择目录（可建议新目录）。只返回 JSON {"results":[{"index":0,"category":"...","confidence":0.0}]}。',
-          },
-          {
-            role: "user",
-            content: JSON.stringify(
-              pending.map((p, i) => ({
-                index: i,
-                title: p.title,
-                url: p.url,
-                summary: this.store.getCache(p.id)?.l1_summary ?? "",
-              })),
-            ),
-          },
-        ]);
-        for (const r of out.results ?? []) {
-          const item = pending[r.index];
-          if (!item || (r.confidence ?? 0) < 0.5 || !r.category || r.category === "未分类") {
-            continue;
-          }
-          const target = this.ensureFolder(r.category, proposal);
+        const budget = { calls: 0 };
+        const { classified, quarantined: isolated } = await this.classifyPending(
+          llm,
+          pending,
+          folderNames,
+          prefs,
+          userRules,
+          budget,
+        );
+        for (const { item, category } of classified) {
+          const target = this.ensureFolder(category, proposal);
           const from = this.store.getFolder(item.folderId);
-          if (from && from.name !== r.category) {
+          if (from && from.name !== category) {
             proposal.push({
               type: "move",
               bookmarkId: item.id,
               bookmarkTitle: item.title,
               fromFolder: from.name,
-              toFolder: r.category,
+              toFolder: category,
               plannedFolderId: target,
             });
           }
+        }
+        // D43 事后隔离：审核单点拒收定位到的肇因项 → 标私密并移入「私人收藏」，整次整理不再因它失败
+        quarantined = isolated;
+        for (const item of isolated) {
+          proposal.push(this.markPrivateView(item, proposal));
         }
       } catch {
         // LLM 不可用：规则结果已入 proposal，其余保持原位
       }
     }
 
+    const quarantineNote =
+      quarantined.length > 0
+        ? `其中 ${quarantined.length} 条被供应商内容审核拒收，已自动标私密并移入「${PRIVATE_FOLDER_NAME}」（版本历史可撤销）。`
+        : "";
     const summary =
       proposal.length > 0
-        ? `共扫描 ${scope.length} 条，已直接归位 ${proposal.length} 项变更；每一次挪动都记入版本历史，可整批撤销（D27）。`
-        : `共扫描 ${scope.length} 条，分类结果与现有目录一致，无需挪动。`;
+        ? `共扫描 ${scope.length} 条，已直接归位 ${proposal.length} 项变更；每一次挪动都记入版本历史，可整批撤销（D27）。${quarantineNote}`
+        : `共扫描 ${scope.length} 条，分类结果与现有目录一致，无需挪动。${quarantineNote}`;
     return { proposal, summary, scope };
+  }
+
+  /**
+   * D43 LLM 批量分类 + 审核失败二分隔离。
+   * - 正常批次：一次调用返回全部结果（index 为本批内相对序号）。
+   * - 审核类错误（isLlmContentModeration）：批量 >1 → 对半拆成两次串行重试（预算封顶
+   *   MAX_ISOLATE_CALLS，防雪崩）；批量 =1 → 该条即肇因项，隔离返回。
+   * - 预算耗尽：本块放弃（不隔离、不误伤），已收集的分块结果照常返回。
+   * - 非审核错误（故障/限流）原样上抛，由调用方按旧语义整批保持原位。
+   */
+  private async classifyPending(
+    llm: LlmClient,
+    items: PendingItem[],
+    folderNames: string[],
+    prefs: unknown[],
+    userRules: unknown[],
+    budget: { calls: number },
+  ): Promise<{ classified: Array<{ item: PendingItem; category: string }>; quarantined: PendingItem[] }> {
+    if (items.length === 0) return { classified: [], quarantined: [] };
+    try {
+      budget.calls++;
+      const out = await llm.chatJson<{
+        results: Array<{ index: number; category: string; confidence: number }>;
+      }>([
+        {
+          role: "system",
+          content:
+            "你是书签分类助手。现有目录：" +
+            JSON.stringify(folderNames) +
+            (prefs.length > 0 ? `。用户常用目录（优先参考）：${JSON.stringify(prefs)}` : "") +
+            (userRules.length > 0 ? `。用户整理偏好（必须遵守）：${JSON.stringify(userRules)}` : "") +
+            '。为每条书签选择目录（可建议新目录）。只返回 JSON {"results":[{"index":0,"category":"...","confidence":0.0}]}。',
+        },
+        {
+          role: "user",
+          content: JSON.stringify(
+            items.map((p, i) => ({
+              index: i,
+              title: p.title,
+              url: p.url,
+              summary: this.store.getCache(p.id)?.l1_summary ?? "",
+            })),
+          ),
+        },
+      ]);
+      const classified: Array<{ item: PendingItem; category: string }> = [];
+      for (const r of out.results ?? []) {
+        const item = items[r.index];
+        if (!item || (r.confidence ?? 0) < 0.5 || !r.category || r.category === "未分类") {
+          continue;
+        }
+        classified.push({ item, category: r.category });
+      }
+      return { classified, quarantined: [] };
+    } catch (err) {
+      if (!isLlmContentModeration(err)) throw err;
+      if (items.length === 1) {
+        // 词表漏网的肇因项定位成功：隔离（上层负责标私密 + 移入私人收藏）
+        return { classified: [], quarantined: items };
+      }
+      if (budget.calls >= MAX_ISOLATE_CALLS) {
+        // 隔离预算耗尽：宁可不处理，也不误伤整块
+        return { classified: [], quarantined: [] };
+      }
+      const mid = Math.ceil(items.length / 2);
+      const left = await this.classifyPending(llm, items.slice(0, mid), folderNames, prefs, userRules, budget);
+      const right = await this.classifyPending(llm, items.slice(mid), folderNames, prefs, userRules, budget);
+      return {
+        classified: [...left.classified, ...right.classified],
+        quarantined: [...left.quarantined, ...right.quarantined],
+      };
+    }
+  }
+
+  /** D43 提议行：标私密 + 移入「私人收藏」（目录 find-or-create，撤销时空目录会被回收） */
+  private markPrivateView(item: PendingItem, proposal: OrganizeActionView[]): OrganizeActionView {
+    const plannedFolderId = this.ensureFolder(PRIVATE_FOLDER_NAME, proposal);
+    return {
+      type: "markPrivate",
+      bookmarkId: item.id,
+      bookmarkTitle: item.title,
+      toFolder: PRIVATE_FOLDER_NAME,
+      plannedFolderId,
+    };
   }
 
   private ensureFolder(name: string, proposal: OrganizeActionView[]): string {
@@ -486,6 +616,40 @@ export class OrganizeService {
             versionActions.push({ type: "merge", keepId: action.bookmarkId, archivedRows });
             appliedActions.push({ type: "merge" });
           }
+        } else if (action.type === "markPrivate" && action.bookmarkId) {
+          // D43：标私密不走 commitCheck 的隐私门——本动作的目的就是把敏感项标成私密；
+          // revision 冲突检测与"已删除"检查照常（用户等待期间改过的项不覆盖）。
+          const before = this.store.getBookmark(action.bookmarkId);
+          if (!before) {
+            conflicts.push({ bookmarkId: action.bookmarkId, reason: "bookmark_deleted" });
+            continue;
+          }
+          const baseRev = baseRevisions[action.bookmarkId];
+          if (baseRev !== undefined && (before.content_revision ?? 1) !== baseRev) {
+            conflicts.push({ bookmarkId: action.bookmarkId, reason: "modified_after_proposal" });
+            continue;
+          }
+          const targetId =
+            (action.plannedFolderId ? plannedToActual.get(action.plannedFolderId) : undefined) ??
+            (action.toFolder ? this.store.findFolderByName(action.toFolder)?.id : undefined);
+          const needMove = Boolean(targetId && before.folder_id !== targetId);
+          if (before.is_private === 1 && !needMove) continue; // 幂等：已是目标态
+          if (before.is_private !== 1) this.store.updateBookmark(action.bookmarkId, { is_private: 1 });
+          if (needMove) {
+            this.store.moveBookmark(action.bookmarkId, targetId!);
+            enqueueMirrorMoves(this.store, action.bookmarkId, targetId!);
+          }
+          // is_private/folder_id 变更会 bump content_revision → revisionAfter 记最终值（rollback 守卫用）
+          const after = this.store.getBookmark(action.bookmarkId);
+          versionActions.push({
+            type: "markPrivate",
+            bookmarkId: action.bookmarkId,
+            fromPrivate: before.is_private,
+            fromFolderId: before.folder_id,
+            toFolderId: needMove ? targetId! : null,
+            revisionAfter: after?.content_revision ?? 1,
+          });
+          appliedActions.push({ type: "markPrivate", toFolderName: needMove ? PRIVATE_FOLDER_NAME : undefined });
         }
       }
       // ③ 版本记录 + 会话状态（同事务）
@@ -580,6 +744,59 @@ export class OrganizeService {
           this.store.deleteFolderIfEmpty(String(a.folderId));
           undoActions.push({ type: "deleteFolderIfEmpty", folderId: a.folderId });
           reversed++;
+        } else if (a.type === "markPrivate") {
+          // D43 撤销：还原私密位 + 移回原目录 + 反向镜像入队（同事务）
+          const bmId = String(a.bookmarkId);
+          const current = this.store.getBookmark(bmId);
+          if (!current) {
+            skipped.push({ bookmarkId: bmId, reason: "bookmark_deleted" });
+            continue;
+          }
+          const revAfter = a.revisionAfter as number | undefined;
+          if (revAfter !== undefined && current.content_revision !== revAfter) {
+            skipped.push({ bookmarkId: bmId, reason: "modified_after_apply" });
+            continue;
+          }
+          const fromPrivate = Number(a.fromPrivate) === 1 ? 1 : 0;
+          const fromFolderId = a.fromFolderId ? String(a.fromFolderId) : null;
+          let changed = false;
+          if (current.is_private !== fromPrivate) {
+            this.store.updateBookmark(bmId, { is_private: fromPrivate });
+            changed = true;
+          }
+          let movedBack = false;
+          if (fromFolderId && current.folder_id !== fromFolderId) {
+            const folder = this.store.getFolder(fromFolderId);
+            if (!folder) {
+              skipped.push({ bookmarkId: bmId, reason: "target_folder_missing" });
+            } else {
+              this.store.moveBookmark(bmId, fromFolderId);
+              for (const ident of this.store.identitiesForApp(bmId)) {
+                this.store.enqueueBrowserOpIdempotent({
+                  deviceId: ident.device_id,
+                  op: "move",
+                  browserBookmarkId: ident.browser_bookmark_id,
+                  targetBrowserParentId: `mf-folder:${folder.name}`,
+                  payload: { folderName: folder.name, appFolderId: folder.id },
+                });
+                this.store.cancelPendingBrowserOps(ident.device_id, ident.browser_bookmark_id, folder.name);
+              }
+              movedBack = true;
+              changed = true;
+            }
+          }
+          if (changed) {
+            // 同形记录（markPrivate 语义），undo 版本自身可再回滚（重标私密 + 移回私人收藏）
+            undoActions.push({
+              type: "markPrivate",
+              bookmarkId: bmId,
+              fromPrivate: current.is_private,
+              fromFolderId: current.folder_id,
+              toFolderId: movedBack ? fromFolderId : null,
+              revisionAfter: this.store.getBookmark(bmId)?.content_revision ?? 1,
+            });
+            reversed++;
+          }
         }
       }
       // 撤销本身是一条可审计的新版本（原历史保留、标记 reverted）
@@ -590,6 +807,59 @@ export class OrganizeService {
       this.store.markReverted(versionId);
       db.exec("COMMIT");
       return { reversed, skipped, undoVersionId };
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  /**
+   * D43 敏感内容旁路 · 功能点内核（tidy）：全库扫描敏感宿主命中且未标私密的条目
+   * → is_private=1 + 移入「私人收藏」（find-or-create）+ 浏览器镜像入队 + 写 organize_version，
+   * 全部单事务——任意一步失败整体回滚，不留半提交。
+   * 幂等：再跑一次只处理增量；永不删除（红线③）；撤销走通用 /organize/rollback（markPrivate 逆放）。
+   */
+  sweepSensitive(): {
+    scanned: number;
+    marked: number;
+    versionId: string | null;
+    folderName: string;
+  } {
+    const db = this.store.db;
+    db.exec("BEGIN");
+    try {
+      const rows = this.store.listBookmarks({ limit: 10000 });
+      const hits = rows.filter((b) => b.is_private !== 1 && isSensitiveHost(b.url_canonical));
+      if (hits.length === 0) {
+        db.exec("COMMIT");
+        return { scanned: rows.length, marked: 0, versionId: null, folderName: PRIVATE_FOLDER_NAME };
+      }
+      const actions: unknown[] = [];
+      let folder = this.store.findFolderByName(PRIVATE_FOLDER_NAME);
+      if (!folder) {
+        folder = this.store.createFolder(PRIVATE_FOLDER_NAME, null, "ai_created");
+        actions.push({ type: "createFolder", folderId: folder.id, name: folder.name });
+      }
+      const target = folder;
+      for (const before of hits) {
+        const needMove = before.folder_id !== target.id;
+        this.store.updateBookmark(before.id, { is_private: 1 });
+        if (needMove) {
+          this.store.moveBookmark(before.id, target.id);
+          enqueueMirrorMoves(this.store, before.id, target.id);
+        }
+        actions.push({
+          type: "markPrivate",
+          bookmarkId: before.id,
+          fromPrivate: before.is_private,
+          fromFolderId: before.folder_id,
+          toFolderId: needMove ? target.id : null,
+          revisionAfter: this.store.getBookmark(before.id)?.content_revision ?? 1,
+        });
+      }
+      const versionId = this.store.saveVersion(null, actions);
+      db.exec("COMMIT");
+      return { scanned: rows.length, marked: hits.length, versionId, folderName: PRIVATE_FOLDER_NAME };
     } catch (err) {
       db.exec("ROLLBACK");
       throw err;

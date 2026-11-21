@@ -6,7 +6,8 @@ import { Store } from "./store";
 import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
 import { SemanticService } from "./semantic";
-import { MaintenanceService, startScheduler } from "./maintenance";
+import { MaintenanceService, startScheduler, startRetentionPrune, startSummaryBackfill } from "./maintenance";
+import { backfillMaterials, sweepOrphanCovers } from "./materials";
 import { LlmClient, llmFromEnv } from "@mf/ai/llm-client";
 
 const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
@@ -34,11 +35,16 @@ const llmFor: LlmFor = (purpose) => {
   return envLlm;
 };
 
+const pipeline = new Pipeline(store, llmFor, {
+  syncAi: process.env.MF_SYNC_AI === "1",
+  dataDir, // D61：资料库封面落盘需要 dataDir
+});
+
 const app = buildApp({
   store,
   llmFor,
   dataDir,
-  pipeline: new Pipeline(store, llmFor, { syncAi: process.env.MF_SYNC_AI === "1" }),
+  pipeline,
   organize: new OrganizeService(store, llmFor),
   semantic: new SemanticService(store, llmFor("embedding"), process.env.LLM_EMBEDDING_MODEL ?? null),
   maintenance: new MaintenanceService(store),
@@ -51,6 +57,20 @@ startScheduler(
   // 每小时收纳盒清扫兜底（原型 06）：离线堆积批量处理 + 全设备镜像入队
   new Pipeline(store, llmFor, { syncAi: process.env.MF_SYNC_AI === "1" }),
 );
+
+// D58：增长表保留裁剪（常驻，不依赖调度器开关）
+startRetentionPrune(store);
+
+// D63：L1 摘要兜底补扫（常驻——fire-and-forget 摘要遇重启/LLM 当时不可用可找回；无 LLM 零开销）
+startSummaryBackfill(pipeline);
+
+// D61 资料库：存量一次性回灌（纯本地分类，零网络）+ 孤儿封面清理（书签删除走 FK 级联，文件无钩子）
+const backfill = backfillMaterials(store);
+if (backfill.created > 0) {
+  console.log(`[materials] backfill created ${backfill.created} entries (scanned ${backfill.scanned})`);
+}
+const swept = sweepOrphanCovers(dataDir, store);
+if (swept > 0) console.log(`[materials] swept ${swept} orphan cover files`);
 
 // 仅作为主进程运行时启动监听（测试导入时不启服务）
 if (process.env.MF_SKIP_SERVE !== "1") {

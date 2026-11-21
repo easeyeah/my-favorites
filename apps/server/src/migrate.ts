@@ -375,6 +375,66 @@ export const MIGRATION_V8_PROTO_BASE: Migration = {
   },
 };
 
+/**
+ * 版本 9：操作审计日志（D58，2026-11-21）。
+ *  - audit_log：认证（登录成功/失败/限速）、令牌（签发/撤销）、配置（偏好/供应商/Webhook/发布）
+ *    四类事件的持久化审计记录——此前登录失败/限速只在内存滑窗（重启即失），
+ *    配置变更无任何痕迹，自建端暴露公网时被爆破无感知。
+ *  - 红线：detail 一行人类可读摘要，绝不落密码/token 原值/apiKey/摘要；
+ *    source 存客户端标识（IP 或 clientKey），供单用户追溯来源。
+ *  - 保留策略在 store.pruneRetention（每日 + 启动时裁剪，audit_log 保最近 1000 条）。
+ */
+export const MIGRATION_V9_AUDIT_LOG: Migration = {
+  version: 9,
+  name: "audit_log",
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        detail TEXT,
+        source TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+  },
+};
+
+/**
+ * 版本 10：资料库（D61，2026-11-21）。
+ *  - material：收藏内容三级识别（D32）的一级实体——文章（仅已存全文）/视频（仅元数据，不下载本体）/
+ *    图片（主图落盘）。正文/摘要不复制，引用 content_cache（删规则连带清理自然生效）；
+ *  - bookmark_id UNIQUE：一条收藏至多一条资料条目（覆盖型 upsert）；
+ *  - 封面文件落 DATA_DIR/materials/ 目录（与快照同款本地磁盘对象，单文件 SQLite 红线不破坏）；
+ *  - status=dismissed：用户主动移出资料库的软删位（防 capture/crawl 再生成"复活"）；
+ *  - 存量回灌：启动时一次性纯本地分类回灌（materials.ts backfillMaterials，零网络零封面）。
+ */
+export const MIGRATION_V10_MATERIAL: Migration = {
+  version: 10,
+  name: "material_library",
+  up: (db) => {
+    // DDL 逐条以 prepared statement 执行（等价于一次性 exec；迁移框架 up 内不得拼接用户输入）
+    const statements = [
+      "CREATE TABLE IF NOT EXISTS material (",
+      "  id TEXT PRIMARY KEY,",
+      "  bookmark_id TEXT NOT NULL UNIQUE REFERENCES bookmarks(id) ON DELETE CASCADE,",
+      "  type TEXT NOT NULL,",
+      "  status TEXT NOT NULL DEFAULT 'active',",
+      "  cover_path TEXT,",
+      "  cover_mime TEXT,",
+      "  cover_size INTEGER,",
+      "  cover_url TEXT,",
+      "  meta TEXT NOT NULL DEFAULT '{}',",
+      "  signals TEXT NOT NULL DEFAULT '[]',",
+      "  created_at TEXT NOT NULL,",
+      "  updated_at TEXT NOT NULL",
+      ");",
+    ];
+    db.prepare(statements.join("\n")).run();
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_material_type ON material(type, status)").run();
+  },
+};
+
 /** 全部迁移按版本升序注册（只追加） */
 export const MIGRATIONS: Migration[] = [
   BASELINE_MIGRATION,
@@ -385,6 +445,8 @@ export const MIGRATIONS: Migration[] = [
   MIGRATION_V6_TOKEN_HARDENING,
   MIGRATION_V7_UNDO_AND_PURGE_LEDGER,
   MIGRATION_V8_PROTO_BASE,
+  MIGRATION_V9_AUDIT_LOG,
+  MIGRATION_V10_MATERIAL,
 ];
 
 export function appliedVersions(db: DatabaseSync): Set<number> {

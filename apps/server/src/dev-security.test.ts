@@ -13,7 +13,7 @@
 import http from "node:http";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { makeEnv, type TestEnv } from "./test-env";
+import { fixturePassword, makeEnv, type TestEnv } from "./test-env";
 import { Store } from "./store";
 import {
   isForbiddenIp,
@@ -126,12 +126,12 @@ describe("DEV-01 公开分享范围与密码保护", () => {
   it("站点 A 的访问凭证不能访问站点 B（凭证绑定 slug）", async () => {
     env = makeEnv(null);
     const bm = rawBookmark(env.store, { urlRaw: "https://cred.example.com/x", title: "凭证站内容" });
-    const a = await publishSite(env, { title: "站A", password: "pass-a-123", bookmarkIds: [bm] });
-    const b = await publishSite(env, { title: "站B", password: "pass-b-123", bookmarkIds: [bm] });
+    const a = await publishSite(env, { title: "站A", password: fixturePassword("a"), bookmarkIds: [bm] });
+    const b = await publishSite(env, { title: "站B", password: fixturePassword("b"), bookmarkIds: [bm] });
     const authA = await env.app.request(`/s/${a.slug}/auth`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: "password=pass-a-123",
+      body: `password=${fixturePassword("a")}`,
     });
     const cookieA = (authA.headers.get("set-cookie") ?? "").split(";")[0]!;
     // 用 A 的凭证访问 B → 仍是验证页
@@ -142,11 +142,11 @@ describe("DEV-01 公开分享范围与密码保护", () => {
   it("改密/撤销发布后旧访问凭证失效（revision 绑定）", async () => {
     env = makeEnv(null);
     const bm = rawBookmark(env.store, { urlRaw: "https://rotate.example.com/x", title: "轮换站内容" });
-    const site = await publishSite(env, { title: "轮换站", password: "old-pass-123", bookmarkIds: [bm] });
+    const site = await publishSite(env, { title: "轮换站", password: fixturePassword("old"), bookmarkIds: [bm] });
     const auth = await env.app.request(`/s/${site.slug}/auth`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: "password=old-pass-123",
+      body: `password=${fixturePassword("old")}`,
     });
     const cookie = (auth.headers.get("set-cookie") ?? "").split(";")[0]!;
     expect((await (await env.app.request(`/s/${site.slug}`, { headers: { cookie } })).text())).toContain("轮换站");
@@ -154,7 +154,7 @@ describe("DEV-01 公开分享范围与密码保护", () => {
     const patch = await env.app.request(`/api/v1/nav/sites/${site.slug}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ password: "new-pass-456" }),
+      body: JSON.stringify({ password: fixturePassword("new") }),
     });
     expect(patch.status).toBe(200);
     const stale = await env.app.request(`/s/${site.slug}`, { headers: { cookie } });
@@ -167,7 +167,7 @@ describe("DEV-01 公开分享范围与密码保护", () => {
     const site = await publishSite(env, {
       title: "原标题",
       template: "cards",
-      password: "keep-pass-1",
+      password: fixturePassword("keep"),
       bookmarkIds: [bm],
     });
     const patch = await env.app.request(`/api/v1/nav/sites/${site.slug}`, {
@@ -433,7 +433,7 @@ describe("DEV-04 出站网络防护", () => {
 
 describe("DEV-05 令牌生命周期", () => {
   it("SEC-10：库内只有摘要（备份/查询无 bearer 明文）；过期令牌 401", async () => {
-    env = makeEnv(null, false, { adminPassword: "token-test-pass" });
+    env = makeEnv(null, false, { adminPassword: fixturePassword("tokenTest") });
     const { token } = env.store.createToken("device-x", 24);
     const raw = env.store.db.prepare("SELECT token, token_hash FROM tokens").get() as {
       token: string;
@@ -466,7 +466,7 @@ describe("DEV-05 令牌生命周期", () => {
       await env.app.request("/api/v1/admin/setup", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ password: "revoke-flow-pass" }),
+        body: JSON.stringify({ password: fixturePassword("revoke") }),
       });
       const bootstrap = (await import("node:fs")).readFileSync(
         path.join(env.dataDir, "bootstrap-token.txt"),
@@ -475,13 +475,13 @@ describe("DEV-05 令牌生命周期", () => {
       const setup = await env.app.request("/api/v1/admin/setup", {
         method: "POST",
         headers: { "content-type": "application/json", "x-mf-setup-token": bootstrap },
-        body: JSON.stringify({ password: "revoke-flow-pass" }),
+        body: JSON.stringify({ password: fixturePassword("revoke") }),
       });
       expect(setup.status).toBe(200);
       const loginBody = {
         method: "POST" as const,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ password: "revoke-flow-pass" }),
+        body: JSON.stringify({ password: fixturePassword("revoke") }),
       };
       const d1 = (await (await env.app.request("/auth/login", loginBody)).json()) as { token: string };
       const d2 = (await (await env.app.request("/auth/login", loginBody)).json()) as {

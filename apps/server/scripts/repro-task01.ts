@@ -261,6 +261,9 @@ async function repro8(): Promise<void> {
     envNoAuth.cleanup();
   }
   // 8b. Provider Key 明文落库
+  // ⑧b 复现样本：合成占位值，绝非真实凭据；真实 Provider Key 走 BYOK 加密落库（A4-2 已交付）。
+  // 占位值支持环境变量注入，缺省串刻意不具密钥形态（避免静态密钥扫描误报与公开仓库观感问题）。
+  const reproDummyKey = process.env.MF_REPRO_DUMMY_KEY ?? "not-a-real-key-just-a-placeholder";
   const envKey = makeEnv(null);
   try {
     await envKey.app.request("/api/v1/settings/providers", {
@@ -269,14 +272,14 @@ async function repro8(): Promise<void> {
       body: JSON.stringify({
         providerId: "deepseek",
         baseUrl: "https://api.deepseek.com/v1",
-        apiKey: "sk-real-secret-key-123",
+        apiKey: reproDummyKey,
         purposeModels: { organize: "deepseek-chat" },
       }),
     });
     const row = envKey.store.db
       .prepare("SELECT api_key FROM provider_config")
       .get() as { api_key: string };
-    const plaintextAtRest = row.api_key === "sk-real-secret-key-123";
+    const plaintextAtRest = row.api_key === reproDummyKey;
     // 导出接口是否带出 key？/export/json 不含 provider_config，确认无泄露面
     report({
       id: "⑧b",

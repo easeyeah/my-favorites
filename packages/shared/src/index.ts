@@ -1,9 +1,11 @@
 export * from "./url";
 export * from "./classify-rules";
 export * from "./site-signal";
+export * from "./material";
 export * from "./netscape";
 export * from "./eval-samples";
 export * from "./privacy";
+export * from "./sensitive";
 export * from "./widgets";
 
 /** 领域类型 —— 技术方案 §4 数据模型的 TS 侧镜像（DB schema 以 server 端 Drizzle 为准） */
@@ -25,6 +27,33 @@ export interface Folder {
 
 /** 系统收纳盒的展示名（D36：UI 文案层一律「收纳盒」；代码层 is_system_inbox、/inbox/* 内部命名保留） */
 export const INBOX_FOLDER_TITLE = "📥 收纳盒";
+
+
+/**
+ * D55：Edge/Chrome 书签树的顶层虚拟节点标题（"书签栏"/"收藏夹栏"/"Other favorites"…）。
+ * 这一层**永远不是用户文件夹**——任何「浏览器树 ↔ 库目录路径」匹配必须穿透它。
+ * 曾因把它当真实层级，同步引擎把「收藏夹栏/xxx」整棵复制进库与书签栏，制造批量重复目录。
+ */
+export const VIRTUAL_BOOKMARK_ROOT_TITLES: ReadonlySet<string> = new Set([
+  "",
+  "书签栏",
+  "收藏夹栏",
+  "收藏夹",
+  "链接", // Edge 中文"其他收藏夹"节点名（实测出现在第一层）
+  "其他书签",
+  "其他收藏夹",
+  "Bookmarks Bar",
+  "Favorites Bar",
+  "Favorites",
+  "Links",
+  "Other bookmarks",
+  "Other favorites",
+]);
+
+/** 浏览器树节点是否为顶层虚拟节点（仅当处于第一层时按标题判定；真实文件夹允许同名） */
+export function isVirtualBookmarkRootTitle(title: string | undefined, depth: number): boolean {
+  return depth === 0 && VIRTUAL_BOOKMARK_ROOT_TITLES.has((title ?? "").trim());
+}
 
 export interface Bookmark {
   id: string;
@@ -60,7 +89,9 @@ export type OrganizeAction =
   | { type: "move"; bookmarkId: string; fromFolderId: string; toFolderId: string }
   | { type: "rename"; bookmarkId: string; from: string; to: string }
   | { type: "merge"; fromBookmarkIds: string[]; intoBookmarkId: string }
-  | { type: "createFolder"; folderId: string; parentId: string | null; name: string };
+  | { type: "createFolder"; folderId: string; parentId: string | null; name: string }
+  // D43 敏感内容旁路：标私密（+可选移入私人收藏）；fromPrivate 携原值供精确回滚
+  | { type: "markPrivate"; bookmarkId: string; fromPrivate: 0 | 1; fromFolderId: string; toFolderId: string | null };
 
 export interface OrganizeVersion {
   id: string;
@@ -78,12 +109,16 @@ export const bookmarkIngestItem = z.object({
   title: z.string().min(1).max(512),
   folderPath: z.array(z.string().max(256)).max(16).default([]),
   addedAt: z.string().datetime().optional(),
+  /** D44：浏览器书签节点 id（配合 ingestRequest.deviceId 建立 A2-1 身份映射，镜像删除靠它精确定位） */
+  browserId: z.string().min(1).max(64).optional(),
 });
 
 export const ingestRequest = z.object({
   items: z.array(bookmarkIngestItem).min(1).max(2000),
   /** 幂等键：扩展 SW 中断重试不重复导入 */
   idempotencyKey: z.string().min(8).max(128),
+  /** D44：导入来源设备（提供且条目带 browserId 时写入 bookmark_identity） */
+  deviceId: z.string().min(8).max(64).optional(),
 });
 
 export type IngestRequest = z.infer<typeof ingestRequest>;
@@ -94,6 +129,8 @@ export const captureRequest = z.object({
   l2Text: z.string().max(40_000).optional(),
   description: z.string().max(2_000).optional(),
   faviconDataUrl: z.string().max(100_000).optional(),
+  /** D61 资料库：页面 og:image（视频封面/文章封面/图片主图线索），绝对 URL；服务端经 server_fetch 动作下载落盘 */
+  ogImage: z.string().url().max(2_048).optional(),
 });
 
 export type CaptureRequest = z.infer<typeof captureRequest>;

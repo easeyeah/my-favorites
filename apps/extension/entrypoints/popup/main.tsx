@@ -1,16 +1,15 @@
 /**
- * popup · 一键收藏 + 收纳盒管理（原型 02/06）
+ * popup · 一键收藏 + 收纳盒管理（2026-11-20 单面化定稿，替代 ptabs 标签制）
  *
- * 顶部标签页（窄容器统一导航语法）：
- *  ⭐ 快速收藏（默认）· 📥 收纳盒（角标=待处理数）· 🕘 历史 · ⚙️
- *  D42（2026-11-20）：AI 聊天整理（侧栏）整条下线——真用 AI 的人用外部工具，
- *  聊天入口反而招来「问东问西」与支持负担；AI 整理收敛为管理台功能点（D27 不变），
- *  歧义集中询问（D37）并入收纳盒标签。
+ * 用户拍板：就留一个按钮 + 一个页面信息——
+ *  · 顶部仅一条品牌栏（图形标 + ⚙ 设置），无页签；
+ *  · 页面信息（真实站点图标 + 标题 + host）在最上；
+ *  · 其他信息一律沉到下方滚动区，且「有才显示」：收纳盒待处理 / 最近自动归位（可撤销）/ 整理版本；
+ *  · 唯一主按钮固定底部，颜色弱化为浅靛底深靛字（用户：原实色太强烈）；快照/备注/改目录收进按钮上方「更多」。
+ * 与浏览器融合：贴边交由原生气泡裁切；定高 320×518（黄金比），切内容窗体不跳。
  *
- * 快速收藏两态（D37 收口）：
- *  - 变体 A 域名缓存命中：AI 建议归位卡（目标目录 + 「✓ 收藏到这里」/ 改目录）
- *    + 「同时保存页面快照」开关（默认开）+ 备注（折叠）+ 🛡 隐私清单检查徽章
- *  - 变体 B 未命中：先落收纳盒异步分类（D27 哲学：不当场弹选择），AI 内容级分类中
+ * 收藏语义不变（D37/D27）：A=缓存命中「收藏到「X」」；B=未命中「交给 AI 归位」先落收纳盒异步分类；
+ * 隐私域名仅存 URL 手动选目录；D42 起无聊天面，歧义处理在收纳盒条目内。
  */
 import { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -24,10 +23,7 @@ import {
   type SuggestDto,
   type VersionDto,
 } from "../../src/lib/api";
-import { BrandHeader } from "../../src/components/skeleton";
 import "./popup.css";
-
-type TabId = "save" | "inbox" | "history";
 
 function hostOf(url: string): string {
   try {
@@ -37,50 +33,7 @@ function hostOf(url: string): string {
   }
 }
 
-/** 顶部标签页（原型 06：窄容器统一导航语法） */
-function Ptabs({
-  tab,
-  onTab,
-  inboxCount,
-}: {
-  tab: TabId;
-  onTab: (t: TabId) => void;
-  inboxCount: number;
-}) {
-  const item = (id: TabId, label: React.ReactNode) => (
-    <button
-      className={"ptab" + (tab === id ? " on" : "")}
-      onClick={() => onTab(id)}
-      role="tab"
-      aria-selected={tab === id}
-    >
-      {label}
-    </button>
-  );
-  return (
-    <div className="ptabs">
-      {item("save", "⭐ 快速收藏")}
-      {item(
-        "inbox",
-        <span className="inline-flex items-center gap-1">
-          📥 收纳盒
-          {inboxCount > 0 && (
-            <span className="rounded-full bg-neutral-900 px-1.5 text-[10px] font-bold text-white dark:bg-neutral-100 dark:text-neutral-900">
-              {inboxCount}
-            </span>
-          )}
-        </span>,
-      )}
-      {item("history", "🕘 历史")}
-      <button className="ptab right" title="设置" onClick={() => void browser.tabs.create({ url: "options.html" })}>
-        ⚙️
-      </button>
-    </div>
-  );
-}
-
 function Popup() {
-  const [tab, setTab] = useState<TabId>("save");
   const [tabInfo, setTabInfo] = useState<chrome.tabs.Tab | null>(null);
   const [suggest, setSuggest] = useState<SuggestDto | null>(null);
   // false=正常；字符串=被隐私策略拦截的原因码（区分「命中清单」与「规则未加载」，不误标用户网站为隐私站）
@@ -89,13 +42,13 @@ function Popup() {
     r === "privacy_domain" || r === "private_bookmark" || r === "policy_not_loaded" ? r : "policy_not_loaded";
   const [folders, setFolders] = useState<FolderDto[]>([]);
   const [folderChoice, setFolderChoice] = useState<string>("");
+  // 站点图标加载失败（内网页/坏链接）时回退首字母色块
+  const [iconOk, setIconOk] = useState(true);
   const [snapshotOn, setSnapshotOn] = useState(true);
   const [note, setNote] = useState("");
-  const [showNote, setShowNote] = useState(false);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const [inboxCount, setInboxCount] = useState(0);
   const [inboxItems, setInboxItems] = useState<InboxItemDto[]>([]);
   const [placed, setPlaced] = useState<InboxPlacedDto[]>([]);
   const [versions, setVersions] = useState<VersionDto[]>([]);
@@ -111,7 +64,6 @@ function Popup() {
       .then((r) => {
         setInboxItems(r.items);
         setPlaced(r.placed);
-        setInboxCount(r.items.length);
       })
       .catch(() => undefined);
   }, []);
@@ -124,6 +76,7 @@ function Popup() {
         import("../../src/lib/device").then((m) => m.getDeviceId()),
       ]);
       setTabInfo(t);
+      setIconOk(true);
       setDeviceId(dv);
       void browser.storage.local.get(["snapshotDefault"]).then((s) => setSnapshotOn(s["snapshotDefault"] !== false));
       if (t?.url && /^https?:/.test(t.url)) {
@@ -205,340 +158,277 @@ function Popup() {
       .catch((err: unknown) => flash(`❌ 重试失败：${String(err).slice(0, 60)}`));
   };
 
-  const sweep = () => {
-    setBusy(true);
-    // 带 deviceId：与后台清扫同路径，归位后浏览器「📥 收纳盒」节点同步移走（镜像）
-    void api<{ moved?: unknown[] }>("/inbox/process", { method: "POST", body: JSON.stringify({ deviceId }) })
-      .then(() => {
-        setBusy(false);
-        flash("✅ 已清扫");
+  const rollback = (versionId: string, word: string) => {
+    void api<{ reversed: number }>(`/organize/rollback/${versionId}`, { method: "POST" })
+      .then((r) => {
+        flash(`↩️ ${word} ${r.reversed} 项`);
         loadInbox();
+        refreshVersions();
       })
-      .catch((err: unknown) => {
-        setBusy(false);
-        flash(`❌ 清扫失败：${String(err).slice(0, 60)}`);
-      });
+      .catch((err: unknown) => flash(`❌ ${word}失败：${String(err).slice(0, 60)}`));
   };
 
   const folderOptions = folders.filter((f) => f.is_system_inbox !== 1);
   const suggestFolder = suggest?.folderId ?? "";
   const hit = suggest && suggest.source !== "none" && suggestFolder;
   const currentUrl = tabInfo?.url ?? "";
+  const savable = /^https?:/.test(currentUrl);
+  // 唯一主按钮的目标与文案：手动改选 > AI 建议 > 无（走收纳盒异步）
+  const targetId = folderChoice || (hit ? suggestFolder : "");
+  const targetName =
+    folders.find((f) => f.id === folderChoice)?.name ??
+    (hit ? suggest!.folderPath.join(" / ") || suggest!.category : "");
 
   return (
-    <main className="w-[360px] pb-3">
-      <div className="px-4 pt-3">
-        <BrandHeader compact />
-      </div>
-      <Ptabs tab={tab} onTab={setTab} inboxCount={inboxCount} />
+    <main className="flex h-[518px] w-[320px] flex-col pb-3">
+      {/* 顶栏：品牌标 + 设置（页签制已取消） */}
+      <header className="flex shrink-0 items-center px-4 pb-1 pt-3">
+        <img src="/brand/mark-color.svg" alt="" aria-hidden draggable={false} className="size-5 shrink-0" />
+        <h1 className="sr-only">my-favorites</h1>
+        <button
+          className="ml-auto rounded-md px-1.5 py-1 text-xs text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800"
+          title="设置"
+          onClick={() => void browser.tabs.create({ url: "options.html" })}
+        >
+          ⚙
+        </button>
+      </header>
 
-      {/* ⭐ 快速收藏 */}
-      {tab === "save" && (
-        <div className="px-4 pt-3">
-          <div className="rounded-xl border border-neutral-200 p-3 dark:border-neutral-700">
-            <div className="flex items-start gap-2.5">
-              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-neutral-200 text-sm font-bold text-neutral-600 dark:bg-neutral-700 dark:text-neutral-300">
-                {(tabInfo?.title?.trim()[0] ?? "?").toUpperCase()}
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-[13px] font-semibold">{tabInfo?.title ?? "…"}</div>
-                <div className="truncate font-mono text-[11px] text-neutral-400">{hostOf(currentUrl)}</div>
-              </div>
-            </div>
-
-            {!/^https?:/.test(currentUrl) ? (
-              <p className="mt-3 text-xs text-neutral-400">当前页不支持收藏（chrome:// 等系统页）</p>
-            ) : privacy ? (
-              /* 🛡 隐私拦截：区分「命中清单/私密」与「规则未加载」，不把正常网站误标成隐私站 */
-              <div className="mt-3">
-                <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950 dark:text-red-300">
-                  {privacy === "policy_not_loaded"
-                    ? "🛡 隐私规则未同步 · 仅存 URL——连上服务端后自动恢复完整收藏"
-                    : "🛡 隐私域名 · 仅存 URL——不抓内容 / 不送 AI / 不快照，请手动选目录"}
-                </p>
-                <div className="mt-2 flex gap-2">
-                  <select className="flex-1 rounded-lg border px-2 py-1.5 text-xs dark:border-neutral-700" value={folderChoice} onChange={(e) => setFolderChoice(e.target.value)}>
-                    <option value="">选择目录…</option>
-                    {folderOptions.map((f) => (
-                      <option key={f.id} value={f.id}>{f.name}</option>
-                    ))}
-                  </select>
-                  <button
-                    className="rounded-lg bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
-                    disabled={!folderChoice || busy}
-                    onClick={() => void saveToFolder(folderChoice)}
-                  >
-                    收藏
-                  </button>
-                </div>
-              </div>
-            ) : hit ? (
-              /* 变体 A · 域名缓存命中（<50ms） */
-              <div className="mt-3 rounded-xl border border-indigo-200 bg-indigo-50 p-3 dark:border-indigo-900 dark:bg-indigo-950">
-                <div className="text-xs font-bold text-indigo-600 dark:text-indigo-300">✦ AI 建议归位 · 缓存命中</div>
-                <div className="mt-2 flex items-center gap-2">
-                  <span className="rounded-md bg-indigo-600 px-2 py-0.5 text-[11px] font-semibold text-white">
-                    📁 {suggest!.folderPath.join(" / ") || suggest!.category}
-                  </span>
-                </div>
-                <div className="mt-2.5 flex gap-2">
-                  <button
-                    className="flex-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-                    disabled={busy}
-                    onClick={() => void saveToFolder(suggestFolder)}
-                  >
-                    ✓ 收藏到这里
-                  </button>
-                  <select
-                    className="w-28 rounded-lg border px-1.5 py-1 text-xs dark:border-neutral-700"
-                    value={folderChoice}
-                    onChange={(e) => setFolderChoice(e.target.value)}
-                  >
-                    <option value="">改目录…</option>
-                    {folderOptions.map((f) => (
-                      <option key={f.id} value={f.id}>{f.name}</option>
-                    ))}
-                  </select>
-                  {folderChoice && (
-                    <button className="rounded-lg border px-2 py-1 text-xs" disabled={busy} onClick={() => void saveToFolder(folderChoice)}>
-                      确认
-                    </button>
-                  )}
-                </div>
-              </div>
-            ) : (
-              /* 变体 B · 未命中 → 先落收纳盒异步分类 */
-              <div className="mt-3 rounded-xl bg-neutral-100 p-3 dark:bg-neutral-800">
-                <div className="text-xs font-bold text-neutral-600 dark:text-neutral-300">✦ 首次见到这个域名</div>
-                <p className="mt-1 text-xs text-neutral-500">
-                  收藏后会先放进 <b>📥 收纳盒</b>，AI 自动读取网页内容判断归位（约几秒），歧义时才会问你。
-                </p>
-                <button
-                  className="mt-2 w-full rounded-lg border px-3 py-1.5 text-xs"
-                  onClick={() => send("save-to-inbox", "已放入收纳盒，AI 分类中…", "已收藏过")}
-                >
-                  先这样，以后再说
-                </button>
-              </div>
-            )}
-
-            {/* 快照开关（默认开）+ 备注（折叠）+ 丢收纳盒 */}
-            {/^https?:/.test(currentUrl) && !privacy && (
-              <>
-                <label className="mt-3 flex items-center justify-between text-xs text-neutral-500">
-                  同时保存页面快照（防失效回看）
-                  <input
-                    type="checkbox"
-                    checked={snapshotOn}
-                    onChange={(e) => {
-                      setSnapshotOn(e.target.checked);
-                      void browser.storage.local.set({ snapshotDefault: e.target.checked });
-                    }}
-                  />
-                </label>
-                {showNote ? (
-                  <input
-                    className="mt-2 w-full rounded-lg border px-2 py-1.5 text-xs dark:border-neutral-700"
-                    placeholder="备注——为什么收藏它？"
-                    value={note}
-                    onChange={(e) => setNote(e.target.value)}
-                  />
-                ) : (
-                  <button className="mt-2 text-[11px] text-neutral-400 underline" onClick={() => setShowNote(true)}>
-                    ＋ 添加备注
-                  </button>
-                )}
-                <button
-                  className="mt-3 w-full rounded-lg border px-3 py-1.5 text-xs"
-                  onClick={() => send("save-to-inbox", "已放入收纳盒", "已收藏过")}
-                >
-                  📥 不想了，丢进收纳盒
-                </button>
-              </>
-            )}
-
-            <div className="mt-3 flex items-center justify-between text-[10px] text-neutral-400">
-              <span><kbd className="rounded border px-1">Ctrl+Shift+S</kbd> 快速收藏</span>
-              <span>{privacy ? "🛡 已检查隐私清单 · 命中" : "🛡 已检查隐私清单"}</span>
-            </div>
+      {/* 页面信息 */}
+      <section className="shrink-0 px-4 pt-1">
+        <div className="flex items-start gap-2.5">
+          {tabInfo?.favIconUrl && iconOk ? (
+            /* 站点真实图标（tabs 权限下 Tab.favIconUrl 现成可得） */
+            <img
+              src={tabInfo.favIconUrl}
+              alt=""
+              draggable={false}
+              onError={() => setIconOk(false)}
+              className="size-8 shrink-0 rounded-lg bg-neutral-100 object-contain p-1 dark:bg-neutral-800"
+            />
+          ) : (
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-neutral-100 text-sm font-bold text-neutral-500 dark:bg-neutral-800 dark:text-neutral-300">
+              {(tabInfo?.title?.trim()[0] ?? "?").toUpperCase()}
+            </span>
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[13px] font-semibold">{tabInfo?.title ?? "…"}</div>
+            <div className="truncate font-mono text-[11px] text-neutral-400">{hostOf(currentUrl)}</div>
           </div>
         </div>
-      )}
+        {privacy ? (
+          <p className="mt-2 rounded-lg bg-red-50 px-3 py-1.5 text-[11px] text-red-700 dark:bg-red-950 dark:text-red-300">
+            🛡 {privacy === "policy_not_loaded" ? "隐私规则未同步 · 仅存 URL" : "隐私域名 · 仅存 URL，手动选目录"}
+          </p>
+        ) : (
+          !savable && <p className="mt-2 text-[11px] text-neutral-400">当前页不支持收藏（chrome:// 等系统页）</p>
+        )}
+      </section>
 
-      {/* 📥 收纳盒管理（原型 06） */}
-      {tab === "inbox" && (
-        <div className="px-4 pt-3 text-xs">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-neutral-500">{inboxItems.length} 条待处理</span>
-            <button className="rounded-lg border px-2 py-1 disabled:opacity-50" disabled={busy} onClick={sweep}>
-              立即清扫
-            </button>
-          </div>
-
-          {/* 歧义集中询问（D37：攒 ≥3 条触发；D42 起从「AI 整理」标签并入本视图） */}
-          {inboxItems.filter((i) => i.state === "ambiguous").length >= 3 && (
-            <div className="mb-2 rounded-xl bg-amber-50 p-3 dark:bg-amber-950">
-              <p className="font-semibold text-amber-700 dark:text-amber-300">
-                有 {inboxItems.filter((i) => i.state === "ambiguous").length} 条歧义，帮我确认一下：
-              </p>
-              <ul className="mt-2 space-y-2">
-                {inboxItems
-                  .filter((i) => i.state === "ambiguous")
-                  .map((i) => (
-                    <li key={i.id}>
-                      <div className="truncate font-medium">{i.title}</div>
-                      <div className="mt-1 flex gap-1.5">
-                        {i.suggestCategory && (
-                          <button
-                            className="rounded-full border px-2 py-0.5 text-[11px]"
-                            onClick={() => {
-                              const fid = folderOptions.find((f) => f.name === i.suggestCategory)?.id;
-                              // 建议目录可能已被系统改名/删除：不拿空 id 发请求（服务端必 400）
-                              if (fid) assign(i.id, fid);
-                              else flash(`「${i.suggestCategory}」目录不存在，请手动选目录`);
-                            }}
-                          >
-                            📁 {i.suggestCategory}
-                          </button>
-                        )}
-                        <span className="rounded-full border px-2 py-0.5 text-[11px] text-neutral-400">先留在收纳盒</span>
-                      </div>
-                    </li>
-                  ))}
-              </ul>
-            </div>
-          )}
-
-          {inboxItems.length === 0 && placed.length === 0 && (
-            <p className="py-6 text-center text-neutral-400">收纳盒是空的——随手丢进书签栏「📥 收纳盒」即可</p>
-          )}
-
-          <ul className="divide-y divide-neutral-100 dark:divide-neutral-800">
-            {inboxItems.map((it) => (
-              <li key={it.id} className="py-2.5">
-                <div className="truncate font-medium">{it.title}</div>
-                <div className="mt-0.5 truncate text-[11px] text-neutral-400">{hostOf(it.url_canonical)}</div>
-                {it.state === "pending" && (
-                  <p className="mt-1 text-[11px] text-neutral-400">⏳ 等待处理（事件唤醒或每小时清扫）</p>
-                )}
-                {it.state === "retry" && (
-                  <p className="mt-1 text-[11px] text-amber-600">
-                    AI 服务暂不可用 · 已排入重试队列 · 第 {it.attempts + 1}/5 次
-                  </p>
-                )}
-                {it.state === "ambiguous" && (
-                  <p className="mt-1 text-[11px] text-amber-600">
-                    歧义 · 置信 {Math.round((it.confidence ?? 0) * 100)}% —— 不强行移动，等你一下
-                  </p>
-                )}
-                {it.state === "privacy_hold" && (
-                  <p className="mt-1 text-[11px] text-red-600">🛡 隐私域名 · 仅存 URL · 需手动选目录</p>
-                )}
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
+      {/* 其他信息沉底：有才显示 */}
+      <div className="scroll-slim mt-3 flex-1 overflow-y-auto px-4">
+        {inboxItems.length > 0 && (
+          <section className="mb-3">
+            <p className="mb-1 text-[11px] text-neutral-400">收纳盒 · {inboxItems.length} 条 · AI 自动归位，拿不准才问你</p>
+            <ul className="divide-y divide-neutral-100 text-xs dark:divide-neutral-800">
+              {inboxItems.map((it) => (
+                <li key={it.id} className="py-2">
+                  <div className="truncate font-medium">{it.title}</div>
+                  <div className="mt-0.5 truncate text-[11px] text-neutral-400">{hostOf(it.url_canonical)}</div>
+                  {it.state === "pending" && <p className="mt-1 text-[11px] text-neutral-400">⏳ AI 自动归位中（丢入即触发，最迟 1 分钟兜底）</p>}
                   {it.state === "retry" && (
-                    <button className="rounded-md bg-neutral-900 px-2 py-1 text-[11px] text-white dark:bg-neutral-100 dark:text-neutral-900" onClick={() => retry(it.id)}>
-                      立即重试
-                    </button>
-                  )}
-                  {it.state === "ambiguous" && it.suggestCategory && (
-                    <span className="text-[11px] text-neutral-400">AI 倾向「{it.suggestCategory}」</span>
-                  )}
-                  <select
-                    className="rounded-md border px-1.5 py-1 text-[11px] dark:border-neutral-700"
-                    value=""
-                    onChange={(e) => e.target.value && assign(it.id, e.target.value, it.is_private === 1)}
-                  >
-                    <option value="">{it.is_private === 1 ? "手动选目录…" : "改目录 / 手动选…"}</option>
-                    {folderOptions.map((f) => (
-                      <option key={f.id} value={f.id}>{f.name}</option>
-                    ))}
-                  </select>
-                  {it.is_private === 1 && folderOptions.length > 0 && (
-                    <button
-                      className="rounded-md border px-2 py-1 text-[11px]"
-                      title={`按域名记忆：${hostOf(it.url_canonical)} 以后自动进「${folderOptions[0]!.name}」`}
-                      onClick={() => {
-                        const parsed = /^https?:/.test(it.url_canonical) ? hostOf(it.url_canonical) : "";
-                        // 复用 assign（自带失败反馈），服务不可达不再静默
-                        if (parsed) assign(it.id, it.domainRuleFolderId ?? folderOptions[0]!.id, true);
-                      }}
-                    >
-                      🛡 按域名记忆
-                    </button>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-
-          {placed.length > 0 && (
-            <div className="mt-3">
-              <p className="mb-1 text-[11px] font-semibold text-neutral-500">最近已自动归位（可撤销）</p>
-              <ul className="space-y-1.5">
-                {placed.map((p) => (
-                  <li key={p.bookmark_id} className="flex items-center gap-2 rounded-lg bg-neutral-100 px-2 py-1.5 dark:bg-neutral-800">
-                    <span className="min-w-0 flex-1 truncate">{p.title}</span>
-                    <span className="shrink-0 text-[10px] text-neutral-400">{p.reason}</span>
-                    {p.version_id && (
-                      <button
-                        className="shrink-0 rounded-md border px-1.5 py-0.5 text-[10px]"
-                        onClick={() =>
-                          void api<{ reversed: number }>(`/organize/rollback/${p.version_id}`, { method: "POST" })
-                            .then((r) => {
-                              flash(`↩️ 已撤销 ${r.reversed} 项`);
-                              loadInbox();
-                              refreshVersions();
-                            })
-                            .catch((err: unknown) => flash(`❌ 撤销失败：${String(err).slice(0, 60)}`))
-                        }
-                      >
-                        撤销
+                    <p className="mt-1 flex items-center gap-2 text-[11px] text-amber-600">
+                      暂不可用 · 第 {it.attempts + 1}/5 次
+                      <button className="rounded-md bg-neutral-100 px-1.5 py-0.5 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700" onClick={() => retry(it.id)}>
+                        重试
                       </button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
+                    </p>
+                  )}
+                  {it.state === "ambiguous" && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      {it.suggestCategory && <span className="text-[11px] text-amber-600">AI 倾向「{it.suggestCategory}」</span>}
+                      <select
+                        className="rounded-md border px-1.5 py-1 text-[11px] dark:border-neutral-700"
+                        value=""
+                        onChange={(e) => e.target.value && assign(it.id, e.target.value, it.is_private === 1)}
+                      >
+                        <option value="">选目录归位…</option>
+                        {folderOptions.map((f) => (
+                          <option key={f.id} value={f.id}>{f.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {it.state === "privacy_hold" && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] text-red-600">🛡 仅存 URL</span>
+                      <select
+                        className="rounded-md border px-1.5 py-1 text-[11px] dark:border-neutral-700"
+                        value=""
+                        onChange={(e) => e.target.value && assign(it.id, e.target.value, true)}
+                      >
+                        <option value="">手动选目录…</option>
+                        {folderOptions.map((f) => (
+                          <option key={f.id} value={f.id}>{f.name}</option>
+                        ))}
+                      </select>
+                      {folderOptions.length > 0 && (
+                        <button
+                          className="rounded-md bg-neutral-100 px-1.5 py-1 text-[11px] hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700"
+                          title={`按域名记忆：${hostOf(it.url_canonical)} 以后自动进「${folderOptions[0]!.name}」`}
+                          onClick={() => assign(it.id, it.domainRuleFolderId ?? folderOptions[0]!.id, true)}
+                        >
+                          按域名记忆
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
-      {/* 🕘 历史：整理版本时间线（与管理台共用版本体系） */}
-      {tab === "history" && (
-        <div className="px-4 pt-3 text-xs">
-          <p className="mb-1.5 text-[11px] text-neutral-400">最近整理版本（撤销 = 逆放 diff 生成新版本，历史永不删除）</p>
-          <ul className="divide-y divide-neutral-100 dark:divide-neutral-800">
-            {versions.map((v) => (
-              <li key={v.id} className="flex items-center gap-2 py-2">
-                <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-neutral-800">
-                  {v.id.slice(0, 8)}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-neutral-500">
-                  {v.kind === "undo" ? "撤销" : v.session_id ? "整理" : "自动归位"} · {v.actionCount} 项 · {v.created_at.slice(5, 16).replace("T", " ")}
-                </span>
-                {v.reverted === 0 && (
-                  <button
-                    className="shrink-0 rounded-md border px-1.5 py-0.5 text-[10px]"
-                    onClick={() =>
-                      void api<{ reversed: number }>(`/organize/rollback/${v.id}`, { method: "POST" })
-                        .then((r) => {
-                          flash(`↩️ 已回滚 ${r.reversed} 项`);
-                          refreshVersions(); // 回滚生成新 undo 版本，列表须刷新（旧「回滚」按钮不再可点）
-                        })
-                        .catch((err: unknown) => flash(`❌ 回滚失败：${String(err).slice(0, 60)}`))
-                    }
-                  >
-                    回滚
-                  </button>
-                )}
-              </li>
+        {placed.length > 0 && (
+          <section className="mb-3">
+            <p className="mb-1 text-[11px] text-neutral-400">最近自动归位</p>
+            <ul className="space-y-1 text-xs">
+              {placed.map((p) => (
+                <li key={p.bookmark_id} className="flex items-center gap-2 rounded-lg bg-neutral-100 px-2 py-1.5 dark:bg-neutral-800" title={p.reason ?? undefined}>
+                  <span className="min-w-0 flex-1 truncate">{p.title}</span>
+                  {p.folder_name && <span className="shrink-0 text-[10px] text-neutral-500 dark:text-neutral-300">→「{p.folder_name}」</span>}
+                  <span className="shrink-0 text-[10px] text-neutral-400">{p.reason}</span>
+                  {p.version_id && (
+                    <button
+                      className="shrink-0 rounded-md bg-white px-1.5 py-0.5 text-[10px] hover:bg-neutral-50 dark:bg-neutral-600 dark:hover:bg-neutral-500"
+                      onClick={() => rollback(p.version_id!, "已撤销")}
+                    >
+                      撤销
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {versions.length > 0 && (
+          <section className="mb-3">
+            <p className="mb-1 text-[11px] text-neutral-400">整理版本（历史永不删除，可回滚）</p>
+            <ul className="space-y-1 text-[11px] text-neutral-500">
+              {versions.slice(0, 3).map((v) => (
+                <li key={v.id} className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate">
+                    {v.kind === "undo" ? "撤销" : v.session_id ? "整理" : "自动归位"} · {v.actionCount} 项 · {v.created_at.slice(5, 16).replace("T", " ")}
+                  </span>
+                  {v.reverted === 0 && (
+                    <button className="shrink-0 rounded-md px-1.5 py-0.5 hover:bg-neutral-100 dark:hover:bg-neutral-800" onClick={() => rollback(v.id, "已回滚")}>
+                      回滚
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {inboxItems.length === 0 && placed.length === 0 && versions.length === 0 && (
+          <p className="pt-4 text-center text-[11px] text-neutral-400">一切就绪——收藏后 AI 在后台自动整理</p>
+        )}
+      </div>
+
+      {/* 底部固定：唯一主按钮（弱化为浅靛底深靛字）+ 低频「更多」 */}
+      <footer className="shrink-0 px-4 pt-2">
+        {status && <p className="mb-1.5 text-center text-xs text-emerald-600">{status}</p>}
+        {privacy && savable && (
+          <select
+            className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs dark:border-neutral-700"
+            value={folderChoice}
+            onChange={(e) => setFolderChoice(e.target.value)}
+          >
+            <option value="">选择目录…</option>
+            {folderOptions.map((f) => (
+              <option key={f.id} value={f.id}>{f.name}</option>
             ))}
-            {versions.length === 0 && <li className="py-4 text-center text-neutral-400">还没有整理记录</li>}
-          </ul>
-        </div>
-      )}
-
-      {status && <p className="mt-2 px-4 text-center text-xs text-emerald-600">{status}</p>}
+          </select>
+        )}
+        {savable && !privacy && (
+          <details className="mb-2 text-xs text-neutral-500">
+            <summary className="list-none cursor-pointer text-[11px] text-neutral-400 [&::-webkit-details-marker]:hidden">
+              更多 · 快照{snapshotOn ? "开" : "关"}
+              {note ? " · 已写备注" : ""}
+              {hit ? " · 可改目录" : ""}
+            </summary>
+            {hit && (
+              <select
+                className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs dark:border-neutral-700"
+                value={folderChoice}
+                onChange={(e) => setFolderChoice(e.target.value)}
+              >
+                <option value="">收藏目录：跟随 AI 建议「{targetName}」</option>
+                {folderOptions.map((f) => (
+                  <option key={f.id} value={f.id}>改存「{f.name}」</option>
+                ))}
+              </select>
+            )}
+            <label className="flex items-center justify-between">
+              同时保存页面快照（防失效回看）
+              <input
+                type="checkbox"
+                checked={snapshotOn}
+                onChange={(e) => {
+                  setSnapshotOn(e.target.checked);
+                  void browser.storage.local.set({ snapshotDefault: e.target.checked });
+                }}
+              />
+            </label>
+            <input
+              className="mt-2 w-full rounded-lg border px-2 py-1.5 text-xs dark:border-neutral-700"
+              placeholder="备注——为什么收藏它？"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+            />
+            {hit && (
+              <button
+                className="mt-2 w-full rounded-lg bg-neutral-100 px-3 py-1.5 text-xs hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700"
+                onClick={() => send("save-to-inbox", "已放入收纳盒", "已收藏过")}
+              >
+                不想了，先丢收纳盒
+              </button>
+            )}
+            {/* 管理台入口（低频折叠区）：深度整理/版本/发布都在管理台，深链到概览 */}
+            <a
+              className="mt-2 block cursor-pointer text-center text-[11px] text-neutral-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+              onClick={() => {
+                void getConfig().then((c) => browser.tabs.create({ url: `${c.serverUrl.replace(/\/$/, "")}/#overview` }));
+                window.close();
+              }}
+            >
+              打开管理台 ↗
+            </a>
+          </details>
+        )}
+        <button
+          className="w-full rounded-lg bg-indigo-100 px-3 py-2.5 text-xs font-semibold text-indigo-700 transition-colors hover:bg-indigo-200 disabled:opacity-40 dark:bg-indigo-950 dark:text-indigo-200 dark:hover:bg-indigo-900"
+          disabled={!savable || busy || (privacy !== false && !folderChoice)}
+          title={hit ? `AI 建议 · 缓存命中：${targetName}` : "AI 将读取页面自动分类，拿不准才会问你"}
+          onClick={() =>
+            targetId
+              ? void saveToFolder(targetId)
+              : send("save-to-inbox", "已放入收纳盒，AI 分类中…", "已收藏过")
+          }
+        >
+          {busy
+            ? "收藏中…"
+            : !savable
+              ? "✓ 收藏（此页不支持）"
+              : privacy !== false
+                ? "✓ 收藏"
+                : targetId
+                  ? `✓ 收藏到「${targetName}」`
+                  : "✓ 收藏，交给 AI 归位"}
+        </button>
+      </footer>
     </main>
   );
 }
