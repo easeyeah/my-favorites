@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { EmptyState, PageScroll, PageHeader, toast } from "@/components/shared";
 import { useShell, useRoute } from "@/components/layout";
 import { fetchers, type MaterialCounts, type MaterialFacets, type MaterialRow } from "@/lib/api";
+import { categoryEmoji, tagEmoji } from "@/lib/tag-emoji";
 import { cn } from "@/lib/utils";
 
 type KindFilter = "" | "article" | "video" | "image";
@@ -174,6 +175,7 @@ export function Materials() {
                     catFilter === top.name ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
                   )}
                 >
+                  <span className="shrink-0">{categoryEmoji(top.name)}</span>
                   <span className="min-w-0 flex-1 truncate text-left">{top.name}</span>
                   <span className="tabular text-muted-foreground shrink-0 text-[11px]">{top.count}</span>
                 </button>
@@ -195,6 +197,7 @@ export function Materials() {
                       )}
                       style={{ paddingLeft: 26 }}
                     >
+                      <span className="shrink-0">{tagEmoji(sub.name)}</span>
                       <span className="min-w-0 flex-1 truncate text-left">{sub.name}</span>
                       <span className="tabular text-muted-foreground shrink-0 text-[11px]">{sub.count}</span>
                     </button>
@@ -234,6 +237,7 @@ export function Materials() {
                     tag === t.tag ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
                   )}
                 >
+                  <span className="shrink-0">{tagEmoji(t.tag)}</span>
                   <span className="min-w-0 flex-1 truncate text-left">{t.tag}</span>
                   <span className="tabular text-muted-foreground shrink-0 text-[11px]">{t.count}</span>
                 </button>
@@ -333,12 +337,12 @@ export function Materials() {
                               className="text-primary bg-primary/10 px-1.5 py-0 text-[10px]"
                               title="AI 分类（资料库自有体系，按内容语义两级归类）"
                             >
-                              {it.category.split("/").join(" / ")}
+                              {categoryEmoji(it.category)} {it.category.split("/").join(" / ")}
                             </Badge>
                           )}
                           {tags.map((t) => (
                             <Badge key={t} variant="secondary" className="px-1.5 py-0 text-[10px]">
-                              {t}
+                              {tagEmoji(t)} {t}
                             </Badge>
                           ))}
                         </div>
