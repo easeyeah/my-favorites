@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { Bell, Check, ChevronRight, Cloud, Database, Download, FileUp, HardDrive, Loader2, Plug, Plus, ScrollText, ShieldCheck, Sparkles, Trash2, Upload, Webhook } from "lucide-react";
+import { Bell, Bot, Check, ChevronRight, Cloud, Copy, Database, Download, FileUp, HardDrive, Loader2, Plug, Plus, ScrollText, ShieldCheck, Sparkles, Trash2, Upload, Webhook } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -43,6 +43,7 @@ const SECTIONS: Array<{ sub: string; icon: ReactNode; title: string; desc: strin
   { sub: "organize-rules", icon: <Sparkles className="size-4" />, title: "整理偏好", desc: "AI 记住的整理规则，可查看 / 删除（原型 12）", content: () => <OrganizeRulesCard /> },
   { sub: "connection", icon: <Plug className="size-4" />, title: "连接与安全", desc: "服务端地址与登录", content: () => <ConnectionCard /> },
   { sub: "ai", icon: <Database className="size-4" />, title: "AI 模型", desc: "BYOK 供应商，驱动整理与摘要", content: () => <ProvidersCard /> },
+  { sub: "mcp", icon: <Bot className="size-4" />, title: "MCP 接入", desc: "资料库对 AI 工具开放：Claude / Cursor 检索与阅读全文（D64）", content: () => <McpCard /> },
   { sub: "privacy", icon: <ShieldCheck className="size-4" />, title: "隐私保护", desc: "域名清单：不抓取、不送 AI、不出站", content: () => <PrivacyCard /> },
   { sub: "data", icon: <Download className="size-4" />, title: "数据", desc: "JSON / HTML 导入导出，随时带走", content: () => <DataCard /> },
   { sub: "webhooks", icon: <Webhook className="size-4" />, title: "集成与自动化", desc: "出站 Webhook：收藏动作触发外部工具", content: () => <WebhooksCard /> },
@@ -1568,6 +1569,82 @@ function AuditCard() {
       )}
       <p className="text-muted-foreground mt-2 text-[11px]">
         服务端记录登录、令牌、配置与发布动作；不含书签内容，绝不落密码与令牌，保留最近 1000 条。
+      </p>
+    </div>
+  );
+}
+
+/** D64 MCP 接入介绍：资料库对 AI 工具开放（端点 + 三工具 + 连接器配置步骤） */
+function McpCard() {
+  const { cfg } = useShell();
+  const endpoint = `${cfg.serverUrl.replace(/\/$/, "")}/api/v1/mcp`;
+  const copy = (text: string, label: string): void => {
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => toast.ok(`${label}已复制`))
+      .catch(() => toast.err("复制失败"));
+  };
+  const tools: Array<{ name: string; desc: string }> = [
+    { name: "materials_search", desc: "关键词 / AI 分类 / 类型 / 标签检索（返回摘要级元数据）" },
+    { name: "materials_get", desc: "按 id 读取详情，含已存全文——AI 可直接阅读原文" },
+    { name: "materials_recent", desc: "最近入库 + 类型计数（「最近收藏了什么」类询问）" },
+  ];
+  return (
+    <div className="space-y-5">
+      <p className="text-muted-foreground text-[13px] leading-relaxed">
+        资料库对 AI 工具开放：Claude、Cursor 等通过 MCP（Model Context
+        Protocol）直接检索收藏、阅读已存全文。AI 是资料库的一等消费者。
+      </p>
+
+      <div>
+        <SectionTitle>端点</SectionTitle>
+        <div className="bg-muted/60 flex items-center gap-2 rounded-xl px-3 py-2.5">
+          <code className="min-w-0 flex-1 truncate font-mono text-xs">{endpoint}</code>
+          <Button variant="ghost" size="sm" onClick={() => copy(endpoint, "端点地址")}>
+            <Copy className="size-3.5" /> 复制
+          </Button>
+        </div>
+      </div>
+
+      <div>
+        <SectionTitle>可用工具</SectionTitle>
+        <ul className="divide-y divide-border/40">
+          {tools.map((t) => (
+            <li key={t.name} className="py-2 text-[13px]">
+              <code className="font-mono font-medium">{t.name}</code>
+              <p className="text-muted-foreground mt-0.5 text-xs leading-relaxed">{t.desc}</p>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div>
+        <SectionTitle>接入步骤（Claude / Cursor）</SectionTitle>
+        <ol className="text-muted-foreground list-decimal space-y-1.5 pl-5 text-[13px] leading-relaxed">
+          <li>复制上方端点地址。</li>
+          <li>在客户端的 MCP 连接器（自定义连接器 / mcpServers）里粘贴为 URL。</li>
+          <li>
+            添加请求头：<code className="font-mono">Authorization: Bearer &lt;令牌&gt;</code>
+            （服务端设置了管理员密码时必填；令牌在「连接与安全」登录后签发）。
+          </li>
+        </ol>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-3"
+          onClick={() =>
+            copy(
+              JSON.stringify({ url: endpoint, headers: { Authorization: "Bearer <令牌>" } }, null, 2),
+              "接入配置",
+            )
+          }
+        >
+          复制接入配置示例
+        </Button>
+      </div>
+
+      <p className="text-muted-foreground text-[11px]">
+        隐私说明：隐私域名与私密书签在资料层不存在，MCP 侧天然零暴露。
       </p>
     </div>
   );

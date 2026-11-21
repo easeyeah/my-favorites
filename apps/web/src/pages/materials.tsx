@@ -14,7 +14,7 @@ import { ArrowUpRight, Clapperboard, Download, FileText, Image as ImageIcon, Loa
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { EmptyState, PageScroll, PageHeader, toast } from "@/components/shared";
-import { useShell, useRoute } from "@/components/layout";
+import { useShell } from "@/components/layout";
 import { fetchers, type MaterialCounts, type MaterialFacets, type MaterialRow } from "@/lib/api";
 import { categoryEmoji, tagEmoji } from "@/lib/tag-emoji";
 import { cn } from "@/lib/utils";
@@ -45,7 +45,6 @@ const hostOf = (url: string): string => {
 
 export function Materials() {
   const { cfg } = useShell();
-  const { go } = useRoute();
   const [items, setItems] = useState<MaterialRow[]>([]);
   const [counts, setCounts] = useState<MaterialCounts>({ total: 0, article: 0, video: 0, image: 0 });
   const [facets, setFacets] = useState<MaterialFacets | null>(null);
@@ -361,17 +360,6 @@ export function Materials() {
                 );
               })}
             </ul>
-          )}
-
-          {/* MCP 提示：安静事实行（本库对 AI 工具开放） */}
-          {counts.total > 0 && (
-            <p className="text-muted-foreground mt-4 text-[11px]">
-              ⚡ 本库已开放 MCP 接口：<code className="font-mono">POST /api/v1/mcp</code>
-              （materials_search / materials_get / materials_recent），Claude、Cursor 等 AI 工具配好服务端地址与令牌即可直接检索和阅读全文。
-              <button className="hover:text-foreground ml-1 underline underline-offset-2" onClick={() => go("settings")}>
-                获取令牌 →
-              </button>
-            </p>
           )}
         </div>
       </div>
