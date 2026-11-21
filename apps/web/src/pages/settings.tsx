@@ -1574,14 +1574,21 @@ function AuditCard() {
   );
 }
 
-/** D64 MCP 接入介绍：资料库对 AI 工具开放（端点 + 三工具 + 连接器配置步骤） */
+/** D64 MCP 接入介绍：资料库对 AI 工具开放（端点 + 三工具 + 鉴权说明 + 连接器配置步骤） */
 function McpCard() {
   const { cfg } = useShell();
   const endpoint = `${cfg.serverUrl.replace(/\/$/, "")}/api/v1/mcp`;
+  // 已登录时示例直接带真实令牌（自建单管理员场景，免手工替换）；未登录用占位符并指路
+  const token = cfg.token ?? "";
+  const example = JSON.stringify(
+    { url: endpoint, headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    null,
+    2,
+  );
   const copy = (text: string, label: string): void => {
     void navigator.clipboard
       .writeText(text)
-      .then(() => toast.ok(`${label}已复制`))
+      .then(() => toast.ok(token ? `${label}已复制（含令牌，请妥善保管）` : `${label}已复制`))
       .catch(() => toast.err("复制失败"));
   };
   const tools: Array<{ name: string; desc: string }> = [
@@ -1619,26 +1626,41 @@ function McpCard() {
       </div>
 
       <div>
+        <SectionTitle>鉴权</SectionTitle>
+        <div className="bg-muted/60 rounded-xl px-3 py-2.5 text-[13px] leading-relaxed">
+          {token ? (
+            <p>
+              无需单独的 API Key——MCP 与管理台登录同源，使用
+              <code className="font-mono"> Authorization: Bearer &lt;令牌&gt;</code>
+              （下方配置示例已包含当前登录令牌，含敏感信息请妥善保管、不要外发）。
+            </p>
+          ) : (
+            <>
+              <p>
+                服务端设置了管理员密码（或已完成首启设置）时，MCP 需要 Bearer
+                令牌——与管理台登录同源，无需单独的 API Key。先到「连接与安全」登录签发令牌，再复制下方示例并替换
+                <code className="font-mono"> &lt;令牌&gt;</code> 占位符。
+              </p>
+              <p className="text-muted-foreground mt-1.5">
+                服务端未设置密码（纯内网本地使用）时无需鉴权，直接连接；公网暴露务必设置密码。
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div>
         <SectionTitle>接入步骤（Claude / Cursor）</SectionTitle>
         <ol className="text-muted-foreground list-decimal space-y-1.5 pl-5 text-[13px] leading-relaxed">
-          <li>复制上方端点地址。</li>
+          <li>复制下方接入配置示例（或端点地址）。</li>
           <li>在客户端的 MCP 连接器（自定义连接器 / mcpServers）里粘贴为 URL。</li>
           <li>
-            添加请求头：<code className="font-mono">Authorization: Bearer &lt;令牌&gt;</code>
-            （服务端设置了管理员密码时必填；令牌在「连接与安全」登录后签发）。
+            {token
+              ? "示例已包含当前登录令牌，粘贴即用。"
+              : "添加请求头 Authorization: Bearer <令牌>（按「鉴权」指引签发/替换）。"}
           </li>
         </ol>
-        <Button
-          variant="outline"
-          size="sm"
-          className="mt-3"
-          onClick={() =>
-            copy(
-              JSON.stringify({ url: endpoint, headers: { Authorization: "Bearer <令牌>" } }, null, 2),
-              "接入配置",
-            )
-          }
-        >
+        <Button variant="outline" size="sm" className="mt-3" onClick={() => copy(example, "接入配置")}>
           复制接入配置示例
         </Button>
       </div>
