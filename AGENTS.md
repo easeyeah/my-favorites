@@ -1,7 +1,7 @@
 # AGENTS.md — my-favorites 项目规范（AI 会话必读）
 
 > AI 辅助开发项目。任何接手本仓库的 AI 会话先读完本文件再动手。
-> 文档入口：[docs/README.md](docs/README.md)。权威现状文档：[`docs/产品.md`](docs/产品.md)（功能与状态）、[`docs/技术方案.md`](docs/技术方案.md)（架构/API/数据模型）、[`docs/决策记录.md`](docs/决策记录.md)（D1–D65，只追加）。
+> 文档入口：[docs/README.md](docs/README.md)。权威现状文档：[`docs/产品.md`](docs/产品.md)（功能与状态）、[`docs/技术方案.md`](docs/技术方案.md)（架构/API/数据模型）、[`docs/决策记录.md`](docs/决策记录.md)（D1–D66，只追加）。
 > 原型 `docs/原型/`（17 屏 + 流程图）**已冻结，仅作历史参考，其中部分界面已被推翻（侧栏聊天、popup 页签、三档新标签页）**——界面规范以本文件「管理台 UI 设计规范」节为准，改动直接落 `apps/web` 代码并用 `?mock` 演示模式验收。
 
 ## 项目一句话
@@ -115,6 +115,8 @@ docker build --target prod -t my-favorites:ci -f docker/Dockerfile .   # 生产�
 - [x] **capture 摘要兜底补扫（D63，2026-11-21）**：修正 D62 盘点误判——async 模式 maybeSummarize 本就 `void run()` 不阻塞收藏响应，真缺口=无兜底（fire-and-forget 遇重启永久丢失、llm_unavailable 永不重试、call_model 拒绝不留痕）。修：bookmarksMissingSummary + backfillSummaries（≤5 条涓流、无 LLM 零开销）+ startSummaryBackfill 常驻（启动+30min，仿 D58 不挂可选开关）+ 隐私拒绝落 privacy_call_model_denied。教训：**「await 了内部 void run 的函数」≠阻塞，判读阻塞先看被调方当前模式是否同步执行**。server 192(+5) 全绿 + 真实容器端到端（抹 L1→重启→kicked 1→DeepSeek 找回）
 - [x] **资料库消费面重定位（D64，2026-11-21）**：用户拍板「资料页列表即可不做阅读效果、分类标签一定要做好、最终价值是经 MCP 供 AI 工具调用」。三件：① 资料页行式列表（砍卡片流/阅读浮层/封面流），行 = 标题+已存全文+📸 / 分类标签行（目录徽章主色语义 + AI 标签 ≤5）+ 行内操作；类型 chips 带计数。② **MCP 端点 `POST /api/v1/mcp`**（Streamable HTTP JSON 模式，JSON-RPC initialize/notifications/tools.list/tools.call，无状态；三工具 materials_search 摘要级 / materials_get 含全文 / materials_recent 带计数；鉴权随 /api/v1 bearer）——AI 客户端（Claude/Cursor 自定义连接器）配地址+令牌即用。③ listMaterials 增 tag/folderId（逗号分隔子树 IN）筛选。后续增强：**左侧双维度分面面板**——「分类」树（目录体系、子树聚合计数、无资料分支剪枝）+「AI 标签」频次榜（json_each 展开 l1_tags），点选即筛选、四维正交叠加；GET /materials/facets 分面统计（json_valid 防御坏 JSON）。教训：**AI 是一等消费者时，元数据完备+行式列表优先于阅读体验；分类的「厉害感」靠目录+AI 标签两层外显；标签无层级不造假树——树给真层级的目录维度，频次榜给平铺的标签维度**。server 200(+8)/E2E 36 过 1 跳 + 真库端到端（全文 4552 字返回）+ 截图自检
 - [x] **资料库自有 AI 分类体系（D65，2026-11-21）**：用户「不用书签的分类，但可以参考书签的分类」——资料分类按内容语义自组织，不沿用浏览器目录；左树呈现方式参考书签库（层级缩进+计数+点选）。迁移 v11 material.category（两级路径随摘要同一次 LLM 调用产出，零额外成本）+ backfillCategories 涓流回灌存量（startCategoryBackfill 启动+30min，单条失败不阻塞缺失即下轮重进候选）+ 左栏「分类」树（两层聚合+未分类兜底）替代目录树 + 行徽章/MCP/导出全部换 category 维度 + category 子树筛选（一级前缀匹配）。设计判断：**书签目录服务于浏览器心智，资料分类按内容语义自组织——AI prompt 给推荐一级清单但允许自拟更贴切短语（自组织优于硬枚举）**。server 200(+1)/E2E 36 过 1 跳 + 真库回灌实测（DeepSeek 产出「技术开发/算法与数据结构」等）+ 截图自检
+- [x] **资料页简化：只保留分类维度（D66，2026-11-21）**：用户「分类和标签放在一起还是感觉太复杂了，就保留分类吧」——左栏标签榜/行上标签徽章/标签筛选全部移除，UI 剩余维度 = 分类（AI 两级树）+ 类型 chips + 关键词检索；标签退回数据层（仍生成、仍进 MCP tag 参数与导出，供 AI 检索；生成端复用引导保留防爆炸）。教训：**维度给谁用要想清楚——标签对 AI 是检索面（MCP 参数），对人则是噪音源；双维度并存只该出现在 AI 侧**。server 200/E2E 36 过 1 跳 + 真库截图（左栏仅分类树）
+- [x] **标签/分类确定性 emoji 图标（2026-11-21）**：用户「给标签加个图标视觉更好」——lib/tag-emoji.ts 关键词规则优先 + 稳定哈希兜底（同一标签恒定同一图标）；展示层职责不进数据（tags/category 原值与 MCP 消费不受影响）；应用位 = 左栏分类树/行上分类徽章
 - [x] **收纳盒空态历史可见性修复（2026-11-21）**：用户「历史记录又看不到了」——D54「最近自动归位」区嵌在书签列表容器（items 三元 else 分支）内，盒清空（pending=0/placed=5）时整块随 EmptyState 消失。修：历史区提升为列表容器兄弟块 + 盒空文案语义化（「收纳盒是空的——增量已全部归位，记录见下方可撤销」）。教训：**功能块要审容器祖先的「列表非空」类隐性门槛；自动化功能清空输入态后要再走查一遍**
 - [x] **管理台入口补齐（2026-11-21）**：用户反馈 options（书签配置页）无管理台入口。三处：options 连接分区「打开管理台」按钮 / popup「更多」折叠区链接 / welcome 第 4 步次级按钮，深链 `serverUrl/#overview`；options-ui E2E 补断言
 - [ ] **资料库后手（D61 延伸）**：视频作者/时长元数据捕获；/crawl/run 补管理台入口或清理；笔记应用导出适配器（Notion 优先，Obsidian 目录落盘次之）

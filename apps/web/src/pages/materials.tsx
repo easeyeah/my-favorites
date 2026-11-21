@@ -1,11 +1,13 @@
 /**
- * 资料库（D61/D64/D65）：收藏内容三级识别的实体面。
+ * 资料库（D61/D64/D65/D66 简化）：收藏内容三级识别的实体面。
  * 形态定位（D64 用户拍板）：资料管理的最终价值是「经 MCP 供 AI 工具调用」，人逛页面是次要
- * 场景——不做阅读效果，行式列表即可；分类标签是一等展示位。
- * 左侧面板（D65）：资料库自有 AI 分类树（两级路径，随摘要同一次 LLM 调用产出，涓流回灌存量）
- * + AI 标签频次榜——**不用书签目录**（书签分类服务于浏览器心智，资料分类按内容语义），
- * 呈现方式参考书签库左树（层级缩进 + 计数 + 点选筛选）。
- * 行 = 标题 + 已存全文徽章 + 📸 + 分类标签行 + 行内操作（打开原页/导出/移出）。
+ * 场景——不做阅读效果，行式列表即可。
+ * 左侧面板（D65/D66）：资料库自有 AI 分类树（两级路径，随摘要同一次 LLM 调用产出，涓流回灌
+ * 存量）——**不用书签目录**（书签分类服务于浏览器心智，资料分类按内容语义），呈现方式参考
+ * 书签库左树（层级缩进 + 计数 + 点选筛选）。
+ * D66 简化：分类与标签双维度并存仍嫌复杂——**UI 只保留分类**；标签退回数据层（仍生成、
+ * 仍进 MCP/导出，供 AI 检索），不再作为人的浏览维度。
+ * 行 = 标题 + 已存全文徽章 + 📸 + 分类徽章 + 行内操作（打开原页/导出/移出）。
  */
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowUpRight, Clapperboard, Download, FileText, Image as ImageIcon, Loader2, Search, Trash2 } from "lucide-react";
@@ -51,8 +53,6 @@ export function Materials() {
   const [q, setQ] = useState("");
   const [catFilter, setCatFilter] = useState<string | null>(null);
   const [uncategorized, setUncategorized] = useState(false);
-  const [tag, setTag] = useState("");
-  const [tagSearch, setTagSearch] = useState("");
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(() => {
@@ -61,7 +61,6 @@ export function Materials() {
       .materials(cfg, {
         type: filter || undefined,
         q: q || undefined,
-        tag: tag || undefined,
         category: catFilter || undefined,
         uncategorized,
         limit: 100,
@@ -72,7 +71,7 @@ export function Materials() {
       })
       .catch(() => setItems([]))
       .finally(() => setLoading(false));
-  }, [cfg, filter, q, tag, catFilter, uncategorized]);
+  }, [cfg, filter, q, catFilter, uncategorized]);
 
   useEffect(load, [load]);
 
@@ -101,18 +100,6 @@ export function Materials() {
   }, [facets]);
   const categorized = (facets?.categories ?? []).reduce((s, c) => s + c.count, 0);
   const uncategorizedCount = Math.max(0, counts.total - categorized);
-
-  // AI 标签展示口径：浏览面只露高频（count≥2，至多 15 个）；标签少时退化为 top 12；
-  // 搜索态在全量（≤500）里匹配——长尾不刷屏但可达
-  const allTags = facets?.tags ?? [];
-  const freqTags = allTags.filter((t) => t.count >= 2).slice(0, 15);
-  const shownTags = tagSearch.trim()
-    ? allTags
-        .filter((t) => t.tag.toLowerCase().includes(tagSearch.trim().toLowerCase()))
-        .slice(0, 15)
-    : freqTags.length >= 8
-      ? freqTags
-      : allTags.slice(0, Math.min(12, allTags.length));
 
   const exportMd = async (id: string, title: string) => {
     try {
@@ -143,7 +130,7 @@ export function Materials() {
     if (it) window.open(it.url_raw, "_blank");
   };
 
-  const filtersActive = filter !== "" || q !== "" || tag !== "" || catFilter !== null || uncategorized;
+  const filtersActive = filter !== "" || q !== "" || catFilter !== null || uncategorized;
 
   return (
     <PageScroll>
@@ -238,43 +225,8 @@ export function Materials() {
             )}
           </section>
 
-          {(facets?.tags.length ?? 0) > 0 && (
-            <section className="mt-5">
-              <p className="text-muted-foreground mb-1.5 text-[11px] font-medium">
-                AI 标签<span className="opacity-70"> · {facets!.tags.length}</span>
-              </p>
-              {/* D65 标签 containment：浏览面只露高频标签（count≥2），长尾不刷屏、搜索可达——
-                  标签总量会随收藏增长，平铺几百个 count=1 的标签是不可浏览的 */}
-              <Input
-                value={tagSearch}
-                onChange={(e) => setTagSearch(e.target.value)}
-                placeholder="搜索标签…"
-                className="mb-1 h-7 text-xs"
-              />
-              {shownTags.map((t) => (
-                <button
-                  key={t.tag}
-                  onClick={() => setTag(tag === t.tag ? "" : t.tag)}
-                  className={cn(
-                    "flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] transition-colors",
-                    tag === t.tag ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
-                  )}
-                >
-                  <span className="shrink-0">{tagEmoji(t.tag)}</span>
-                  <span className="min-w-0 flex-1 truncate text-left">{t.tag}</span>
-                  <span className="tabular text-muted-foreground shrink-0 text-[11px]">{t.count}</span>
-                </button>
-              ))}
-              {shownTags.length === 0 && (
-                <p className="text-muted-foreground px-2 py-1 text-[11px]">没有匹配的标签</p>
-              )}
-              {!tagSearch && facets!.tags.length > shownTags.length && (
-                <p className="text-muted-foreground mt-1 px-2 text-[10px]">
-                  其余 {facets!.tags.length - shownTags.length} 个低频标签可搜索找到
-                </p>
-              )}
-            </section>
-          )}
+          {/* D66 简化：AI 标签不再作为人的浏览维度（分类与标签双维度并存仍嫌复杂）——
+              标签退回数据层（仍生成、仍进 MCP/导出，供 AI 检索） */}
         </aside>
 
         {/* 右：筛选 + 行式列表 */}
@@ -333,7 +285,6 @@ export function Materials() {
               {items.map((it, i) => {
                 const meta = KIND_META[it.type];
                 const KindIcon = meta.icon;
-                const tags = (it.l1_tags ?? []).slice(0, 5);
                 return (
                   <Fragment key={it.id}>
                     {/* 规范 #4：分割线是独立元素（不挂在行 border 上）与圆角解耦——行只做圆角 hover 高亮 */}
@@ -371,11 +322,6 @@ export function Materials() {
                               {categoryEmoji(it.category)} {it.category.split("/").join(" / ")}
                             </Badge>
                           )}
-                          {tags.map((t) => (
-                            <Badge key={t} variant="secondary" className="px-1.5 py-0 text-[10px]">
-                              {tagEmoji(t)} {t}
-                            </Badge>
-                          ))}
                         </div>
                       </div>
                       {/* 位 3：类型 · 来源 · 时间 */}

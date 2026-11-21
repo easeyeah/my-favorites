@@ -573,12 +573,11 @@ export const fetchers = {
   // ---------- D61 资料库 ----------
   materials: (
     cfg: AdminConfig,
-    q: { type?: string; q?: string; tag?: string; category?: string; uncategorized?: boolean; limit?: number; offset?: number } = {},
+    q: { type?: string; q?: string; category?: string; uncategorized?: boolean; limit?: number; offset?: number } = {},
   ) => {
     const p = new URLSearchParams();
     if (q.type) p.set("type", q.type);
     if (q.q) p.set("q", q.q);
-    if (q.tag) p.set("tag", q.tag);
     if (q.category) p.set("category", q.category);
     if (q.uncategorized) p.set("uncategorized", "1");
     if (q.limit !== undefined) p.set("limit", String(q.limit));
