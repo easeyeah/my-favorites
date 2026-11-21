@@ -52,6 +52,7 @@ export function Materials() {
   const [catFilter, setCatFilter] = useState<string | null>(null);
   const [uncategorized, setUncategorized] = useState(false);
   const [tag, setTag] = useState("");
+  const [tagSearch, setTagSearch] = useState("");
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(() => {
@@ -100,6 +101,18 @@ export function Materials() {
   }, [facets]);
   const categorized = (facets?.categories ?? []).reduce((s, c) => s + c.count, 0);
   const uncategorizedCount = Math.max(0, counts.total - categorized);
+
+  // AI 标签展示口径：浏览面只露高频（count≥2，至多 15 个）；标签少时退化为 top 12；
+  // 搜索态在全量（≤500）里匹配——长尾不刷屏但可达
+  const allTags = facets?.tags ?? [];
+  const freqTags = allTags.filter((t) => t.count >= 2).slice(0, 15);
+  const shownTags = tagSearch.trim()
+    ? allTags
+        .filter((t) => t.tag.toLowerCase().includes(tagSearch.trim().toLowerCase()))
+        .slice(0, 15)
+    : freqTags.length >= 8
+      ? freqTags
+      : allTags.slice(0, Math.min(12, allTags.length));
 
   const exportMd = async (id: string, title: string) => {
     try {
@@ -227,8 +240,18 @@ export function Materials() {
 
           {(facets?.tags.length ?? 0) > 0 && (
             <section className="mt-5">
-              <p className="text-muted-foreground mb-1.5 text-[11px] font-medium">AI 标签</p>
-              {facets!.tags.map((t) => (
+              <p className="text-muted-foreground mb-1.5 text-[11px] font-medium">
+                AI 标签<span className="opacity-70"> · {facets!.tags.length}</span>
+              </p>
+              {/* D65 标签 containment：浏览面只露高频标签（count≥2），长尾不刷屏、搜索可达——
+                  标签总量会随收藏增长，平铺几百个 count=1 的标签是不可浏览的 */}
+              <Input
+                value={tagSearch}
+                onChange={(e) => setTagSearch(e.target.value)}
+                placeholder="搜索标签…"
+                className="mb-1 h-7 text-xs"
+              />
+              {shownTags.map((t) => (
                 <button
                   key={t.tag}
                   onClick={() => setTag(tag === t.tag ? "" : t.tag)}
@@ -242,6 +265,14 @@ export function Materials() {
                   <span className="tabular text-muted-foreground shrink-0 text-[11px]">{t.count}</span>
                 </button>
               ))}
+              {shownTags.length === 0 && (
+                <p className="text-muted-foreground px-2 py-1 text-[11px]">没有匹配的标签</p>
+              )}
+              {!tagSearch && facets!.tags.length > shownTags.length && (
+                <p className="text-muted-foreground mt-1 px-2 text-[10px]">
+                  其余 {facets!.tags.length - shownTags.length} 个低频标签可搜索找到
+                </p>
+              )}
             </section>
           )}
         </aside>

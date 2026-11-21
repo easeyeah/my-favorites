@@ -246,6 +246,12 @@ export class Pipeline {
 
     const run = async () => {
       try {
+        // D65 标签收敛：注入已有标签库（频次 Top40），引导复用而非自由造词——
+        // 自由生成会让标签总量随收藏线性爆炸（几百个 count=1 的长尾不可浏览）
+        const knownTags = this.store
+          .materialFacets(false)
+          .tags.slice(0, 40)
+          .map((t) => t.tag);
         const out = await llm.chatJson<{
           summary: string;
           tags: string[];
@@ -255,9 +261,12 @@ export class Pipeline {
           {
             role: "system",
             content:
-              "你是网页摘要助手。根据正文生成：summary（≤80字中文摘要）、tags（3-5个标签）、keywords（关键词数组）、category（资料的两级分类路径数组，如[\"技术开发\",\"前端\"]——一级从[技术开发,商业财经,生活服务,学习教育,创意设计,娱乐内容,工具资源,其他]中选最贴切的（可自拟更准确的短语），二级可省略）。只返回 JSON。",
+              "你是网页摘要助手。根据正文生成：summary（≤80字中文摘要）、tags（2-4 个较通用的标签——优先复用已有标签库中的词（如适用），避免版本号/页面名等一次性词语）、keywords（关键词数组）、category（资料的两级分类路径数组，如[\"技术开发\",\"前端\"]——一级从[技术开发,商业财经,生活服务,学习教育,创意设计,娱乐内容,工具资源,其他]中选最贴切的（可自拟更准确的短语），二级可省略）。只返回 JSON。",
           },
-          { role: "user", content: `标题：${bm.title}\nURL：${bm.url_canonical}\n正文：${l2.slice(0, 4000)}` },
+          {
+            role: "user",
+            content: `标题：${bm.title}\nURL：${bm.url_canonical}\n已有标签库（优先复用，如适用）：${knownTags.join("、") || "（暂无）"}\n正文：${l2.slice(0, 4000)}`,
+          },
         ]);
         // DEV-03：响应完成后提交前重读策略与状态——过期结果丢弃并给原因码
         const after = this.store.getBookmark(bookmarkId);

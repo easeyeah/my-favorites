@@ -666,7 +666,7 @@ export class Store {
           "FROM material m JOIN bookmarks b ON b.id = m.bookmark_id JOIN content_cache cc ON cc.bookmark_id = b.id",
           "JOIN json_each(CASE WHEN json_valid(IFNULL(cc.l1_tags,'[]')) THEN IFNULL(cc.l1_tags,'[]') ELSE '[]' END) je",
           "WHERE m.status = 'active' AND b.archived_into IS NULL" + privacyCond,
-          "GROUP BY je.value ORDER BY COUNT(*) DESC LIMIT 60",
+          "GROUP BY je.value ORDER BY COUNT(*) DESC LIMIT 500",
         ].join(" "),
       )
       .all() as Array<{ tag: string; count: number }>;
