@@ -49,6 +49,9 @@ export function LoginPage({
     try {
       const res = await auth.login(next, password, "web-admin");
       storeToken(res.token, remember);
+      // D66 修复：令牌必须同步进 App 的 cfg state——只写 localStorage 时 probe 仍用
+      // 旧 cfg（token=""）探测 → 401 → 永远停在登录页（登录成功却「点击没反应」）
+      onSaveConfig({ ...next, token: res.token });
       onAuthed();
     } catch (e) {
       const status = e instanceof ApiError ? e.status : 0;
@@ -79,6 +82,8 @@ export function LoginPage({
       // 设置成功 → 直接登录换正式令牌
       const res = await auth.login({ ...cfg, serverUrl }, setupPassword, "web-admin");
       storeToken(res.token, true);
+      // D66 修复：同 submit——令牌同步进 App state，probe 才能带着令牌探测
+      onSaveConfig({ ...cfg, serverUrl, token: res.token });
       setSetupOpen(false);
       onAuthed();
     } catch (e) {
