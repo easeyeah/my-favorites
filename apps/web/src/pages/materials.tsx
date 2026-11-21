@@ -1,16 +1,17 @@
 /**
- * 资料库（D61）：收藏内容三级识别的实体面——文章已存全文显性化、视频留封面、图片存主图。
- * 卡片流形态（用户拍板独立第五页签）；自动入库、直接生效，移出资料库是唯一手工动作（书签本体不动）。
- * 导出 Markdown 是首发对外出口（零 API 依赖，投递到任何笔记应用由用户自拖）。
+ * 资料库（D61/D64）：收藏内容三级识别的实体面。
+ * 形态定位（D64 用户拍板）：资料管理的最终价值是「经 MCP 供 AI 工具调用」，人逛页面是次要
+ * 场景——不做阅读效果，行式列表即可；分类标签是一等展示位（目录 = AI 分类结果，主色语义；
+ * AI 标签 = 内容证据），让「分类很厉害」一眼可见。
+ * 行内操作：打开原页 / 导出 Markdown / 移出资料库（软删，书签不动）。
  */
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Clapperboard, FileText, Image as ImageIcon, Loader2, Search } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { ArrowUpRight, Clapperboard, Download, FileText, Image as ImageIcon, Loader2, Search, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Btn, EmptyState, PageScroll, PageHeader, toast } from "@/components/shared";
+import { EmptyState, PageScroll, PageHeader, toast } from "@/components/shared";
 import { useShell, useRoute } from "@/components/layout";
-import { fetchers, type MaterialDetail, type MaterialRow } from "@/lib/api";
+import { fetchers, type MaterialCounts, type MaterialRow } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type KindFilter = "" | "article" | "video" | "image";
@@ -20,13 +21,6 @@ const KIND_META: Record<MaterialRow["type"], { label: string; icon: typeof FileT
   video: { label: "视频", icon: Clapperboard },
   image: { label: "图片", icon: ImageIcon },
 };
-
-const FILTERS: Array<{ key: KindFilter; label: string }> = [
-  { key: "", label: "全部" },
-  { key: "article", label: "文章" },
-  { key: "video", label: "视频" },
-  { key: "image", label: "图片" },
-];
 
 const timeAgo = (iso: string): string => {
   const diff = Date.now() - new Date(iso).getTime();
@@ -48,18 +42,15 @@ export function Materials() {
   const { cfg } = useShell();
   const { go } = useRoute();
   const [items, setItems] = useState<MaterialRow[]>([]);
-  const [counts, setCounts] = useState({ total: 0, article: 0, video: 0, image: 0 });
+  const [counts, setCounts] = useState<MaterialCounts>({ total: 0, article: 0, video: 0, image: 0 });
   const [filter, setFilter] = useState<KindFilter>("");
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
-  const [detail, setDetail] = useState<MaterialDetail | null>(null);
-  const [coverUrls, setCoverUrls] = useState<Record<string, string>>({});
-  const coverRefs = useRef(new Set<string>());
 
   const load = useCallback(() => {
     setLoading(true);
     fetchers
-      .materials(cfg, { type: filter || undefined, q: q || undefined, limit: 60 })
+      .materials(cfg, { type: filter || undefined, q: q || undefined, limit: 100 })
       .then((r) => {
         setItems(r.items);
         setCounts(r.counts);
@@ -69,32 +60,6 @@ export function Materials() {
   }, [cfg, filter, q]);
 
   useEffect(load, [load]);
-
-  // 封面异步加载（Blob + 鉴权，objectURL 复用直至卸载）
-  useEffect(() => {
-    for (const it of items) {
-      if (!it.has_cover || coverRefs.current.has(it.id)) continue;
-      coverRefs.current.add(it.id);
-      fetchers
-        .materialCover(cfg, it.id)
-        .then((b) => setCoverUrls((prev) => ({ ...prev, [it.id]: URL.createObjectURL(b) })))
-        .catch(() => coverRefs.current.delete(it.id));
-    }
-  }, [items, cfg]);
-  useEffect(
-    () => () => {
-      for (const u of Object.values(coverUrls)) URL.revokeObjectURL(u);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 卸载时一次性回收
-    [],
-  );
-
-  const openDetail = (id: string) => {
-    fetchers
-      .materialDetail(cfg, id)
-      .then(setDetail)
-      .catch(() => toast.err("加载详情失败"));
-  };
 
   const exportMd = async (id: string, title: string) => {
     try {
@@ -114,24 +79,32 @@ export function Materials() {
       .materialDismiss(cfg, id)
       .then(() => {
         toast.ok("已移出资料库（书签仍保留在书签库）");
-        setDetail(null);
-        coverRefs.current.delete(id);
         load();
       })
       .catch(() => toast.err("移出失败"));
+  };
+
+  const openOriginal = (id: string) => {
+    const it = items.find((x) => x.id === id);
+    if (it) window.open(it.url_raw, "_blank");
   };
 
   return (
     <PageScroll>
       <PageHeader
         title="资料库"
-        sub="收藏时自动识别：文章存全文、视频留封面、图片存主图——整理结果都在这里，可检索、可导出"
+        sub="收藏内容经 AI 自动分类入库：文章存全文、视频留封面、图片存主图——AI 工具可经 MCP 直连本库检索与阅读"
       />
 
-      {/* 筛选行：类型 chips + 检索（行 hover 语言与书签库一致） */}
-      <div className="mb-4 flex items-center gap-2">
+      {/* 筛选行：类型 chips（带计数，分类规模一眼可见）+ 检索 */}
+      <div className="mb-3 flex items-center gap-2">
         <div className="flex flex-wrap items-center gap-1.5">
-          {FILTERS.map((f) => (
+          {([
+            { key: "" as KindFilter, label: "全部", n: counts.total },
+            { key: "article" as KindFilter, label: "文章", n: counts.article },
+            { key: "video" as KindFilter, label: "视频", n: counts.video },
+            { key: "image" as KindFilter, label: "图片", n: counts.image },
+          ]).map((f) => (
             <button
               key={f.key || "all"}
               onClick={() => setFilter(f.key)}
@@ -143,6 +116,7 @@ export function Materials() {
               )}
             >
               {f.label}
+              <span className="tabular ml-1 opacity-70">{f.n}</span>
             </button>
           ))}
         </div>
@@ -168,125 +142,105 @@ export function Materials() {
           title={q || filter ? "没有符合条件的内容" : "资料库还是空的"}
           hint={
             q || filter
-              ? "换个关键词或类型试试。"
-              : "用扩展收藏文章、视频或图片后会自动出现在这里；已有书签在服务端启动时完成了一次存量回灌。"
+              ? "换个关键词、类型或标签试试。"
+              : "用扩展收藏文章、视频或图片后会自动分类入库；已有书签在服务端启动时完成了一次存量回灌。"
           }
         />
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <ul className="divide-y divide-border/40">
           {items.map((it) => {
             const meta = KIND_META[it.type];
             const KindIcon = meta.icon;
-            const cover = coverUrls[it.id];
+            const tags = (it.l1_tags ?? []).slice(0, 5);
             return (
-              <button
-                key={it.id}
-                onClick={() => openDetail(it.id)}
-                className="group rounded-xl bg-card text-left shadow-sm transition-shadow hover:shadow-md"
-              >
-                {/* 封面区：16:9 浅底占位；无封面用类型图标 */}
-                <div className="bg-muted relative aspect-video w-full overflow-hidden rounded-t-xl">
-                  {cover ? (
-                    <img src={cover} alt="" className="size-full object-cover" loading="lazy" />
-                  ) : (
-                    <div className="text-muted-foreground/60 flex size-full items-center justify-center">
-                      <KindIcon className="size-7" />
-                    </div>
-                  )}
-                </div>
-                <div className="space-y-1.5 px-3.5 py-3">
-                  <div className="flex items-center gap-1.5">
-                    <Badge variant="secondary" className="gap-1 px-1.5 py-0 text-[10px]">
-                      <KindIcon className="size-2.5" />
-                      {meta.label}
-                    </Badge>
+              <li key={it.id} className="group hover:bg-accent/50 -mx-2 flex items-center gap-3 rounded-xl px-2 py-2.5 transition-colors">
+                {/* 位 1+2：标题行 + 分类标签行 */}
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <KindIcon className="text-muted-foreground size-3.5 shrink-0" />
+                    <a
+                      href={it.url_raw}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="truncate text-[13px] font-medium underline-offset-2 hover:text-primary hover:underline"
+                    >
+                      {it.title}
+                    </a>
                     {it.type === "article" && it.l2_len > 0 && (
-                      <Badge variant="secondary" className="text-primary bg-primary/10 px-1.5 py-0 text-[10px]">
+                      <Badge variant="secondary" className="text-primary bg-primary/10 shrink-0 px-1.5 py-0 text-[10px]">
                         已存全文
                       </Badge>
                     )}
                     {it.snapshot_count > 0 && (
-                      <span className="text-[10px]" title="已有原页快照">
+                      <span className="shrink-0 text-[10px]" title="已有原页快照">
                         📸
                       </span>
                     )}
-                    <span className="text-muted-foreground ml-auto shrink-0 text-[10px]">{timeAgo(it.created_at)}</span>
                   </div>
-                  <p className="line-clamp-2 text-[13px] font-medium leading-snug">{it.title}</p>
-                  {it.l1_summary && <p className="text-muted-foreground line-clamp-2 text-xs leading-relaxed">{it.l1_summary}</p>}
-                  <div className="text-muted-foreground flex items-center gap-1 text-[11px]">
-                    <span className="truncate">{hostOf(it.url_canonical)}</span>
-                    {it.folder_name && <span className="shrink-0 opacity-70">· {it.folder_name}</span>}
+                  <div className="mt-1 flex flex-wrap items-center gap-1">
+                    {it.folder_name && (
+                      <Badge
+                        variant="secondary"
+                        className="text-primary bg-primary/10 px-1.5 py-0 text-[10px]"
+                        title={it.signals.length > 0 ? `AI 分类 · 识别信号：${it.signals.join("、")}` : "AI 分类"}
+                      >
+                        {it.folder_name}
+                      </Badge>
+                    )}
+                    {tags.map((t) => (
+                      <Badge key={t} variant="secondary" className="px-1.5 py-0 text-[10px]">
+                        {t}
+                      </Badge>
+                    ))}
                   </div>
                 </div>
-              </button>
+                {/* 位 3：类型 · 来源 · 时间 */}
+                <div className="text-muted-foreground shrink-0 text-right text-[11px] leading-relaxed">
+                  <p>
+                    {meta.label} · {hostOf(it.url_canonical)}
+                  </p>
+                  <p>{timeAgo(it.created_at)}</p>
+                </div>
+                {/* 位 4：行内操作 */}
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <button
+                    className="text-muted-foreground hover:bg-accent hover:text-foreground rounded-lg p-1.5 transition-colors"
+                    title="打开原页"
+                    onClick={() => openOriginal(it.id)}
+                  >
+                    <ArrowUpRight className="size-3.5" />
+                  </button>
+                  <button
+                    className="text-muted-foreground hover:bg-accent hover:text-foreground rounded-lg p-1.5 transition-colors"
+                    title="导出 Markdown"
+                    onClick={() => void exportMd(it.id, it.title)}
+                  >
+                    <Download className="size-3.5" />
+                  </button>
+                  <button
+                    className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive rounded-lg p-1.5 transition-colors"
+                    title="移出资料库（书签保留）"
+                    onClick={() => dismiss(it.id)}
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </div>
+              </li>
             );
           })}
-        </div>
+        </ul>
       )}
 
-      {/* 详情阅读：浮层允许（Dialog 功能必需件）；全文 scroll-slim 固定高度 */}
-      <Dialog open={detail !== null} onOpenChange={(v) => !v && setDetail(null)}>
-        <DialogContent className="max-h-[85vh] max-w-[720px] overflow-hidden">
-          {detail && (
-            <>
-              <DialogHeader>
-                <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                  <Badge variant="secondary" className="text-[10px]">
-                    {KIND_META[detail.type].label}
-                  </Badge>
-                  {detail.type === "article" && detail.l2_len > 0 && (
-                    <Badge variant="secondary" className="text-primary bg-primary/10 text-[10px]">
-                      已存全文 {detail.l2_len.toLocaleString()} 字
-                    </Badge>
-                  )}
-                  {detail.snapshot_count > 0 && (
-                    <Badge variant="secondary" className="text-[10px]">
-                      📸 快照可用
-                    </Badge>
-                  )}
-                </div>
-                <DialogTitle className="text-left text-base leading-snug">{detail.title}</DialogTitle>
-                <DialogDescription className="text-left">
-                  {hostOf(detail.url_canonical)}
-                  {detail.folder_name ? ` · ${detail.folder_name}` : ""}
-                  {detail.signals.length > 0 ? ` · 识别信号：${detail.signals.join("、")}` : ""}
-                </DialogDescription>
-              </DialogHeader>
-              <div className="scroll-slim -mx-1 max-h-[46vh] overflow-y-auto px-1">
-                {detail.l1_summary && (
-                  <p className="text-muted-foreground mb-3 border-l-2 border-primary/30 pl-3 text-xs leading-relaxed">
-                    {detail.l1_summary}
-                  </p>
-                )}
-                {detail.l2_text ? (
-                  <p className="whitespace-pre-wrap text-[13px] leading-relaxed">{detail.l2_text}</p>
-                ) : (
-                  <p className="text-muted-foreground py-4 text-center text-xs">
-                    {detail.type === "video"
-                      ? "视频收藏仅存元数据（封面/来源），不下载视频本体。"
-                      : detail.type === "image"
-                        ? "图片收藏已存主图，正文无文本内容。"
-                        : "暂未捕获到正文——用扩展重新收藏或等待服务端补漏抓取后出现。"}
-                  </p>
-                )}
-              </div>
-              <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
-                <Btn primary onClick={() => window.open(detail.url_raw, "_blank")}>
-                  打开原页
-                </Btn>
-                <Btn onClick={() => void exportMd(detail.id, detail.title)}>导出 Markdown</Btn>
-                {detail.snapshot_count > 0 && (
-                  <Btn onClick={() => go("bookmarks")}>在书签库查看快照</Btn>
-                )}
-                <Btn danger className="ml-auto" onClick={() => dismiss(detail.id)}>
-                  移出资料库
-                </Btn>
-              </div>
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
+      {/* MCP 提示：安静事实行（本库对 AI 工具开放） */}
+      {counts.total > 0 && (
+        <p className="text-muted-foreground mt-4 text-[11px]">
+          ⚡ 本库已开放 MCP 接口：<code className="font-mono">POST /api/v1/mcp</code>
+          （materials_search / materials_get / materials_recent），Claude、Cursor 等 AI 工具配好服务端地址与令牌即可直接检索和阅读全文。
+          <button className="hover:text-foreground ml-1 underline underline-offset-2" onClick={() => go("settings")}>
+            获取令牌 →
+          </button>
+        </p>
+      )}
     </PageScroll>
   );
 }

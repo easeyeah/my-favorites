@@ -48,6 +48,7 @@ import type { SemanticService } from "./semantic";
 import { fetchGuardConfigFromEnv, guardedFetch, ipCoveredByAllowlist, type FetchGuardConfig } from "./fetch-guard";
 import { resolveFavicon } from "./favicon";
 import { buildMaterialMarkdown, removeCoverFile } from "./materials";
+import { handleMcpRequest } from "./mcp";
 import { buildSnapshotView } from "./snapshot-view";
 import {
   NAV_ACCESS_COOKIE,
@@ -896,6 +897,7 @@ export function buildApp(deps: AppDeps): Hono {
       items: store.listMaterials({
         type: c.req.query("type") || undefined,
         q: c.req.query("q") || undefined,
+        tag: c.req.query("tag") || undefined,
         limit: c.req.query("limit") ? Math.min(Number(c.req.query("limit")), 200) : undefined,
         offset: c.req.query("offset") ? Math.max(Number(c.req.query("offset")), 0) : undefined,
         includePrivate: privateVisible(c),
@@ -955,6 +957,9 @@ export function buildApp(deps: AppDeps): Hono {
     if (ref) removeCoverFile(dataDir, ref.relPath);
     return c.json({ ok: true });
   });
+
+  // ---------- D64 MCP 端点：资料库的 AI 一等消费面（鉴权随 /api/v1 中间件） ----------
+  api.post("/mcp", (c) => handleMcpRequest(store, c));
 
   // ---------- F3 整理（D27 act + undo：一次调用直接生效，安全网 = 版本撤销） ----------
   api.post("/organize/sessions", async (c) => {

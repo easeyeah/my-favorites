@@ -1,5 +1,6 @@
 /**
- * D61 资料库 E2E：卡片流/类型筛选/详情阅读/Markdown 导出/移出——真服务端全链路。
+ * D61/D64 资料库 E2E：行式列表/类型筛选/分类标签/行内导出/移出——真服务端全链路。
+ * D64 起页面为行式列表（AI 一等消费面走 MCP，人是次要观众），行内展示分类标签与信号。
  * 视频与图片样本凭 URL 形态即时入库（物化为 fire-and-forget，断言轮询等待）；
  * 封面下载依赖外网，E2E 不断言封面（服务端集成测试已覆盖真实下载与魔数嗅探）。
  */
@@ -14,7 +15,6 @@ const PORT = 3212;
 const BASE = `http://127.0.0.1:${PORT}`;
 let server: ChildProcess | null = null;
 let browser: Browser;
-let articleId = "";
 
 const LONG = "资料库端到端验证正文。".repeat(40); // > 200 字，满足「已存全文」阈值
 
@@ -47,11 +47,10 @@ test.beforeAll(async () => {
       body: JSON.stringify({ url: "https://materials.example/blog/deep-dive", title: "一篇深度文章" }),
     })
   ).json()) as { id: string };
-  articleId = article.id;
   await fetch(`${BASE}/api/v1/content/capture`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bookmarkId: articleId, l2Text: LONG }),
+    body: JSON.stringify({ bookmarkId: article.id, l2Text: LONG }),
   });
   await fetch(`${BASE}/api/v1/bookmarks`, {
     method: "POST",
@@ -71,45 +70,40 @@ test.afterAll(async () => {
   server?.kill();
 });
 
-test("资料库卡片流 + 类型筛选", async () => {
+const row = (page: import("@playwright/test").Page, title: string) =>
+  page.locator("li", { hasText: title }).first();
+
+test("资料库行式列表 + 类型筛选（计数 chips）", async () => {
   const page = await browser.newPage();
   await page.goto(`${BASE}/#materials`);
   await page.waitForLoadState("domcontentloaded");
 
-  // 三张卡出现（文章已存全文 + 视频 + 图片；物化异步，轮询等待）
-  await expect(page.locator("button", { hasText: "已存全文" }).first()).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator("button", { hasText: "一个测试视频" }).first()).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator("button", { hasText: "一张直链图片" }).first()).toBeVisible({ timeout: 15_000 });
+  // 三行出现（物化异步，轮询等待）
+  await expect(row(page, "一篇深度文章")).toBeVisible({ timeout: 15_000 });
+  await expect(row(page, "一个测试视频")).toBeVisible({ timeout: 15_000 });
+  await expect(row(page, "一张直链图片")).toBeVisible({ timeout: 15_000 });
 
-  // 类型筛选：视频 chips 后只剩视频卡，文章卡消失
+  // 文章行带「已存全文」徽章；MCP 提示行出现
+  await expect(row(page, "一篇深度文章").getByText("已存全文")).toBeVisible();
+  await expect(page.getByText("MCP 接口")).toBeVisible();
+
+  // 类型筛选：视频 chips 后文章行消失
   await page.locator("button", { hasText: "视频" }).first().click();
-  await expect(page.locator("button", { hasText: "一篇深度文章" })).toHaveCount(0, { timeout: 10_000 });
-  await expect(page.locator("button", { hasText: "一个测试视频" }).first()).toBeVisible();
-  // 回到全部
+  await expect(row(page, "一篇深度文章")).toHaveCount(0, { timeout: 10_000 });
+  await expect(row(page, "一个测试视频")).toBeVisible();
   await page.locator("button", { hasText: "全部" }).first().click();
   await page.close();
 });
 
-test("详情阅读 + Markdown 导出", async () => {
+test("行内导出 Markdown（front-matter + 全文）", async () => {
   const page = await browser.newPage();
   await page.goto(`${BASE}/#materials`);
   await page.waitForLoadState("domcontentloaded");
-  const card = page.locator("button", { hasText: "一篇深度文章" }).first();
-  await expect(card).toBeVisible({ timeout: 15_000 });
-  await card.click();
+  const articleRow = row(page, "一篇深度文章");
+  await expect(articleRow).toBeVisible({ timeout: 15_000 });
 
-  // 详情浮层：已存全文徽章 + 正文可见 + 动作齐全
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toBeVisible({ timeout: 10_000 });
-  await expect(dialog.getByText("已存全文")).toBeVisible();
-  await expect(dialog.getByText(LONG.slice(0, 12)).first()).toBeVisible();
-  for (const label of ["打开原页", "导出 Markdown", "移出资料库"]) {
-    await expect(dialog.getByRole("button", { name: label })).toBeVisible();
-  }
-
-  // 导出 Markdown：下载文件含 front-matter 与正文
   const download = page.waitForEvent("download");
-  await dialog.getByRole("button", { name: "导出 Markdown" }).click();
+  await articleRow.getByTitle("导出 Markdown").click();
   const dl = await download;
   const stream = await dl.createReadStream();
   const chunks: Buffer[] = [];
@@ -122,17 +116,14 @@ test("详情阅读 + Markdown 导出", async () => {
   await page.close();
 });
 
-test("移出资料库：卡片消失且书签仍在库", async () => {
+test("移出资料库：行消失且书签仍在库", async () => {
   const page = await browser.newPage();
   await page.goto(`${BASE}/#materials`);
   await page.waitForLoadState("domcontentloaded");
-  const card = page.locator("button", { hasText: "一张直链图片" }).first();
-  await expect(card).toBeVisible({ timeout: 15_000 });
-  await card.click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toBeVisible({ timeout: 10_000 });
-  await dialog.getByRole("button", { name: "移出资料库" }).click();
-  await expect(page.locator("button", { hasText: "一张直链图片" })).toHaveCount(0, { timeout: 10_000 });
+  const imageRow = row(page, "一张直链图片");
+  await expect(imageRow).toBeVisible({ timeout: 15_000 });
+  await imageRow.getByTitle("移出资料库（书签保留）").click();
+  await expect(row(page, "一张直链图片")).toHaveCount(0, { timeout: 10_000 });
 
   // 书签本体不动：书签库仍可搜到
   await page.goto(`${BASE}/#bookmarks`);

@@ -67,7 +67,7 @@ function InlineError({ label, onRetry }: { label: string; onRetry: () => void })
   return (
     <span className="text-neutral-400">
       {label}
-      <button className="ml-1 underline cursor-pointer hover:text-neutral-600" onClick={onRetry}>
+      <button className="ml-1 underline cursor-pointer hover:text-neutral-600 dark:hover:text-neutral-300" onClick={onRetry}>
         重试
       </button>
     </span>

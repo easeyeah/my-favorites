@@ -28,14 +28,14 @@ export function BrandHeader({
     return (
       <div className="flex flex-col items-center gap-2">
         {mark}
-        <h1 className={(compact ? "text-lg" : "text-2xl") + " font-semibold tracking-tight"}>{title}</h1>
+        <h1 className={(compact ? "text-lg" : "text-2xl") + " font-semibold tracking-tight text-neutral-900 dark:text-neutral-100"}>{title}</h1>
       </div>
     );
   }
   return (
     <div className="flex items-center gap-2">
       {mark}
-      <h1 className={(compact ? "text-base" : "text-lg") + " font-semibold tracking-tight"}>{title}</h1>
+      <h1 className={(compact ? "text-base" : "text-lg") + " font-semibold tracking-tight text-neutral-900 dark:text-neutral-100"}>{title}</h1>
     </div>
   );
 }

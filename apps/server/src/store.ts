@@ -532,6 +532,7 @@ export class Store {
   listMaterials(filter: {
     type?: string;
     q?: string;
+    tag?: string;
     limit?: number;
     offset?: number;
     includePrivate?: boolean;
@@ -542,6 +543,14 @@ export class Store {
     if (filter.type) {
       conds.push("m.type = ?");
       args.push(filter.type);
+    }
+    if (filter.tag) {
+      // 标签筛选：l1_tags 是 JSON 数组文本，以引号定界精确匹配数组元素（防子串误命中）
+      const safe = filter.tag.replace(/["\\%]/g, "");
+      if (safe) {
+        conds.push("IFNULL(cc.l1_tags,'[]') LIKE ?");
+        args.push(`%"${safe}"%`);
+      }
     }
     if (filter.q) {
       const like = `%${filter.q.replace(/[%_]/g, "")}%`;

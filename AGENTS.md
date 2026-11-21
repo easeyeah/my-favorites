@@ -1,7 +1,7 @@
 # AGENTS.md — my-favorites 项目规范（AI 会话必读）
 
 > AI 辅助开发项目。任何接手本仓库的 AI 会话先读完本文件再动手。
-> 文档入口：[docs/README.md](docs/README.md)。权威现状文档：[`docs/产品.md`](docs/产品.md)（功能与状态）、[`docs/技术方案.md`](docs/技术方案.md)（架构/API/数据模型）、[`docs/决策记录.md`](docs/决策记录.md)（D1–D63，只追加）。
+> 文档入口：[docs/README.md](docs/README.md)。权威现状文档：[`docs/产品.md`](docs/产品.md)（功能与状态）、[`docs/技术方案.md`](docs/技术方案.md)（架构/API/数据模型）、[`docs/决策记录.md`](docs/决策记录.md)（D1–D64，只追加）。
 > 原型 `docs/原型/`（17 屏 + 流程图）**已冻结，仅作历史参考，其中部分界面已被推翻（侧栏聊天、popup 页签、三档新标签页）**——界面规范以本文件「管理台 UI 设计规范」节为准，改动直接落 `apps/web` 代码并用 `?mock` 演示模式验收。
 
 ## 项目一句话
@@ -113,6 +113,9 @@ docker build --target prod -t my-favorites:ci -f docker/Dockerfile .   # 生产�
 - [x] **资料库（D61，2026-11-21）**：用户调研语雀/Notion/flomo 等 API 后拍板「资料沉淀本体自建，笔记应用降级为导出适配器」——shared classifyMaterialKind 三级识别（文章仅已存全文≥200 字显性化/视频仅元数据不下载本体/图片主图落盘）+ 迁移 v10 material（bookmark_id UNIQUE 覆盖式 upsert，正文摘要引用 content_cache 不复制）+ og:image 扩展捕获封面（server_fetch 隐私判定前置，落 DATA_DIR/materials/）+ 管理台第五页签「资料」卡片流（类型筛选/全文检索/详情阅读/导出 Markdown/移出=软删不复活书签不动）+ 启动一次性存量回灌（纯本地零网络）。隐私域/私密/回环（127.0.0.1 属内置隐私域）永不入库——测试注 coverFetcher 缝不放宽红线。语义：入库是内容识别非书签移动，不写 organize_version。shared 96/server 187(+10)/E2E 36 过 1 跳(+3) + ?mock 自检
 - [x] **异步与性能规范（D62，2026-11-21）**：四条规范定稿入上文专节（核心路径同步直返；非核心任务异步+并发闸+失败可观测三件套；出站串行链整体 deadline；隐私/Guard 不因异步豁免）——该节此前误标 D61，编号让位资料库后补登决策记录
 - [x] **capture 摘要兜底补扫（D63，2026-11-21）**：修正 D62 盘点误判——async 模式 maybeSummarize 本就 `void run()` 不阻塞收藏响应，真缺口=无兜底（fire-and-forget 遇重启永久丢失、llm_unavailable 永不重试、call_model 拒绝不留痕）。修：bookmarksMissingSummary + backfillSummaries（≤5 条涓流、无 LLM 零开销）+ startSummaryBackfill 常驻（启动+30min，仿 D58 不挂可选开关）+ 隐私拒绝落 privacy_call_model_denied。教训：**「await 了内部 void run 的函数」≠阻塞，判读阻塞先看被调方当前模式是否同步执行**。server 192(+5) 全绿 + 真实容器端到端（抹 L1→重启→kicked 1→DeepSeek 找回）
+- [x] **资料库消费面重定位（D64，2026-11-21）**：用户拍板「资料页列表即可不做阅读效果、分类标签一定要做好、最终价值是经 MCP 供 AI 工具调用」。三件：① 资料页行式列表（砍卡片流/阅读浮层/封面流），行 = 标题+已存全文+📸 / 分类标签行（目录徽章主色语义 + AI 标签 ≤5）+ 行内操作；类型 chips 带计数。② **MCP 端点 `POST /api/v1/mcp`**（Streamable HTTP JSON 模式，JSON-RPC initialize/notifications/tools.list/tools.call，无状态；三工具 materials_search 摘要级 / materials_get 含全文 / materials_recent 带计数；鉴权随 /api/v1 bearer）——AI 客户端（Claude/Cursor 自定义连接器）配地址+令牌即用。③ listMaterials 增 tag 筛选（JSON 引号定界 LIKE）。教训：**AI 是一等消费者时，元数据完备+行式列表优先于阅读体验；分类的「厉害感」靠目录+AI 标签两层外显**。server 199(+7)/E2E 36 过 1 跳 + 真库端到端（全文 4552 字返回）+ 截图自检
+- [x] **收纳盒空态历史可见性修复（2026-11-21）**：用户「历史记录又看不到了」——D54「最近自动归位」区嵌在书签列表容器（items 三元 else 分支）内，盒清空（pending=0/placed=5）时整块随 EmptyState 消失。修：历史区提升为列表容器兄弟块 + 盒空文案语义化（「收纳盒是空的——增量已全部归位，记录见下方可撤销」）。教训：**功能块要审容器祖先的「列表非空」类隐性门槛；自动化功能清空输入态后要再走查一遍**
+- [x] **管理台入口补齐（2026-11-21）**：用户反馈 options（书签配置页）无管理台入口。三处：options 连接分区「打开管理台」按钮 / popup「更多」折叠区链接 / welcome 第 4 步次级按钮，深链 `serverUrl/#overview`；options-ui E2E 补断言
 - [ ] **资料库后手（D61 延伸）**：视频作者/时长元数据捕获；/crawl/run 补管理台入口或清理；笔记应用导出适配器（Notion 优先，Obsidian 目录落盘次之）
 - [ ] **站点化信号与入口补齐**：L1 摘要补齐后投影重建抽检（三类准确率 ≥90%）+ 为已有后端补管理台 UI（当前 F4.7 后端完整但零入口）
 - [ ] **模块化切片**：服务端按模块条件挂路由、定时任务随模块启停、AI 关闭时归位降级规则引擎

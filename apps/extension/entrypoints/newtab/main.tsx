@@ -81,7 +81,7 @@ function Tile({
           {letter}
         </span>
       )}
-      <span className="w-full truncate text-xs">{title}</span>
+      <span className="w-full truncate text-xs text-neutral-700 dark:text-neutral-200">{title}</span>
     </a>
   );
 }
@@ -181,7 +181,7 @@ function NewTab() {
         <div className={"flex items-center gap-2 rounded-full border border-neutral-200 bg-white px-5 py-3 shadow-sm dark:border-neutral-800 dark:bg-neutral-900"}>
           <span className="text-lg leading-none text-neutral-400">⌕</span>
           <input
-            className="flex-1 bg-transparent text-sm outline-none"
+            className="flex-1 bg-transparent text-sm text-neutral-900 outline-none placeholder:text-neutral-400 dark:text-neutral-100 dark:placeholder:text-neutral-500"
             placeholder="搜索你的书签，或输入网址…"
             autoFocus
             value={query}
@@ -220,7 +220,7 @@ function NewTab() {
             <ul className="mt-2 space-y-1">
               {hits.map((h) => (
                 <li key={h.id}>
-                  <a className="block truncate rounded-lg border p-2 text-sm hover:bg-neutral-50 dark:hover:bg-neutral-800" href={h.url_raw ?? h.url_canonical} onClick={() => trackClick(h.id)}>
+                  <a className="block truncate rounded-lg border border-neutral-200 p-2 text-sm text-neutral-700 hover:bg-neutral-100 dark:border-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-800" href={h.url_raw ?? h.url_canonical} onClick={() => trackClick(h.id)}>
                     {h.title}
                   </a>
                 </li>
@@ -267,15 +267,15 @@ function NewTab() {
       {/* 自定义面板（D39 两处 + D41 小组件显隐） */}
       {showCustom && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6" onClick={() => setShowCustom(false)}>
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl dark:bg-neutral-900" onClick={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 text-neutral-900 shadow-xl dark:bg-neutral-900 dark:text-neutral-100" onClick={(e) => e.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between">
               <b className="text-base">自定义新标签页</b>
-              <button className="text-sm text-neutral-400 hover:text-neutral-700" onClick={() => setShowCustom(false)}>✕</button>
+              <button className="text-sm text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200" onClick={() => setShowCustom(false)}>✕</button>
             </div>
             <div className="text-sm">
               <div className="flex items-center gap-3 py-2">
                 <span className="flex-1">常用区数量</span>
-                <select className="rounded-lg border px-2 py-1 text-xs dark:border-neutral-700 dark:bg-neutral-900" value={cfg.topCount} onChange={(e) => update({ topCount: Number(e.target.value) })}>
+                <select className="rounded-lg border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-700 dark:bg-neutral-800" value={cfg.topCount} onChange={(e) => update({ topCount: Number(e.target.value) })}>
                   <option value={4}>显示 4 个</option>
                   <option value={8}>显示 8 个</option>
                   <option value={12}>显示 12 个</option>
@@ -334,7 +334,7 @@ function NewTab() {
               </div>
               <div className="flex justify-end pt-2">
                 <button
-                  className="rounded-lg border px-2 py-1 text-xs text-neutral-500"
+                  className="rounded-lg border border-neutral-300 px-2 py-1 text-xs text-neutral-500 dark:border-neutral-700 dark:text-neutral-400"
                   onClick={() => {
                     setCfg(DEFAULT_CONFIG);
                     void saveConfigPatch(DEFAULT_CONFIG);

@@ -1,1 +1,7 @@
 @import "tailwindcss" source("../../");
+
+/* 明暗双主题显式声明：原生表单控件（下拉/输入框光标/滚动条）与画布跟随浏览器当前主题
+ * ——同 popup.css 约定；没有这行，自定义面板的 <select> 下拉在暗黑下仍弹白底菜单 */
+:root {
+  color-scheme: light dark;
+}
