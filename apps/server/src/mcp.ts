@@ -38,13 +38,14 @@ const TOOLS: ToolDef[] = [
   {
     name: "materials_search",
     description:
-      "检索 my-favorites 资料库（AI 自动分类的收藏内容库）。按关键词（标题/URL/摘要/全文）、内容类型（article/video/image）或 AI 标签过滤。返回标题、URL、摘要、标签、分类目录、识别信号等元数据——需要全文时用 materials_get。",
+      "检索 my-favorites 资料库（AI 自动分类的收藏内容库）。按关键词（标题/URL/摘要/全文）、内容类型（article/video/image）、AI 标签或 AI 分类路径过滤。返回标题、URL、摘要、标签、分类路径、识别信号等元数据——需要全文时用 materials_get。",
     inputSchema: {
       type: "object",
       properties: {
         q: { type: "string", description: "关键词（标题/URL/摘要/全文模糊匹配），可空" },
         type: { type: "string", enum: ["article", "video", "image"], description: "内容类型过滤，可空" },
         tag: { type: "string", description: "AI 标签精确匹配（如「前端」「效率工具」），可空" },
+        category: { type: "string", description: "AI 分类路径（如「技术开发」或「技术开发/前端」；传一级含其子树），可空" },
         limit: { type: "number", description: "返回条数上限（默认 10，最大 50）" },
       },
       additionalProperties: false,
@@ -83,7 +84,7 @@ function slimRow(r: Record<string, unknown>): Record<string, unknown> {
     type: r.type,
     title: r.title,
     url: r.url_canonical,
-    folder: r.folder_name ?? null,
+    category: r.category ?? null,
     tags: r.l1_tags ?? [],
     summary: r.l1_summary ?? null,
     signals: r.signals ?? [],
@@ -105,6 +106,7 @@ async function callTool(
       q: typeof args.q === "string" && args.q.trim() ? args.q.trim() : undefined,
       type: typeof args.type === "string" && ["article", "video", "image"].includes(args.type) ? args.type : undefined,
       tag: typeof args.tag === "string" && args.tag.trim() ? args.tag.trim() : undefined,
+      category: typeof args.category === "string" && args.category.trim() ? args.category.trim() : undefined,
       limit: num(args.limit, 10, 50),
     });
     return { ok: true, payload: { count: rows.length, materials: rows.map(slimRow) } };

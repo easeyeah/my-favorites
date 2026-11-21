@@ -477,11 +477,12 @@ export interface TokenRow {
   last_used_at: string | null;
 }
 
-/** D61 资料库条目（列表行）：正文/摘要引用 content_cache，title/folder 实时 JOIN 主数据 */
+/** D61 资料库条目（列表行）：正文/摘要引用 content_cache；category = AI 两级分类路径（"一级/二级"） */
 export interface MaterialRow {
   id: string;
   bookmark_id: string;
   type: "article" | "video" | "image";
+  category: string | null;
   title: string;
   url_canonical: string;
   url_raw: string;
@@ -513,9 +514,9 @@ export interface MaterialCounts {
   image: number;
 }
 
-/** D64 资料库分面统计（左侧双维度面板）：目录聚合计数 + AI 标签频次榜 */
+/** D65 资料库分面统计（左侧面板）：AI 分类树计数 + AI 标签频次榜；未分类 = total − Σcategories */
 export interface MaterialFacets {
-  folders: Array<{ folder_id: string; name: string; count: number }>;
+  categories: Array<{ category: string; count: number }>;
   tags: Array<{ tag: string; count: number }>;
 }
 
@@ -572,13 +573,14 @@ export const fetchers = {
   // ---------- D61 资料库 ----------
   materials: (
     cfg: AdminConfig,
-    q: { type?: string; q?: string; tag?: string; folderId?: string; limit?: number; offset?: number } = {},
+    q: { type?: string; q?: string; tag?: string; category?: string; uncategorized?: boolean; limit?: number; offset?: number } = {},
   ) => {
     const p = new URLSearchParams();
     if (q.type) p.set("type", q.type);
     if (q.q) p.set("q", q.q);
     if (q.tag) p.set("tag", q.tag);
-    if (q.folderId) p.set("folderId", q.folderId);
+    if (q.category) p.set("category", q.category);
+    if (q.uncategorized) p.set("uncategorized", "1");
     if (q.limit !== undefined) p.set("limit", String(q.limit));
     if (q.offset !== undefined) p.set("offset", String(q.offset));
     return api<{ items: MaterialRow[]; counts: MaterialCounts }>(cfg, `/materials?${p}`, {

@@ -298,6 +298,24 @@ export function startSummaryBackfill(pipeline: { backfillSummaries(limit?: numbe
   setInterval(kick, 1800_000);
 }
 
+/**
+ * D65 资料分类回灌调度：已有 L1 摘要但缺分类的资料条目，涓流补分类。
+ * 启动即跑一次 + 每 30 分钟一次（≤5 条/轮，不与整理抢 LLM 配额）；
+ * 无 LLM 配置时 backfillCategories 返回 0（零网络零开销）。
+ */
+export function startCategoryBackfill(pipeline: { backfillCategories(limit?: number): Promise<number> }): void {
+  const kick = (): void => {
+    void pipeline
+      .backfillCategories(5)
+      .then((kicked) => {
+        if (kicked > 0) console.log(`[category-backfill] classified ${kicked} materials`);
+      })
+      .catch((err) => console.error("[category-backfill] sweep failed:", String(err)));
+  };
+  kick();
+  setInterval(kick, 1800_000);
+}
+
 /** 进程内调度器（自建端 compose 通过 env 启用；默认关闭便于测试） */
 export function startScheduler(store: Store, maintenance: MaintenanceService, pipeline?: { processInbox(bookmarkIds: string[], inboxFolderId: string, opts?: { deviceId?: string }): Promise<unknown> }): void {
   const hours = Number(process.env.MF_MAINTENANCE_INTERVAL_HOURS ?? 0);

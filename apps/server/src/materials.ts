@@ -133,7 +133,7 @@ export function buildMaterialMarkdown(m: Record<string, unknown>): string {
   lines.push(`source: ${yamlEscape(String(m.url_canonical ?? ""))}`);
   lines.push(`kind: ${String(m.type ?? "article")}`);
   lines.push(`collected: ${yamlEscape(String(m.created_at ?? ""))}`);
-  if (m.folder_name) lines.push(`folder: ${yamlEscape(String(m.folder_name))}`);
+  if (m.category) lines.push(`category: ${yamlEscape(String(m.category))}`);
   if (tags.length > 0) lines.push(`tags: [${tags.map((t) => yamlEscape(String(t))).join(", ")}]`);
   lines.push("---");
   lines.push("");

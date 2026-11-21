@@ -898,6 +898,8 @@ export function buildApp(deps: AppDeps): Hono {
         type: c.req.query("type") || undefined,
         q: c.req.query("q") || undefined,
         tag: c.req.query("tag") || undefined,
+        category: c.req.query("category") || undefined,
+        uncategorized: c.req.query("uncategorized") === "1",
         limit: c.req.query("limit") ? Math.min(Number(c.req.query("limit")), 200) : undefined,
         offset: c.req.query("offset") ? Math.max(Number(c.req.query("offset")), 0) : undefined,
         includePrivate: privateVisible(c),

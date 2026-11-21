@@ -43,6 +43,8 @@ beforeAll(async () => {
     keywords: [],
     fetchedVia: "extension_capture",
   });
+  const mat = env.store.getMaterialByBookmark(bm.id);
+  if (mat) env.store.setMaterialCategory(mat.id, ["技术开发", "前端"]);
   await env.app.request("/api/v1/bookmarks", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -102,6 +104,14 @@ describe("D64 MCP 端点（资料库 AI 消费面）", () => {
     expect(byTagData.materials).toHaveLength(1);
     const miss = await callTool("materials_search", { tag: "不存在的标签" });
     expect((JSON.parse(miss.text) as { count: number }).count).toBe(0);
+
+    // D65 分类路径筛选：一级 = 子树前缀
+    const byCat = await callTool("materials_search", { category: "技术开发" });
+    const byCatData = JSON.parse(byCat.text) as { materials: Array<{ category: string | null }> };
+    expect(byCatData.materials.length).toBeGreaterThanOrEqual(1);
+    expect(byCatData.materials.every((m) => (m.category ?? "").startsWith("技术开发"))).toBe(true);
+    const byCatMiss = await callTool("materials_search", { category: "生活服务" });
+    expect((JSON.parse(byCatMiss.text) as { count: number }).count).toBe(0);
   });
 
   it("materials_get：返回已存全文；不存在的 id 回 isError 工具结果", async () => {

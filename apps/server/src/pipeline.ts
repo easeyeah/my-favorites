@@ -250,11 +250,12 @@ export class Pipeline {
           summary: string;
           tags: string[];
           keywords: string[];
+          category?: string[];
         }>([
           {
             role: "system",
             content:
-              "你是网页摘要助手。根据正文生成：summary（≤80字中文摘要）、tags（3-5个标签）、keywords（关键词数组）。只返回 JSON。",
+              "你是网页摘要助手。根据正文生成：summary（≤80字中文摘要）、tags（3-5个标签）、keywords（关键词数组）、category（资料的两级分类路径数组，如[\"技术开发\",\"前端\"]——一级从[技术开发,商业财经,生活服务,学习教育,创意设计,娱乐内容,工具资源,其他]中选最贴切的（可自拟更准确的短语），二级可省略）。只返回 JSON。",
           },
           { role: "user", content: `标题：${bm.title}\nURL：${bm.url_canonical}\n正文：${l2.slice(0, 4000)}` },
         ]);
@@ -281,6 +282,12 @@ export class Pipeline {
           keywords: Array.isArray(out.keywords) ? out.keywords.slice(0, 10).map(String) : [],
           fetchedVia: "extension_capture",
         });
+        // D65：同一次 LLM 调用顺带产出资料分类路径（零额外成本），写入资料条目
+        const mat = this.store.getMaterialByBookmark(bookmarkId);
+        if (mat && Array.isArray(out.category)) {
+          const path = out.category.filter((s) => typeof s === "string" && s.trim()).slice(0, 2);
+          if (path.length > 0) this.store.setMaterialCategory(mat.id, path.map(String));
+        }
         return true;
       } catch {
         this.store.upsertCache({
@@ -312,6 +319,46 @@ export class Pipeline {
       });
     }
     return rows.length;
+  }
+
+  /**
+   * D65 分类回灌：已有 L1 摘要但缺分类的资料条目，涓流补分类（≤limit 条/轮；无 LLM 零开销）。
+   * 只用摘要/标签做分类（不送全文，控制 token）；单条失败不阻塞本轮——category 仍缺失会
+   * 在下一轮重新进入候选（materialsMissingCategory 口径）。
+   */
+  async backfillCategories(limit = 5): Promise<number> {
+    const llm = this.llmFor("summarize");
+    if (!llm) return 0;
+    const candidates = this.store.materialsMissingCategory(limit);
+    let done = 0;
+    for (const cand of candidates) {
+      const cache = this.store.getCache(cand.bookmark_id);
+      const summary = typeof cache?.l1_summary === "string" ? (cache.l1_summary as string) : "";
+      const tags = Array.isArray(cache?.l1_tags) ? (cache!.l1_tags as string[]).join("、") : "";
+      if (!summary) continue;
+      const bm = this.store.getBookmark(cand.bookmark_id);
+      if (!bm) continue;
+      try {
+        const out = await llm.chatJson<{ category?: string[] }>([
+          {
+            role: "system",
+            content:
+              '你是资料分类助手。根据标题/摘要/标签输出两级分类路径 category（如["技术开发","前端"]）。一级从[技术开发,商业财经,生活服务,学习教育,创意设计,娱乐内容,工具资源,其他]中选最贴切的（可自拟更准确的短语）；二级可省略。只返回 JSON。',
+          },
+          { role: "user", content: `标题：${bm.title}\n摘要：${summary}\n标签：${tags}` },
+        ]);
+        const path = Array.isArray(out.category)
+          ? out.category.filter((s) => typeof s === "string" && s.trim()).slice(0, 2)
+          : [];
+        if (path.length > 0) {
+          this.store.setMaterialCategory(cand.id, path.map(String));
+          done += 1;
+        }
+      } catch (err) {
+        console.warn("[category-backfill] classify failed:", String(err).slice(0, 120));
+      }
+    }
+    return done;
   }
 
   /**

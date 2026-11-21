@@ -51,10 +51,23 @@ interface MockMaterial {
   id: string;
   bookmark_id: string;
   type: "article" | "video" | "image";
+  category: string | null;
   created_at: string;
   signals: string[];
   textLen: number;
   cover: boolean;
+}
+
+/** D65 演示分类映射：按 URL/标题给 mock 材料配两级路径（模拟 AI 摘要顺带产出） */
+function mockCategory(b: { title: string; url_canonical: string }): string | null {
+  const t = b.title + b.url_canonical;
+  if (/rust|react|tailwind|css|typescript|扩展|bilibili|youtube|vite/i.test(t)) return "技术开发/前端";
+  if (/docker|postgresql|nginx|kubernetes|webpack|node|aspnet/i.test(t)) return "技术开发/后端";
+  if (/cs 自学|mit 6|算法|课程/i.test(t)) return "学习教育/计算机";
+  if (/笔记|写作|卡片/i.test(t)) return "学习教育/方法论";
+  if (/中国色|配色|海天霞|dribbble|mobbin|figma/i.test(t)) return "创意设计/配色灵感";
+  if (/周刊|科技爱好者/i.test(t)) return "技术开发/行业观察";
+  return null;
 }
 
 interface MockDb {
@@ -265,6 +278,7 @@ function seed(): MockDb {
         id: `mat-${b.id}`,
         bookmark_id: b.id,
         type,
+        category: mockCategory(b),
         created_at: b.added_at,
         signals,
         textLen: summary ? 1800 + (b.id.length % 7) * 260 : 0,
@@ -532,6 +546,7 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
       id: m.id,
       bookmark_id: b.id,
       type: m.type,
+      category: m.category,
       title: b.title,
       url_canonical: b.url_canonical,
       url_raw: b.url_raw,
@@ -578,6 +593,12 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
     };
     const items = all
       .filter((r) => (type ? r.type === type : true))
+      .filter((r) => {
+        if (ctx.query.get("uncategorized") === "1") return r.category === null;
+        const category = ctx.query.get("category") ?? "";
+        if (!category) return true;
+        return r.category === category || (r.category ?? "").startsWith(`${category}/`);
+      })
       .filter((r) =>
         q ? `${r.title} ${r.url_canonical} ${r.l1_summary ?? ""}`.toLowerCase().includes(q) : true,
       )
@@ -585,23 +606,17 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
     return { items, counts };
   }
   if (method === "GET" && path === "/materials/facets") {
-    // 分面统计（演示态）：目录聚合计数 + AI 标签频次榜，从 mock 材料实时聚合
-    const folderMap = new Map<string, { folder_id: string; name: string; count: number }>();
+    // 分面统计（演示态）：AI 分类树计数 + AI 标签频次榜，从 mock 材料实时聚合
+    const catMap = new Map<string, number>();
     const tagMap = new Map<string, number>();
     for (const m of db.materials) {
+      if (m.category) catMap.set(m.category, (catMap.get(m.category) ?? 0) + 1);
       const b = db.bookmarks.find((x) => x.id === m.bookmark_id);
-      if (!b) continue;
-      const folder = db.folders.find((f) => f.id === b.folder_id);
-      if (folder) {
-        const cur = folderMap.get(folder.id) ?? { folder_id: folder.id, name: folder.name, count: 0 };
-        cur.count += 1;
-        folderMap.set(folder.id, cur);
-      }
-      const tags = (b as Bookmark & { cache?: { l1_tags?: string[] } }).cache?.l1_tags ?? [];
+      const tags = (b as Bookmark & { cache?: { l1_tags?: string[] } })?.cache?.l1_tags ?? [];
       for (const t of tags) tagMap.set(t, (tagMap.get(t) ?? 0) + 1);
     }
     return {
-      folders: [...folderMap.values()].sort((a, b) => b.count - a.count),
+      categories: [...catMap.entries()].map(([category, count]) => ({ category, count })).sort((a, b) => b.count - a.count),
       tags: [...tagMap.entries()].map(([tag, count]) => ({ tag, count })).sort((a, b) => b.count - a.count),
     };
   }

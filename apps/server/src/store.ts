@@ -533,6 +533,8 @@ export class Store {
     type?: string;
     q?: string;
     tag?: string;
+    category?: string;
+    uncategorized?: boolean;
     folderId?: string;
     limit?: number;
     offset?: number;
@@ -541,12 +543,19 @@ export class Store {
     const conds: string[] = ["m.status = 'active'", "b.archived_into IS NULL"];
     const args: (string | number)[] = [];
     if (!filter.includePrivate) conds.push("b.is_private = 0");
+    if (filter.uncategorized) {
+      conds.push("m.category IS NULL");
+    } else if (filter.category) {
+      // 资料自有分类（D65）：点一级节点 = 其子树（前缀匹配），点二级 = 精确
+      conds.push("(m.category = ? OR m.category LIKE ?)");
+      args.push(filter.category, `${filter.category}/%`);
+    }
     if (filter.type) {
       conds.push("m.type = ?");
       args.push(filter.type);
     }
     if (filter.folderId) {
-      // 支持逗号分隔多目录（左树子树筛选：父节点=自身+全部后代，与分面计数口径一致）
+      // 支持逗号分隔多目录（书签库联动场景保留；资料库自有分类走 category）
       const ids = filter.folderId
         .split(",")
         .map((s) => s.trim())
@@ -578,7 +587,7 @@ export class Store {
     const limit = filter.limit ?? 60;
     const offset = filter.offset ?? 0;
     const sql = [
-      "SELECT m.id, m.bookmark_id, m.type, m.cover_url, m.cover_mime, m.cover_size, m.meta, m.signals, m.created_at, m.updated_at,",
+      "SELECT m.id, m.bookmark_id, m.type, m.category, m.cover_url, m.cover_mime, m.cover_size, m.meta, m.signals, m.created_at, m.updated_at,",
       "  b.title, b.url_canonical, b.url_raw, b.favicon_url, b.folder_id, b.added_at,",
       "  cc.l1_summary, cc.l1_tags, LENGTH(IFNULL(cc.l2_text,'')) AS l2_len,",
       "  (SELECT COUNT(*) FROM snapshot s WHERE s.bookmark_id = b.id) AS snapshot_count,",
@@ -631,25 +640,25 @@ export class Store {
   }
 
   /**
-   * 资料库分面统计（D64 左侧双维度面板）：目录聚合计数 + AI 标签频次榜。
+   * 资料库分面统计（D65 左侧面板）：AI 分类树计数（按 category 路径聚合）+ AI 标签频次榜。
    * 口径与列表一致（active + 非软归档 + 非私密，随 includePrivate）。
-   * 标签用 json_each 展开 l1_tags 数组逐元素计数（json_valid 防御坏 JSON）。
+   * category 存储形态 = "一级/二级"；未分类（NULL）由前端用 counts.total - Σcategories 推导。
    */
   materialFacets(includePrivate = false): {
-    folders: Array<{ folder_id: string; name: string; count: number }>;
+    categories: Array<{ category: string; count: number }>;
     tags: Array<{ tag: string; count: number }>;
   } {
     const privacyCond = includePrivate ? "" : " AND b.is_private = 0";
-    const folders = this.db
+    const categories = this.db
       .prepare(
         [
-          "SELECT b.folder_id AS folder_id, IFNULL(f.name, '（已删目录）') AS name, COUNT(*) AS count",
-          "FROM material m JOIN bookmarks b ON b.id = m.bookmark_id LEFT JOIN folders f ON f.id = b.folder_id",
-          "WHERE m.status = 'active' AND b.archived_into IS NULL" + privacyCond,
-          "GROUP BY b.folder_id ORDER BY COUNT(*) DESC",
+          "SELECT m.category AS category, COUNT(*) AS count",
+          "FROM material m JOIN bookmarks b ON b.id = m.bookmark_id",
+          "WHERE m.status = 'active' AND b.archived_into IS NULL AND m.category IS NOT NULL" + privacyCond,
+          "GROUP BY m.category ORDER BY COUNT(*) DESC",
         ].join(" "),
       )
-      .all() as Array<{ folder_id: string; name: string; count: number }>;
+      .all() as Array<{ category: string; count: number }>;
     const tags = this.db
       .prepare(
         [
@@ -661,7 +670,33 @@ export class Store {
         ].join(" "),
       )
       .all() as Array<{ tag: string; count: number }>;
-    return { folders, tags };
+    return { categories, tags };
+  }
+
+  /** 写入 AI 分类路径（存储形态 "一级/二级"；空数组=清空为未分类） */
+  setMaterialCategory(id: string, path: string[]): void {
+    const clean = path
+      .map((s) => s.trim().slice(0, 20))
+      .filter(Boolean)
+      .slice(0, 2);
+    const category = clean.length > 0 ? clean.join("/") : null;
+    this.db
+      .prepare("UPDATE material SET category = ?, updated_at = ? WHERE id = ?")
+      .run(category, now(), id);
+  }
+
+  /** 待分类回灌候选：已有 L1 摘要（内容证据充分）但尚无分类的资料条目 */
+  materialsMissingCategory(limit = 5): Array<{ id: string; bookmark_id: string }> {
+    return this.db
+      .prepare(
+        [
+          "SELECT m.id, m.bookmark_id FROM material m",
+          "JOIN bookmarks b ON b.id = m.bookmark_id JOIN content_cache cc ON cc.bookmark_id = b.id",
+          "WHERE m.status = 'active' AND m.category IS NULL AND IFNULL(cc.l1_summary,'') != '' AND b.is_private = 0",
+          "ORDER BY m.created_at DESC LIMIT ?",
+        ].join(" "),
+      )
+      .all(limit) as Array<{ id: string; bookmark_id: string }>;
   }
 
   /** 按书标记取资料条目（含 dismissed——封面回填对已移出条目照常写库，不展示） */

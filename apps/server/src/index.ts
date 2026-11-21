@@ -6,7 +6,7 @@ import { Store } from "./store";
 import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
 import { SemanticService } from "./semantic";
-import { MaintenanceService, startScheduler, startRetentionPrune, startSummaryBackfill } from "./maintenance";
+import { MaintenanceService, startScheduler, startRetentionPrune, startSummaryBackfill, startCategoryBackfill } from "./maintenance";
 import { backfillMaterials, sweepOrphanCovers } from "./materials";
 import { LlmClient, llmFromEnv } from "@mf/ai/llm-client";
 
@@ -63,6 +63,7 @@ startRetentionPrune(store);
 
 // D63：L1 摘要兜底补扫（常驻——fire-and-forget 摘要遇重启/LLM 当时不可用可找回；无 LLM 零开销）
 startSummaryBackfill(pipeline);
+startCategoryBackfill(pipeline); // D65：资料分类回灌（涓流常驻，无 LLM 零开销）
 
 // D61 资料库：存量一次性回灌（纯本地分类，零网络）+ 孤儿封面清理（书签删除走 FK 级联，文件无钩子）
 const backfill = backfillMaterials(store);

@@ -435,6 +435,23 @@ export const MIGRATION_V10_MATERIAL: Migration = {
   },
 };
 
+/**
+ * 版本 11：资料库自有 AI 分类体系（D65，2026-11-21）。
+ *  - material.category：AI 生成的两级分类路径（"一级/二级" 存储形态，"/" 连接；NULL=未分类）。
+ *    资料库不沿用书签目录（D65：分类按内容语义，AI 一等消费者视角），左树/筛选/MCP 以此为准。
+ *  - 存量回灌：pipeline.backfillCategories 涓流分类（复用摘要 LLM 调用形态，≤5 条/轮）。
+ */
+export const MIGRATION_V11_MATERIAL_CATEGORY: Migration = {
+  version: 11,
+  name: "material_category",
+  up: (db) => {
+    const cols = db.prepare("PRAGMA table_info(material)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "category")) {
+      db.prepare("ALTER TABLE material ADD COLUMN category TEXT").run();
+    }
+  },
+};
+
 /** 全部迁移按版本升序注册（只追加） */
 export const MIGRATIONS: Migration[] = [
   BASELINE_MIGRATION,
@@ -447,6 +464,7 @@ export const MIGRATIONS: Migration[] = [
   MIGRATION_V8_PROTO_BASE,
   MIGRATION_V9_AUDIT_LOG,
   MIGRATION_V10_MATERIAL,
+  MIGRATION_V11_MATERIAL_CATEGORY,
 ];
 
 export function appliedVersions(db: DatabaseSync): Set<number> {

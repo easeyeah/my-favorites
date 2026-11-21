@@ -238,7 +238,7 @@ describe("D61 资料库：识别入库与读取面", () => {
     expect(cover.status).toBe(404);
   });
 
-  it("分面统计：目录聚合计数 + AI 标签频次榜（json_each 展开）；私密不计", async () => {
+  it("分面统计与自有分类（D65）：category 子树筛选/未分类口径/私密不计；回灌无 LLM 零开销", async () => {
     const bm = (await post("/api/v1/bookmarks", {
       url: "https://facets.example/blog/tagged-post",
       title: "分面统计样本文章",
@@ -255,11 +255,31 @@ describe("D61 资料库：识别入库与读取面", () => {
       keywords: [],
       fetchedVia: "extension_capture",
     });
+    // AI 分类写入（模拟摘要顺带产出）
+    const mat = env.store.getMaterialByBookmark(bm.id)!;
+    env.store.setMaterialCategory(mat.id, ["技术开发", "前端"]);
 
     const facets = env.store.materialFacets(false);
-    expect(facets.folders.length).toBeGreaterThan(0);
+    expect(facets.categories).toContainEqual({ category: "技术开发/前端", count: 1 });
     expect(facets.tags).toContainEqual({ tag: "react", count: 1 });
     expect(facets.tags).toContainEqual({ tag: "前端", count: 1 });
+
+    // 子树筛选：点一级「技术开发」命中其子树（前缀匹配）
+    const byTop = (await json(await env.app.request("/api/v1/materials?category=技术开发"))) as {
+      items: Array<Record<string, unknown>>;
+    };
+    expect(byTop.items.some((r) => r.bookmark_id === bm.id)).toBe(true);
+    const byExact = (await json(await env.app.request("/api/v1/materials?category=技术开发/前端"))) as {
+      items: Array<Record<string, unknown>>;
+    };
+    expect(byExact.items.some((r) => r.bookmark_id === bm.id)).toBe(true);
+
+    // 未分类口径：另一条无分类的资料
+    const uncat = (await json(await env.app.request("/api/v1/materials?uncategorized=1"))) as {
+      items: Array<Record<string, unknown>>;
+    };
+    expect(uncat.items.every((r) => r.category === null)).toBe(true);
+    expect(uncat.items.some((r) => r.bookmark_id !== bm.id)).toBe(true);
 
     // 私密书签不打进分面（与列表口径一致）
     const priv = (await post("/api/v1/bookmarks", {
@@ -277,10 +297,10 @@ describe("D61 资料库：识别入库与读取面", () => {
       body: JSON.stringify({ bookmarkId: priv.id, l2Text: longText }),
     });
     const after = env.store.materialFacets(false);
-    expect(after.tags.find((t) => t.tag === "react")?.count).toBe(1);
-    const withPrivate = env.store.materialFacets(true);
-    // 私密条目同样无标签——总计数只在目录维度变化（此处仅验证不抛错且含公开项）
-    expect(withPrivate.folders.length).toBeGreaterThan(0);
+    expect(after.categories.find((c) => c.category === "技术开发/前端")?.count).toBe(1);
+
+    // 回灌：无 LLM 零开销；分类已存在的条目不进候选
+    expect(await env.pipeline.backfillCategories(5)).toBe(0);
   });
 
   it("书签删除 → material 行 FK 级联消失", async () => {

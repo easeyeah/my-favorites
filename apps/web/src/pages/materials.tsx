@@ -1,9 +1,10 @@
 /**
- * 资料库（D61/D64）：收藏内容三级识别的实体面。
+ * 资料库（D61/D64/D65）：收藏内容三级识别的实体面。
  * 形态定位（D64 用户拍板）：资料管理的最终价值是「经 MCP 供 AI 工具调用」，人逛页面是次要
  * 场景——不做阅读效果，行式列表即可；分类标签是一等展示位。
- * 左侧双维度面板：分类树（目录体系，子树聚合计数，按资料剪枝）+ AI 标签频次榜——
- * 标签无层级不造假树；目录/标签/类型/关键词四维正交可叠加。
+ * 左侧面板（D65）：资料库自有 AI 分类树（两级路径，随摘要同一次 LLM 调用产出，涓流回灌存量）
+ * + AI 标签频次榜——**不用书签目录**（书签分类服务于浏览器心智，资料分类按内容语义），
+ * 呈现方式参考书签库左树（层级缩进 + 计数 + 点选筛选）。
  * 行 = 标题 + 已存全文徽章 + 📸 + 分类标签行 + 行内操作（打开原页/导出/移出）。
  */
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
@@ -39,45 +40,6 @@ const hostOf = (url: string): string => {
   }
 };
 
-/** 分面目录 → 按资料子树计数构建展示树（剪掉无资料的分支；count = 子树聚合） */
-interface MaterialFolderNode {
-  id: string;
-  name: string;
-  count: number;
-  depth: number;
-  childCount: number;
-}
-
-function buildMaterialTree(
-  tree: Array<{ id: string; name: string; parent_id: string | null }>,
-  counts: Map<string, number>,
-): MaterialFolderNode[] {
-  const byId = new Map(tree.map((f) => [f.id, { ...f, children: [] as string[] }]));
-  const childrenOf = new Map<string | null, string[]>();
-  for (const f of byId.values()) {
-    const list = childrenOf.get(f.parent_id) ?? [];
-    list.push(f.id);
-    childrenOf.set(f.parent_id, list);
-  }
-  const subtreeCount = (id: string): number => {
-    let sum = counts.get(id) ?? 0;
-    for (const c of childrenOf.get(id) ?? []) sum += subtreeCount(c);
-    return sum;
-  };
-  const rows: MaterialFolderNode[] = [];
-  const walk = (id: string, depth: number): void => {
-    const node = byId.get(id);
-    if (!node) return;
-    const count = subtreeCount(id);
-    if (count <= 0) return; // 剪枝：无资料的分支不渲染
-    const childList = (childrenOf.get(id) ?? []).filter((c) => subtreeCount(c) > 0);
-    rows.push({ id, name: node.name, count, depth, childCount: childList.length });
-    for (const c of (childrenOf.get(id) ?? []).sort()) walk(c, depth + 1);
-  };
-  for (const root of childrenOf.get(null) ?? [].sort()) walk(root, 0);
-  return rows;
-}
-
 export function Materials() {
   const { cfg } = useShell();
   const { go } = useRoute();
@@ -86,8 +48,8 @@ export function Materials() {
   const [facets, setFacets] = useState<MaterialFacets | null>(null);
   const [filter, setFilter] = useState<KindFilter>("");
   const [q, setQ] = useState("");
-  const [folderIds, setFolderIds] = useState<string[] | null>(null);
-  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
+  const [catFilter, setCatFilter] = useState<string | null>(null);
+  const [uncategorized, setUncategorized] = useState(false);
   const [tag, setTag] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -98,7 +60,8 @@ export function Materials() {
         type: filter || undefined,
         q: q || undefined,
         tag: tag || undefined,
-        folderId: folderIds?.length ? folderIds.join(",") : undefined,
+        category: catFilter || undefined,
+        uncategorized,
         limit: 100,
       })
       .then((r) => {
@@ -107,7 +70,7 @@ export function Materials() {
       })
       .catch(() => setItems([]))
       .finally(() => setLoading(false));
-  }, [cfg, filter, q, tag, folderIds]);
+  }, [cfg, filter, q, tag, catFilter, uncategorized]);
 
   useEffect(load, [load]);
 
@@ -120,29 +83,22 @@ export function Materials() {
   }, [cfg]);
   useEffect(loadFacets, [loadFacets]);
 
-  const [treeSource, setTreeSource] = useState<Array<{ id: string; name: string; parent_id: string | null }>>([]);
-  useEffect(() => {
-    fetchers
-      .folderTree(cfg)
-      .then((t) => setTreeSource(t.map((n) => ({ id: n.id, name: n.name, parent_id: n.parent_id }))))
-      .catch(() => setTreeSource([]));
-  }, [cfg]);
-
-  const countMap = useMemo(
-    () => new Map((facets?.folders ?? []).map((f) => [f.folder_id, f.count])),
-    [facets],
-  );
-  const materialTree = useMemo(() => buildMaterialTree(treeSource, countMap), [treeSource, countMap]);
-
-  const pickFolder = (nodeId: string, subtreeIds: string[]) => {
-    if (activeFolderId === nodeId) {
-      setActiveFolderId(null);
-      setFolderIds(null);
-    } else {
-      setActiveFolderId(nodeId);
-      setFolderIds(subtreeIds);
+  // 分类树：category 路径（"一级/二级"）→ 两层结构，一级计数 = 子树聚合
+  const catTree = useMemo(() => {
+    const tops = new Map<string, { name: string; count: number; subs: Array<{ name: string; count: number }> }>();
+    for (const { category, count } of facets?.categories ?? []) {
+      const parts = category.split("/");
+      const top = parts[0] ?? "未分类";
+      const sub = parts[1];
+      const t = tops.get(top) ?? { name: top, count: 0, subs: [] as Array<{ name: string; count: number }> };
+      t.count += count;
+      if (sub) t.subs.push({ name: sub, count });
+      tops.set(top, t);
     }
-  };
+    return [...tops.values()].sort((a, b) => b.count - a.count);
+  }, [facets]);
+  const categorized = (facets?.categories ?? []).reduce((s, c) => s + c.count, 0);
+  const uncategorizedCount = Math.max(0, counts.total - categorized);
 
   const exportMd = async (id: string, title: string) => {
     try {
@@ -173,7 +129,7 @@ export function Materials() {
     if (it) window.open(it.url_raw, "_blank");
   };
 
-  const filtersActive = filter !== "" || q !== "" || tag !== "" || folderIds !== null;
+  const filtersActive = filter !== "" || q !== "" || tag !== "" || catFilter !== null || uncategorized;
 
   return (
     <PageScroll>
@@ -183,50 +139,87 @@ export function Materials() {
       />
 
       <div className="flex gap-5">
-        {/* 左：双维度分面面板（分类树 + AI 标签榜） */}
+        {/* 左：分面面板（AI 分类树 + AI 标签榜）——资料自有分类，不用书签目录（D65） */}
         <aside className="scroll-slim hidden max-h-[calc(100vh-11rem)] w-52 shrink-0 self-start overflow-y-auto md:sticky md:top-32 md:block">
           <section>
             <p className="text-muted-foreground mb-1.5 text-[11px] font-medium">分类</p>
             <button
               onClick={() => {
-                setActiveFolderId(null);
-                setFolderIds(null);
+                setCatFilter(null);
+                setUncategorized(false);
               }}
               className={cn(
                 "mb-0.5 flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] transition-colors",
-                activeFolderId === null ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
+                catFilter === null && !uncategorized
+                  ? "bg-primary/10 font-medium text-primary"
+                  : "hover:bg-accent/60 text-foreground",
               )}
             >
               <span className="shrink-0">📚</span>
               <span className="min-w-0 flex-1 truncate text-left">全部资料</span>
               <span className="tabular text-muted-foreground shrink-0 text-[11px]">{counts.total}</span>
             </button>
-            {materialTree.map((n) => (
-              <button
-                key={n.id}
-                onClick={() => {
-                  // 子树筛选：本节点 + 全部后代目录（与展示计数口径一致）
-                  const ids: string[] = [n.id];
-                  const collect = (pid: string): void => {
-                    for (const c of materialTree.filter((x) => treeSource.find((t) => t.id === x.id)?.parent_id === pid)) {
-                      ids.push(c.id);
-                      collect(c.id);
+            {catTree.map((top) => (
+              <Fragment key={top.name}>
+                <button
+                  onClick={() => {
+                    if (catFilter === top.name) setCatFilter(null);
+                    else {
+                      setCatFilter(top.name);
+                      setUncategorized(false);
                     }
-                  };
-                  collect(n.id);
-                  pickFolder(n.id, ids);
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] transition-colors",
+                    catFilter === top.name ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
+                  )}
+                >
+                  <span className="min-w-0 flex-1 truncate text-left">{top.name}</span>
+                  <span className="tabular text-muted-foreground shrink-0 text-[11px]">{top.count}</span>
+                </button>
+                {top.subs.map((sub) => {
+                  const path = `${top.name}/${sub.name}`;
+                  return (
+                    <button
+                      key={sub.name}
+                      onClick={() => {
+                        if (catFilter === path) setCatFilter(null);
+                        else {
+                          setCatFilter(path);
+                          setUncategorized(false);
+                        }
+                      }}
+                      className={cn(
+                        "flex w-full items-center gap-1.5 rounded-lg py-1 pr-2 text-xs transition-colors",
+                        catFilter === path ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
+                      )}
+                      style={{ paddingLeft: 26 }}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-left">{sub.name}</span>
+                      <span className="tabular text-muted-foreground shrink-0 text-[11px]">{sub.count}</span>
+                    </button>
+                  );
+                })}
+              </Fragment>
+            ))}
+            {uncategorizedCount > 0 && (
+              <button
+                onClick={() => {
+                  if (uncategorized) setUncategorized(false);
+                  else {
+                    setUncategorized(true);
+                    setCatFilter(null);
+                  }
                 }}
                 className={cn(
-                  "flex w-full items-center gap-1.5 rounded-lg py-1 pr-2 text-[13px] transition-colors",
-                  activeFolderId === n.id ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
+                  "mt-0.5 flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] transition-colors",
+                  uncategorized ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
                 )}
-                style={{ paddingLeft: 8 + n.depth * 14 }}
-                title={n.name}
               >
-                <span className="min-w-0 flex-1 truncate text-left">{n.name}</span>
-                <span className="tabular text-muted-foreground shrink-0 text-[11px]">{n.count}</span>
+                <span className="min-w-0 flex-1 truncate text-left text-muted-foreground">未分类</span>
+                <span className="tabular text-muted-foreground shrink-0 text-[11px]">{uncategorizedCount}</span>
               </button>
-            ))}
+            )}
           </section>
 
           {(facets?.tags.length ?? 0) > 0 && (
@@ -296,7 +289,7 @@ export function Materials() {
               title={filtersActive ? "没有符合条件的内容" : "资料库还是空的"}
               hint={
                 filtersActive
-                  ? "换个目录、标签、类型或关键词试试。"
+                  ? "换个分类、标签、类型或关键词试试。"
                   : "用扩展收藏文章、视频或图片后会自动分类入库；已有书签在服务端启动时完成了一次存量回灌。"
               }
             />
@@ -334,13 +327,13 @@ export function Materials() {
                           )}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-1">
-                          {it.folder_name && (
+                          {it.category && (
                             <Badge
                               variant="secondary"
                               className="text-primary bg-primary/10 px-1.5 py-0 text-[10px]"
-                              title={it.signals.length > 0 ? `AI 分类 · 识别信号：${it.signals.join("、")}` : "AI 分类"}
+                              title="AI 分类（资料库自有体系，按内容语义两级归类）"
                             >
-                              {it.folder_name}
+                              {it.category.split("/").join(" / ")}
                             </Badge>
                           )}
                           {tags.map((t) => (
