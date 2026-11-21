@@ -21,6 +21,9 @@ services:
       MF_FORM: self-hosted
       MF_ENV: dev # 开发语义：A4-1 安全门槛按 dev 处理（生产语义默认锁定 setup）
       PORT: 3000
+      # 管理台/MCP/API 鉴权（dev 本地凭据）：设置后全部 /api/v1 需要 Bearer 令牌
+      # （管理台登录页/扩展 options 鉴权用密码换令牌；退出登录=撤销令牌）
+      ADMIN_PASSWORD: "123456"
       # 管理台产物指向挂载的本地构建（pnpm --filter @mf/web build 后即时生效）
       WEB_DIST_DIR: /web-dist
       # 数据进命名卷（与 full.yml 一致；不设的话 tsx cwd 在 apps/server，数据会落到宿主机源码目录）
