@@ -8,6 +8,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Mouse
 import {
     Archive,
     ArchiveRestore,
+    BookMarked,
     Check,
     ChevronRight,
     Folder,
@@ -896,8 +897,10 @@ export function Library() {
         <PageScroll>
             <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                    <h2 className="text-xl font-bold tracking-tight">书签</h2>
-                    <p className="text-muted-foreground mt-1 text-sm">
+                    <h2 className="flex items-center gap-2 text-lg font-bold tracking-tight">
+                        <BookMarked className="size-4" /> 书签
+                    </h2>
+                    <p className="text-muted-foreground mt-1 text-[13px]">
                         {viewLabel}
                         {!reorgActive && !historyActive &&
                             ` · ${

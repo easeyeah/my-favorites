@@ -63,12 +63,16 @@ export function Card({
   );
 }
 
-export function PageHeader({ title, sub, right }: { title: string; sub?: ReactNode; right?: ReactNode }) {
+export function PageHeader({ title, sub, right, icon }: { title: string; sub?: ReactNode; right?: ReactNode; icon?: ReactNode }) {
   return (
     <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h2 className="text-xl font-bold tracking-tight">{title}</h2>
-        {sub && <p className="text-muted-foreground mt-1 text-sm">{sub}</p>}
+        {/* 页签标题统一口径（D66）：与导航站一致 = 图标（页签同款）+ text-lg；副标题 text-[13px] */}
+        <h2 className="flex items-center gap-2 text-lg font-bold tracking-tight">
+          {icon}
+          {title}
+        </h2>
+        {sub && <p className="text-muted-foreground mt-1 text-[13px]">{sub}</p>}
       </div>
       {right && <div className="flex flex-wrap items-center gap-2">{right}</div>}
     </div>

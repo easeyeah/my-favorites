@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { Bell, Bot, Check, ChevronRight, Cloud, Copy, Database, Download, FileUp, HardDrive, Loader2, Plug, Plus, ScrollText, ShieldCheck, Sparkles, Trash2, Upload, Webhook } from "lucide-react";
+import { Bell, Bot, Check, ChevronRight, Cloud, Copy, Database, Download, FileUp, HardDrive, Loader2, Plug, Plus, ScrollText, Settings as SettingsIcon, ShieldCheck, Sparkles, Trash2, Upload, Webhook } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -63,7 +63,9 @@ export function Settings() {
   return (
     <PageScroll>
       <header className="mb-5">
-        <h2 className="text-lg font-bold tracking-tight">设置</h2>
+        <h2 className="flex items-center gap-2 text-lg font-bold tracking-tight">
+          <SettingsIcon className="size-4" /> 设置
+        </h2>
         <p className="text-muted-foreground mt-1 text-[13px]">
           {serverInfo ? `${cfg.serverUrl} · ${serverInfo.form} · v${serverInfo.version}` : cfg.serverUrl}
         </p>

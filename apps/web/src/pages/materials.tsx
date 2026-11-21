@@ -10,7 +10,7 @@
  * 行 = 标题 + 已存全文徽章 + 📸 + 分类徽章 + 行内操作（打开原页/导出/移出）。
  */
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowUpRight, Clapperboard, Download, FileText, Image as ImageIcon, Loader2, Search, Trash2 } from "lucide-react";
+import { ArrowUpRight, Clapperboard, Download, FileText, Image as ImageIcon, LibraryBig, Loader2, Search, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { EmptyState, PageScroll, PageHeader, toast } from "@/components/shared";
@@ -134,6 +134,7 @@ export function Materials() {
   return (
     <PageScroll>
       <PageHeader
+        icon={<LibraryBig className="size-4" />}
         title="资料库"
         sub="收藏内容经 AI 自动分类入库：文章存全文、视频留封面、图片存主图——AI 工具可经 MCP 直连本库检索与阅读"
       />
