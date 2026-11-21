@@ -513,6 +513,12 @@ export interface MaterialCounts {
   image: number;
 }
 
+/** D64 资料库分面统计（左侧双维度面板）：目录聚合计数 + AI 标签频次榜 */
+export interface MaterialFacets {
+  folders: Array<{ folder_id: string; name: string; count: number }>;
+  tags: Array<{ tag: string; count: number }>;
+}
+
 // ---------- 常用便捷封装 ----------
 
 export const fetchers = {
@@ -566,17 +572,21 @@ export const fetchers = {
   // ---------- D61 资料库 ----------
   materials: (
     cfg: AdminConfig,
-    q: { type?: string; q?: string; limit?: number; offset?: number } = {},
+    q: { type?: string; q?: string; tag?: string; folderId?: string; limit?: number; offset?: number } = {},
   ) => {
     const p = new URLSearchParams();
     if (q.type) p.set("type", q.type);
     if (q.q) p.set("q", q.q);
+    if (q.tag) p.set("tag", q.tag);
+    if (q.folderId) p.set("folderId", q.folderId);
     if (q.limit !== undefined) p.set("limit", String(q.limit));
     if (q.offset !== undefined) p.set("offset", String(q.offset));
     return api<{ items: MaterialRow[]; counts: MaterialCounts }>(cfg, `/materials?${p}`, {
       headers: privateHeaders(),
     });
   },
+  materialFacets: (cfg: AdminConfig) =>
+    api<MaterialFacets>(cfg, "/materials/facets", { headers: privateHeaders() }),
   materialDetail: (cfg: AdminConfig, id: string) =>
     api<MaterialDetail>(cfg, `/materials/${id}`, { headers: privateHeaders() }),
   materialCover: (cfg: AdminConfig, id: string) => apiDownload(cfg, `/materials/${id}/cover`),

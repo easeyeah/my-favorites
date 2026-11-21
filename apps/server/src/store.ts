@@ -533,6 +533,7 @@ export class Store {
     type?: string;
     q?: string;
     tag?: string;
+    folderId?: string;
     limit?: number;
     offset?: number;
     includePrivate?: boolean;
@@ -543,6 +544,21 @@ export class Store {
     if (filter.type) {
       conds.push("m.type = ?");
       args.push(filter.type);
+    }
+    if (filter.folderId) {
+      // 支持逗号分隔多目录（左树子树筛选：父节点=自身+全部后代，与分面计数口径一致）
+      const ids = filter.folderId
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 200);
+      if (ids.length === 1) {
+        conds.push("b.folder_id = ?");
+        args.push(ids[0]!);
+      } else if (ids.length > 1) {
+        conds.push(`b.folder_id IN (${ids.map(() => "?").join(",")})`);
+        args.push(...ids);
+      }
     }
     if (filter.tag) {
       // 标签筛选：l1_tags 是 JSON 数组文本，以引号定界精确匹配数组元素（防子串误命中）
@@ -612,6 +628,40 @@ export class Store {
   /** 资料条目存在性（孤儿封面清理用：不看 status，行在即文件不清理） */
   materialExists(id: string): boolean {
     return (this.db.prepare("SELECT 1 FROM material WHERE id = ?").get(id) as unknown) != null;
+  }
+
+  /**
+   * 资料库分面统计（D64 左侧双维度面板）：目录聚合计数 + AI 标签频次榜。
+   * 口径与列表一致（active + 非软归档 + 非私密，随 includePrivate）。
+   * 标签用 json_each 展开 l1_tags 数组逐元素计数（json_valid 防御坏 JSON）。
+   */
+  materialFacets(includePrivate = false): {
+    folders: Array<{ folder_id: string; name: string; count: number }>;
+    tags: Array<{ tag: string; count: number }>;
+  } {
+    const privacyCond = includePrivate ? "" : " AND b.is_private = 0";
+    const folders = this.db
+      .prepare(
+        [
+          "SELECT b.folder_id AS folder_id, IFNULL(f.name, '（已删目录）') AS name, COUNT(*) AS count",
+          "FROM material m JOIN bookmarks b ON b.id = m.bookmark_id LEFT JOIN folders f ON f.id = b.folder_id",
+          "WHERE m.status = 'active' AND b.archived_into IS NULL" + privacyCond,
+          "GROUP BY b.folder_id ORDER BY COUNT(*) DESC",
+        ].join(" "),
+      )
+      .all() as Array<{ folder_id: string; name: string; count: number }>;
+    const tags = this.db
+      .prepare(
+        [
+          "SELECT je.value AS tag, COUNT(*) AS count",
+          "FROM material m JOIN bookmarks b ON b.id = m.bookmark_id JOIN content_cache cc ON cc.bookmark_id = b.id",
+          "JOIN json_each(CASE WHEN json_valid(IFNULL(cc.l1_tags,'[]')) THEN IFNULL(cc.l1_tags,'[]') ELSE '[]' END) je",
+          "WHERE m.status = 'active' AND b.archived_into IS NULL" + privacyCond,
+          "GROUP BY je.value ORDER BY COUNT(*) DESC LIMIT 60",
+        ].join(" "),
+      )
+      .all() as Array<{ tag: string; count: number }>;
+    return { folders, tags };
   }
 
   /** 按书标记取资料条目（含 dismissed——封面回填对已移出条目照常写库，不展示） */

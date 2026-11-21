@@ -238,6 +238,51 @@ describe("D61 资料库：识别入库与读取面", () => {
     expect(cover.status).toBe(404);
   });
 
+  it("分面统计：目录聚合计数 + AI 标签频次榜（json_each 展开）；私密不计", async () => {
+    const bm = (await post("/api/v1/bookmarks", {
+      url: "https://facets.example/blog/tagged-post",
+      title: "分面统计样本文章",
+    })) as { id: string };
+    await env.app.request("/api/v1/content/capture", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bookmarkId: bm.id, l2Text: longText }),
+    });
+    env.store.upsertCache({
+      bookmarkId: bm.id,
+      l1Summary: "分面统计演示。",
+      l1Tags: ["前端", "react"],
+      keywords: [],
+      fetchedVia: "extension_capture",
+    });
+
+    const facets = env.store.materialFacets(false);
+    expect(facets.folders.length).toBeGreaterThan(0);
+    expect(facets.tags).toContainEqual({ tag: "react", count: 1 });
+    expect(facets.tags).toContainEqual({ tag: "前端", count: 1 });
+
+    // 私密书签不打进分面（与列表口径一致）
+    const priv = (await post("/api/v1/bookmarks", {
+      url: "https://facets.example/blog/private-post",
+      title: "私密分面样本",
+    })) as { id: string };
+    await env.app.request(`/api/v1/bookmarks/${priv.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ isPrivate: true }),
+    });
+    await env.app.request("/api/v1/content/capture", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bookmarkId: priv.id, l2Text: longText }),
+    });
+    const after = env.store.materialFacets(false);
+    expect(after.tags.find((t) => t.tag === "react")?.count).toBe(1);
+    const withPrivate = env.store.materialFacets(true);
+    // 私密条目同样无标签——总计数只在目录维度变化（此处仅验证不抛错且含公开项）
+    expect(withPrivate.folders.length).toBeGreaterThan(0);
+  });
+
   it("书签删除 → material 行 FK 级联消失", async () => {
     const bm = (await post("/api/v1/bookmarks", {
       url: "https://www.youtube.com/watch?v=cascade1",

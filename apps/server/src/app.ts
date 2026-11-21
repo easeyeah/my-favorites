@@ -906,6 +906,9 @@ export function buildApp(deps: AppDeps): Hono {
     });
   });
 
+  // 分面统计（左侧双维度面板：分类树计数 + AI 标签频次榜）——先于 /materials/:id 注册避免被截胡
+  api.get("/materials/facets", (c) => c.json(store.materialFacets(privateVisible(c))));
+
   api.get("/materials/:id", (c) => {
     const m = store.getMaterial(c.req.param("id"));
     if (!m) return c.json({ error: "not_found" }, 404);

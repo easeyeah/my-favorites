@@ -83,9 +83,10 @@ test("资料库行式列表 + 类型筛选（计数 chips）", async () => {
   await expect(row(page, "一个测试视频")).toBeVisible({ timeout: 15_000 });
   await expect(row(page, "一张直链图片")).toBeVisible({ timeout: 15_000 });
 
-  // 文章行带「已存全文」徽章；MCP 提示行出现
+  // 文章行带「已存全文」徽章；MCP 提示行出现；左侧分面面板（分类树）可见
   await expect(row(page, "一篇深度文章").getByText("已存全文")).toBeVisible();
   await expect(page.getByText("MCP 接口")).toBeVisible();
+  await expect(page.locator("aside").getByText("全部资料")).toBeVisible();
 
   // 类型筛选：视频 chips 后文章行消失
   await page.locator("button", { hasText: "视频" }).first().click();

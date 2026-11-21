@@ -584,6 +584,27 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
       .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
     return { items, counts };
   }
+  if (method === "GET" && path === "/materials/facets") {
+    // 分面统计（演示态）：目录聚合计数 + AI 标签频次榜，从 mock 材料实时聚合
+    const folderMap = new Map<string, { folder_id: string; name: string; count: number }>();
+    const tagMap = new Map<string, number>();
+    for (const m of db.materials) {
+      const b = db.bookmarks.find((x) => x.id === m.bookmark_id);
+      if (!b) continue;
+      const folder = db.folders.find((f) => f.id === b.folder_id);
+      if (folder) {
+        const cur = folderMap.get(folder.id) ?? { folder_id: folder.id, name: folder.name, count: 0 };
+        cur.count += 1;
+        folderMap.set(folder.id, cur);
+      }
+      const tags = (b as Bookmark & { cache?: { l1_tags?: string[] } }).cache?.l1_tags ?? [];
+      for (const t of tags) tagMap.set(t, (tagMap.get(t) ?? 0) + 1);
+    }
+    return {
+      folders: [...folderMap.values()].sort((a, b) => b.count - a.count),
+      tags: [...tagMap.entries()].map(([tag, count]) => ({ tag, count })).sort((a, b) => b.count - a.count),
+    };
+  }
   if (method === "GET" && seg[0] === "materials" && seg.length === 2) {
     const m = db.materials.find((x) => x.id === seg[1]);
     const row = m ? materialRow(m, true) : null;
