@@ -1112,20 +1112,24 @@ export function Library() {
                     ) : items.length === 0 ? (
                         <div>
                             <EmptyState
-                                icon={searching ? '🔍' : statusFilter === 'dead' ? '✨' : '🌱'}
+                                icon={searching ? '🔍' : statusFilter === 'dead' ? '✨' : inboxView ? '📥' : '🌱'}
                                 title={
                                     searching
                                         ? '没有找到匹配的书签'
                                         : statusFilter === 'dead'
                                           ? '没有失效链接'
-                                          : '这里还没有书签'
+                                          : inboxView
+                                            ? '收纳盒是空的'
+                                            : '这里还没有书签'
                                 }
                                 hint={
                                     searching
                                         ? '换个关键词试试，或检查一下目录 / 状态筛选'
                                         : statusFilter === 'dead'
                                           ? '能访问的都正常，打不开的还没查出——点上方「重新检测」跑一遍'
-                                          : '点右上角「添加书签」，或在浏览器里随手收藏'
+                                          : inboxView
+                                            ? '丢进来的增量已全部自动归位——最近的归位记录见下方，可随时撤销'
+                                            : '点右上角「添加书签」，或在浏览器里随手收藏'
                                 }
                             />
                         </div>
@@ -1516,42 +1520,45 @@ export function Library() {
                                 </div>
                             )}
 
-                            {/* D54 最近自动归位（待处理列表下方）：回答「AI 把它放哪了」——去向目录 + 理由 + 一键进版本历史撤销
-                                mx-2 = 对齐行盒缩进（ul p-1 4px + li m-1 4px，与行 hover 背景左右缘齐平） */}
-                            {inboxNode && selected === inboxNode.id && !searching && placedRows && placedRows.length > 0 && (
-                                <div data-marquee-skip className="bg-muted/40 mx-2 mt-3 rounded-xl px-4 py-2.5">
-                                    <p className="text-muted-foreground mb-1 text-[11px] font-medium">最近自动归位</p>
-                                    <ul className="divide-y divide-border/40">
-                                        {placedRows.map((p) => (
-                                            <li key={p.bookmark_id} className="flex items-center gap-2.5 py-1.5 text-[13px]">
-                                                <a
-                                                    href={p.url_canonical}
-                                                    target="_blank"
-                                                    rel="noreferrer"
-                                                    className="min-w-0 flex-1 truncate underline-offset-2 hover:text-primary hover:underline"
-                                                >
-                                                    {p.title}
-                                                </a>
-                                                {p.folder_name && (
-                                                    <span className="shrink-0 text-xs">
-                                                        →「<span className="font-medium">{p.folder_name}</span>」
-                                                    </span>
-                                                )}
-                                                {p.reason && <span className="text-muted-foreground shrink-0 text-[11px]">{p.reason}</span>}
-                                                {p.version_id && (
-                                                    <button
-                                                        className="text-muted-foreground hover:text-foreground shrink-0 text-[11px] underline-offset-2 hover:underline"
-                                                        title="归位记入版本历史，可精确撤销这一次"
-                                                        onClick={activateHistory}
-                                                    >
-                                                        撤销…
-                                                    </button>
-                                                )}
-                                            </li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            )}                        </div>
+                        </div>
+                    )}
+
+                    {/* D54 最近自动归位：与列表容器平级——旧实现嵌在容器内，盒空（待处理全部归位完）
+                        时 items=0 走 EmptyState 分支，历史区整块跟着消失（用户反馈「历史记录又看不到了」的根因）。
+                        mx-2 = 对齐行盒缩进（与行 hover 背景左右缘齐平）；data-marquee-skip 防框选误伤 */}
+                    {inboxNode && selected === inboxNode.id && !searching && placedRows && placedRows.length > 0 && (
+                        <div className="bg-muted/40 mx-2 mt-3 rounded-xl px-4 py-2.5" data-marquee-skip>
+                            <p className="text-muted-foreground mb-1 text-[11px] font-medium">最近自动归位</p>
+                            <ul className="divide-y divide-border/40">
+                                {placedRows.map((p) => (
+                                    <li key={p.bookmark_id} className="flex items-center gap-2.5 py-1.5 text-[13px]">
+                                        <a
+                                            href={p.url_canonical}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="min-w-0 flex-1 truncate underline-offset-2 hover:text-primary hover:underline"
+                                        >
+                                            {p.title}
+                                        </a>
+                                        {p.folder_name && (
+                                            <span className="shrink-0 text-xs">
+                                                →「<span className="font-medium">{p.folder_name}</span>」
+                                            </span>
+                                        )}
+                                        {p.reason && <span className="text-muted-foreground shrink-0 text-[11px]">{p.reason}</span>}
+                                        {p.version_id && (
+                                            <button
+                                                className="text-muted-foreground hover:text-foreground shrink-0 text-[11px] underline-offset-2 hover:underline"
+                                                title="归位记入版本历史，可精确撤销这一次"
+                                                onClick={activateHistory}
+                                            >
+                                                撤销…
+                                            </button>
+                                        )}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
                     )}
                         </>
                     )}
