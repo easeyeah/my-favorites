@@ -48,7 +48,8 @@ const post = async (path: string, body: unknown): Promise<Record<string, unknown
   const res = await env.app.request(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    // D61 消费面回归用普通目录存量样本，避免混入 D91 新收纳盒入口自动转换生命周期。
+    body: JSON.stringify(path === "/api/v1/bookmarks" ? { ...(body as object), folderId: env.store.ensurePath(["存量样本"]).id } : body),
   });
   return json(res) as Promise<Record<string, unknown>>;
 };

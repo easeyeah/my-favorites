@@ -202,6 +202,7 @@ export class OrganizeService {
       const result = await this.planReclassify(scopeFolder);
       proposal = result.proposal;
       answer = result.summary;
+      return this.finish(message, answer, proposal, result.baseRevisions);
     } else if (/合并重复|去重|重复/.test(message)) {
       const result = this.planMergeDuplicates();
       proposal = result.proposal;
@@ -237,13 +238,13 @@ export class OrganizeService {
       .filter((f) => subtreeIdSet.has(f.id) && f.is_system_inbox !== 1);
     const allowedIds = new Set(allowed.map((f) => f.id));
     const folderContext = this.buildSubtreeContext(folder, allowed);
-    const { proposal, summary } = await this.planReclassifyRows(scope, {
+    const { proposal, summary, baseRevisions } = await this.planReclassifyRows(scope, {
       scopeLabel: folder.name,
       allowedFolderIds: allowedIds,
       createParentId: folderId,
       folderContext,
     });
-    return this.finish(`整理目录「${folder.name}」`, summary, proposal);
+    return this.finish(`整理目录「${folder.name}」`, summary, proposal, baseRevisions);
   }
 
   /**
@@ -280,11 +281,13 @@ export class OrganizeService {
     return { context, names: folders.map((f) => f.name) };
   }
 
-  /** 计划会话落库 + 直接提交（D27）：全库与目录级整理共用 */
+  /** 计划会话落库 + 直接提交（D27）：全库与目录级整理共用。
+   *  baseRevisions 由计划内核在任何 await 之前采集（D92：模型等待期间的用户修改必须能被识别为冲突）。 */
   private finish(
     message: string,
     answer: string,
     proposal: OrganizeActionView[] | null,
+    plannedRevisions?: Record<string, number>,
   ): OrganizeRunResult {
     const sessionId = newId();
     // A3-2：动作保存稳定实体 ID + 原始状态（folder 快照）+ 修订版本
@@ -298,7 +301,7 @@ export class OrganizeService {
       const bm = this.store.getBookmark(id);
       if (bm) {
         baseState[id] = bm.folder_id;
-        baseRevisions[id] = bm.content_revision ?? 1;
+        baseRevisions[id] = plannedRevisions?.[id] ?? (bm.content_revision ?? 1);
       }
     }
     const status = proposal && proposal.length > 0 ? "proposed" : "answered";
@@ -347,28 +350,32 @@ export class OrganizeService {
     proposal: OrganizeActionView[];
     summary: string;
     scope: Array<{ id: string }>;
+    baseRevisions: Record<string, number>;
   }> {
     let scope = this.store.listBookmarks({ limit: MAX_SCOPE });
     if (scopeFolder) {
       const folder = this.store.findFolderByName(scopeFolder);
       if (!folder) {
-        return { proposal: [], summary: `未找到文件夹「${scopeFolder}」`, scope: [] };
+        return { proposal: [], summary: `未找到文件夹「${scopeFolder}」`, scope: [], baseRevisions: {} };
       }
       scope = this.store.listBookmarks({ folderId: folder.id, limit: MAX_SCOPE });
     }
-    const { proposal, summary } = await this.planReclassifyRows(scope, {
+    const { proposal, summary, baseRevisions } = await this.planReclassifyRows(scope, {
       scopeLabel: scopeFolder ?? "全库",
     });
-    return { proposal, summary, scope };
+    return { proposal, summary, scope, baseRevisions };
   }
 
   /** 计划内核（全库 / 目录级共用）：规则命中 → LLM 批量分类 → 只产出 move/createFolder */
   private async planReclassifyRows(
     scope: BookmarkRow[],
     opts: PlanScopeOptions,
-  ): Promise<{ proposal: OrganizeActionView[]; summary: string }> {
+  ): Promise<{ proposal: OrganizeActionView[]; summary: string; baseRevisions: Record<string, number> }> {
     const proposal: OrganizeActionView[] = [];
     const pending: PendingItem[] = [];
+    // D92：修订基线在任何 await 之前采集——模型等待期间用户改过的条目在提交时按冲突跳过
+    const baseRevisions: Record<string, number> = {};
+    for (const bm of scope) baseRevisions[bm.id] = bm.content_revision ?? 1;
     // D89 目录级：目标目录限定在子树内（含被整理目录自身——归到自身即 no-op）
     const allowedNames = opts.allowedFolderIds
       ? new Set(
@@ -380,6 +387,8 @@ export class OrganizeService {
       : null;
 
     for (const bm of scope) {
+      // D92 隐私前置：私密书签的标题/URL/摘要不得进入模型输入（此前只在提交时拒绝，外发已不可撤回）
+      if (bm.is_private === 1) continue;
       // D43 事前旁路：敏感宿主不进 LLM 批次（供应商审核整包拒收），保持原位不动
       if (isSensitiveHost(bm.url_canonical)) {
         continue;
@@ -419,6 +428,8 @@ export class OrganizeService {
     const llm = this.llmFor("organize");
     const prefs = this.store.topCategories();
     let quarantined: PendingItem[] = [];
+    // D92：模型故障不再静默吞掉——未完成的判断如实计入说明，不能包装成「分类一致」
+    let llmFailed = 0;
     if (pending.length > 0 && llm) {
       const folderNames = opts.allowedFolderIds
         ? [...(allowedNames ?? [])]
@@ -465,8 +476,10 @@ export class OrganizeService {
         for (const item of isolated) {
           proposal.push(this.markPrivateView(item, proposal));
         }
-      } catch {
-        // LLM 不可用：规则结果已入 proposal，其余保持原位
+      } catch (err) {
+        // LLM 故障/限流/返回无效：规则结果已入 proposal，其余保持原位并如实说明
+        llmFailed = pending.length;
+        console.warn("[organize] llm classify failed:", String(err).slice(0, 160));
       }
     }
 
@@ -476,11 +489,14 @@ export class OrganizeService {
         : "";
     const scopeNote = opts.allowedFolderIds ? `目录「${opts.scopeLabel}」及其子目录` : "全库";
     const llmNote = !llm && pending.length > 0 ? "未配置模型：仅应用规则分类，其余保持原位。" : "";
+    const failureNote = llmFailed > 0 ? `模型处理失败，未完成 ${llmFailed} 条判断，这些书签保持原位。` : "";
     const summary =
       proposal.length > 0
-        ? `${scopeNote}共扫描 ${scope.length} 条，已直接归位 ${proposal.length} 项变更；每一次挪动都记入版本历史，可整批撤销（D27）。${quarantineNote}${llmNote}`
-        : `${scopeNote}共扫描 ${scope.length} 条，分类结果与现有目录一致，无需挪动。${quarantineNote}${llmNote}`;
-    return { proposal, summary };
+        ? `${scopeNote}共扫描 ${scope.length} 条，已直接归位 ${proposal.length} 项变更；每一次挪动都记入版本历史，可整批撤销（D27）。${quarantineNote}${llmNote}${failureNote}`
+        : llmFailed > 0
+          ? `${scopeNote}共扫描 ${scope.length} 条。${failureNote}`
+          : `${scopeNote}共扫描 ${scope.length} 条，分类结果与现有目录一致，无需挪动。${quarantineNote}${llmNote}`;
+    return { proposal, summary, baseRevisions };
   }
 
   /**
@@ -728,7 +744,14 @@ export class OrganizeService {
               parent?.root ?? "bar",
             );
             plannedToActual.set(action.plannedFolderId, created.id);
-            versionActions.push({ type: "createFolder", folderId: created.id, name: created.name });
+            // D92：记录创建后的父/根——撤销时据此识别「用户已改名/搬家/放入内容」的目录并保留
+            versionActions.push({
+              type: "createFolder",
+              folderId: created.id,
+              name: created.name,
+              createdParentId: created.parent_id ?? null,
+              createdRoot: created.root === "other" ? "other" : "bar",
+            });
           }
         }
       }
@@ -843,12 +866,22 @@ export class OrganizeService {
     reversed: number;
     skipped: Array<{ bookmarkId: string; reason: string }>;
     undoVersionId: string;
+    /** D92 真实回执拆分：恢复的书签（归位/转换）与实际回收的空目录分别计数 */
+    restoredBookmarks: number;
+    removedFolders: number;
+    /** 本次恢复的既有资料分类条数（任务新建资料的分类随资料保留，不计） */
+    categoriesRestored: number;
   } {
     const version = this.store.getVersion(versionId);
     if (!version || version.reverted) throw new Error("version_not_found_or_reverted");
     let reversed = 0;
+    let restoredBookmarks = 0;
+    let removedFolders = 0;
+    let categoriesRestored = 0;
     const skipped: Array<{ bookmarkId: string; reason: string }> = [];
     const undoActions: unknown[] = [];
+    const reconverted: string[] = []; // D91：undo 再回滚时重新转资料的条目
+    const lifecycleChanged: string[] = [];
     const db = this.store.db;
 
     db.exec("BEGIN");
@@ -860,6 +893,11 @@ export class OrganizeService {
           const current = this.store.getBookmark(bmId);
           if (!current) {
             skipped.push({ bookmarkId: bmId, reason: "bookmark_deleted" });
+            continue;
+          }
+          // D91：归位后又被转资料的条目，move 回滚不适用——先在资料页恢复为书签
+          if (current.materialized_at) {
+            skipped.push({ bookmarkId: bmId, reason: "converted_to_material" });
             continue;
           }
           // A3-4/DEV-08：apply 之后用户又手动改过（revision 变化）→ 跳过，不破坏用户修改
@@ -874,6 +912,8 @@ export class OrganizeService {
             continue;
           }
           this.store.moveBookmark(bmId, fromFolderId);
+          // 用户撤销归位就是退出该轮自动处理；在途识别/补扫不得再把它转换。
+          this.store.clearInboxState(bmId);
           // 反向镜像入队（同事务）+ 取消待执行的旧移动（先撤销先取消，避免晚到覆盖）
           const folder = this.store.getFolder(fromFolderId)!;
           for (const ident of this.store.identitiesForApp(bmId)) {
@@ -886,8 +926,9 @@ export class OrganizeService {
             });
             this.store.cancelPendingBrowserOps(ident.device_id, ident.browser_bookmark_id, folder.name);
           }
-          undoActions.push({ type: "move", bookmarkId: bmId, fromFolderId: current.folder_id, toFolderId: fromFolderId });
+          undoActions.push({ type: "move", bookmarkId: bmId, fromFolderId: current.folder_id, toFolderId: fromFolderId, revisionAfter: this.store.getBookmark(bmId)?.content_revision });
           reversed++;
+          restoredBookmarks++;
         } else if (a.type === "merge") {
           for (const row of (a.archivedRows ?? []) as Array<Record<string, unknown>>) {
             const id = String(row.id);
@@ -909,11 +950,29 @@ export class OrganizeService {
             );
             undoActions.push({ type: "unmerge", bookmarkId: id, folderId: row.folder_id });
             reversed++;
+            restoredBookmarks++;
           }
         } else if (a.type === "createFolder") {
-          this.store.deleteFolderIfEmpty(String(a.folderId));
-          undoActions.push({ type: "deleteFolderIfEmpty", folderId: a.folderId });
-          reversed++;
+          // D92：AI 新建目录被用户改名/搬家后即使为空也保留——仅回收仍保持创建时父/根且未经修改的空目录
+          const created = this.store.getFolder(String(a.folderId));
+          const touchedByUser =
+            created !== undefined &&
+            a.createdParentId !== undefined &&
+            ((created.parent_id ?? null) !== (a.createdParentId ?? null) ||
+              (created.root === "other" ? "other" : "bar") !== (a.createdRoot ?? "bar") ||
+              (created.rev ?? 0) !== 0);
+          if (touchedByUser) {
+            skipped.push({ bookmarkId: "", reason: "folder_modified_by_user" });
+            continue;
+          }
+          // 未实际删除（已有新内容/子目录）不计撤销成功——reversed 是真实回执，不是动作数
+          if (this.store.deleteFolderIfEmpty(String(a.folderId))) {
+            undoActions.push({ type: "deleteFolderIfEmpty", folderId: a.folderId });
+            reversed++;
+            removedFolders++;
+          } else {
+            skipped.push({ bookmarkId: "", reason: "folder_in_use" });
+          }
         } else if (a.type === "markPrivate") {
           // D43 撤销：还原私密位 + 移回原目录 + 反向镜像入队（同事务）
           const bmId = String(a.bookmarkId);
@@ -966,17 +1025,81 @@ export class OrganizeService {
               revisionAfter: this.store.getBookmark(bmId)?.content_revision ?? 1,
             });
             reversed++;
+            restoredBookmarks++;
           }
+        } else if (a.type === "convertToMaterial") {
+          // D91 撤销转资料：恢复为书签（清 materialized_at + upsert change → 扩展重建节点）
+          const bmId = String(a.bookmarkId);
+          const current = this.store.getBookmark(bmId);
+          if (!current) {
+            skipped.push({ bookmarkId: bmId, reason: "bookmark_deleted" });
+            continue;
+          }
+          if (!current.materialized_at) {
+            skipped.push({ bookmarkId: bmId, reason: "already_restored_by_user" });
+            continue;
+          }
+          const restored = this.store.restoreMaterialBookmark(bmId, {
+            revision: Number(a.revisionAfter), generation: Number(a.materializedGeneration), versionId,
+          });
+          if (!restored) {
+            skipped.push({ bookmarkId: bmId, reason: "modified_after_apply" });
+            continue;
+          }
+          undoActions.push({
+            type: "restoreBookmark", bookmarkId: bmId,
+            revisionAfter: restored.content_revision,
+            materializedGeneration: restored.materialized_generation,
+          });
+          lifecycleChanged.push(bmId);
+          reversed++;
+          restoredBookmarks++;
+          // D92：既有资料的分类回到任务写入前的值；本次新建资料的分类随资料保留。
+          // 分类在任务之后又被改过（修订不符）则保留，不覆盖后续意图。
+          if (a.materialCreated === false && a.materialId) {
+            const categoryRestored = this.store.restoreMaterialCategory(
+              String(a.materialId),
+              {
+                category: a.categoryBefore == null ? null : String(a.categoryBefore),
+                source: a.categorySourceBefore == null ? null : String(a.categorySourceBefore),
+              },
+              Number(a.categoryRevisionAfter),
+            );
+            if (categoryRestored) categoriesRestored++;
+          }
+        } else if (a.type === "restoreBookmark") {
+          // undo 版本被再次回滚：重新转资料（资格仍满足时；资料被 dismiss 等 → 跳过）
+          const bmId = String(a.bookmarkId);
+          const r = this.store.convertToMaterial(bmId, {
+            revision: Number(a.revisionAfter), generation: Number(a.materializedGeneration), versionId,
+          });
+          if (!r) {
+            skipped.push({ bookmarkId: bmId, reason: "convert_no_longer_eligible" });
+            continue;
+          }
+          undoActions.push({
+            type: "convertToMaterial",
+            bookmarkId: bmId,
+            fromFolderId: r.folderId,
+            revisionAfter: this.store.getBookmark(bmId)?.content_revision ?? 1,
+            materializedGeneration: this.store.getBookmark(bmId)?.materialized_generation,
+          });
+          reconverted.push(bmId);
+          lifecycleChanged.push(bmId);
+          reversed++;
         }
       }
       // 撤销本身是一条可审计的新版本（原历史保留、标记 reverted）
       const undoVersionId = this.store.saveVersion(null, undoActions, {
         kind: "undo",
         revertsVersionId: versionId,
+        // 重新转资料产生的 undo 版本沿用同一标签（首页/popup 文案一致）
+        label: reconverted.length > 0 ? "material_convert" : null,
       });
+      for (const bmId of lifecycleChanged) this.store.setMaterialVersion(bmId, undoVersionId);
       this.store.markReverted(versionId);
       db.exec("COMMIT");
-      return { reversed, skipped, undoVersionId };
+      return { reversed, skipped, undoVersionId, restoredBookmarks, removedFolders, categoriesRestored };
     } catch (err) {
       db.exec("ROLLBACK");
       throw err;

@@ -106,6 +106,8 @@ export function backfillMaterials(store: Store): { scanned: number; created: num
   const bookmarks = store.listBookmarks({ limit: 100_000 });
   let created = 0;
   for (const bm of bookmarks) {
+    // D91 新入口有独立正文判定的持久生命周期，旧的「有200字即物化」回灌不得旁路它。
+    if (store.getMaterialCandidate(bm.id)) continue;
     if (bm.is_private === 1) continue;
     if (isPrivacyDomain(bm.url_raw, { patterns })) continue; // 隐私域名：仅存 URL 原则，不入内容库
     const cls = classifyMaterialKind(bm.url_canonical);

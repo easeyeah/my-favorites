@@ -47,6 +47,7 @@ export interface BookmarkReceipt {
   url_raw: string;
   folder_id: string;
   content_revision: number;
+  materialized_at?: string | null;
 }
 export interface FolderReceipt {
   id: string;
@@ -81,7 +82,7 @@ export const isBrowserRootId = (id: string): boolean => id === "0" || id === "1"
 
 const bookmarkReceipt = (store: Store, id: string): BookmarkReceipt | undefined => {
   const b = store.getBookmark(id);
-  return b ? { id: b.id, title: b.title, url_raw: b.url_raw, folder_id: b.folder_id, content_revision: b.content_revision ?? 0 } : undefined;
+  return b ? { id: b.id, title: b.title, url_raw: b.url_raw, folder_id: b.folder_id, content_revision: b.content_revision ?? 0, materialized_at: b.materialized_at ?? null } : undefined;
 };
 const folderReceipt = (store: Store, id: string): FolderReceipt | undefined => {
   const f = store.getFolder(id);
@@ -153,8 +154,12 @@ function applyOne(store: Store, deviceId: string, m: SyncMutation): SyncApplyRes
     case "bookmark.create": {
       const canon = canonicalizeUrl(m.url);
       if (!canon) return { kind: m.kind, browserId: m.browserId, status: "skipped", error: "invalid_url" };
-      const targetFolder = resolveTargetFolder(store, deviceId, m);
       const existing = store.findByCanonical(canon.canonical);
+      if (existing?.materialized_at) {
+        store.upsertIdentity({ deviceId, browserBookmarkId: m.browserId, appBookmarkId: existing.id });
+        return { kind: m.kind, browserId: m.browserId, appBookmarkId: existing.id, status: "conflict", current: existing, entity: bookmarkReceipt(store, existing.id) };
+      }
+      const targetFolder = resolveTargetFolder(store, deviceId, m);
       const created = existing ? undefined : store.createBookmark({
         folderId: targetFolder.id,
         urlRaw: m.url,
@@ -192,6 +197,7 @@ function applyOne(store: Store, deviceId: string, m: SyncMutation): SyncApplyRes
       if (!app) return { kind: m.kind, browserId: m.browserId, status: "skipped", error: "no_identity" };
       const cur = store.getBookmark(app);
       if (!cur) return { kind: m.kind, browserId: m.browserId, status: "skipped", error: "bookmark_gone" };
+      if (cur.materialized_at) return { kind: m.kind, browserId: m.browserId, appBookmarkId: app, status: "conflict", current: cur, entity: bookmarkReceipt(store, app) };
       const conflict = (): SyncApplyResult => ({
         kind: m.kind,
         browserId: m.browserId,
@@ -222,6 +228,7 @@ function applyOne(store: Store, deviceId: string, m: SyncMutation): SyncApplyRes
         if (!canon) return { kind: m.kind, browserId: m.browserId, appBookmarkId: app, status: "skipped", error: "invalid_url" };
         if (canon.canonical !== cur.url_canonical) {
           const hit = store.findByCanonical(canon.canonical);
+          if (hit?.materialized_at) return { kind: m.kind, browserId: m.browserId, appBookmarkId: hit.id, status: "conflict", current: hit, entity: bookmarkReceipt(store, hit.id) };
           if (hit && hit.id !== app) {
             store.upsertIdentity({ deviceId, browserBookmarkId: m.browserId, appBookmarkId: hit.id });
             store.deleteBookmark(app, { skipMirrorRemoveForDevice: deviceId });
@@ -259,6 +266,7 @@ function applyOne(store: Store, deviceId: string, m: SyncMutation): SyncApplyRes
       if (!app) return { kind: m.kind, browserId: m.browserId, status: "skipped", error: "no_identity" };
       const cur = store.getBookmark(app);
       if (!cur) return { kind: m.kind, browserId: m.browserId, status: "skipped", error: "bookmark_gone" };
+      if (cur.materialized_at) return { kind: m.kind, browserId: m.browserId, appBookmarkId: app, status: "conflict", current: cur, entity: bookmarkReceipt(store, app) };
       if (m.baseRevision !== undefined && (cur.content_revision ?? 0) > m.baseRevision) {
         return { kind: m.kind, browserId: m.browserId, appBookmarkId: app, status: "conflict", current: cur, entity: bookmarkReceipt(store, app) };
       }
@@ -275,7 +283,13 @@ function applyOne(store: Store, deviceId: string, m: SyncMutation): SyncApplyRes
     case "bookmark.delete": {
       const app = store.findAppBookmarkId(deviceId, m.browserId);
       if (!app) return { kind: m.kind, browserId: m.browserId, status: "skipped", error: "no_identity" };
-      if (!store.getBookmark(app)) return { kind: m.kind, browserId: m.browserId, status: "noop" };
+      const current = store.getBookmark(app);
+      if (!current) return { kind: m.kind, browserId: m.browserId, status: "noop" };
+      if (current.materialized_at) {
+        // 系统移除收藏夹节点的回声，只解绑浏览器身份，绝不级联删除资料。
+        store.unbindIdentity(deviceId, m.browserId);
+        return { kind: m.kind, browserId: m.browserId, appBookmarkId: app, status: "noop" };
+      }
       store.deleteBookmark(app, { skipMirrorRemoveForDevice: deviceId });
       return { kind: m.kind, browserId: m.browserId, appBookmarkId: app, status: "ok" };
     }

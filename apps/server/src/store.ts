@@ -1,7 +1,7 @@
 /** 仓储层 —— 全部 SQL 集中在此，路由不直接摸 SQL */
 import { rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { canonicalizeUrl } from "@mf/shared";
+import { canonicalizeUrl, INBOX_FOLDER_TITLE, isPrivacyDomain } from "@mf/shared";
 import type { Db } from "./db";
 import { newId, now } from "./db";
 import { protectKeyForStorage, keyForUse } from "./secret-box";
@@ -47,6 +47,11 @@ export interface BookmarkRow {
   created_at: string;
   /** A3-5 软归档：被合并时指向保留方；NULL = 正常书签 */
   archived_into?: string | null;
+  /** D91 收纳盒自动转资料：非 NULL = 已软移出书签体系（资料面正常可见，书签面/同步快照排除） */
+  materialized_at?: string | null;
+  materialized_from_folder_id?: string | null;
+  materialized_generation?: number;
+  materialized_version_id?: string | null;
   /** A3-4 冲突检测：用户手动修改计数（提案前后对比） */
   content_revision?: number;
   /** D30 站点化三类标注（site_tool/site_ref/content；null = 未分析） */
@@ -57,6 +62,126 @@ export interface BookmarkRow {
   last_fail_reason?: string | null;
   /** 查重键规则版本（DEV-13；url 编辑时随 canonical 一并更新） */
   url_key_version?: number;
+}
+
+export interface MaterialConversionCandidate {
+  bookmark_id: string;
+  entry_id: string;
+  url_raw: string;
+  content_revision: number;
+  privacy_revision: number;
+  state: string;
+  authorized_text: string | null;
+  evidence_kind: string | null;
+  attempts: number;
+  fail_reason: string | null;
+  next_attempt_at: string | null;
+  updated_at: string;
+}
+
+/** D92 目录整理任务状态（计数口径：total = moved + converted + unchanged + skipped + failed + remaining） */
+export type OrganizeTaskStatus =
+  | "queued"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "completed"
+  | "completed_with_issues"
+  | "failed";
+
+export interface OrganizeTaskRow {
+  id: string;
+  request_id: string;
+  folder_id: string;
+  folder_name: string;
+  status: OrganizeTaskStatus;
+  /** scope | evidence | plan | commit | summarize */
+  phase: string;
+  /** 运行器阶段说明（进行中的批次/等待；仅本进程内存态，重启后为空） */
+  phase_note: string | null;
+  /** ai | rule_only */
+  mode: string;
+  total: number;
+  moved: number;
+  converted: number;
+  new_materials: number;
+  reused_materials: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  /** 受保护条目数（私密/隐私域/敏感宿主）：计入 skipped，不落明细行 */
+  protected_count: number;
+  excluded_archived: number;
+  planned_new_folders: number;
+  created_folders: number;
+  reused_folders: number;
+  planned_categories: number;
+  new_categories: number;
+  reused_categories: number;
+  plan_json: string | null;
+  error: string | null;
+  lease: string | null;
+  lease_at: string | null;
+  revision: number;
+  can_continue: number;
+  continue_expires_at: string | null;
+  /** none | pending | running | completed | partial | failed */
+  undo_status: string;
+  undo_cursor: number;
+  undo_restored: number;
+  undo_kept: number;
+  undo_categories: number;
+  undo_folders: number;
+  created_at: string;
+  started_at: string | null;
+  phase_at: string | null;
+  finished_at: string | null;
+}
+
+/** 任务内一条来源收藏：await 前基线 + 逐条判断。decision = remaining | moved | converted | keep | skip | fail */
+export interface OrganizeTaskItemRow {
+  id: string;
+  task_id: string;
+  bookmark_id: string;
+  seq: number;
+  title: string | null;
+  base_folder_id: string;
+  base_revision: number;
+  privacy_revision: number;
+  /** bookmark | material | undetermined（规划后确定） */
+  kind: string | null;
+  material_type: string | null;
+  /** cache | crawl | url_rule */
+  evidence_ref: string | null;
+  decision: string;
+  reason: string | null;
+  plan_decision: string | null;
+  plan_target_key: string | null;
+  plan_category: string | null;
+  plan_material_type: string | null;
+  plan_reason: string | null;
+  from_path: string | null;
+  to_path: string | null;
+  category_before: string | null;
+  /** absent | active | dismissed */
+  material_before: string | null;
+  attempts: number;
+  batch: number | null;
+  version_id: string | null;
+  retryable: number;
+  updated_at: string;
+}
+
+export interface MaterialFilter {
+  type?: string;
+  q?: string;
+  tag?: string;
+  category?: string;
+  uncategorized?: boolean;
+  folderId?: string;
+  limit?: number;
+  offset?: number;
+  includePrivate?: boolean;
 }
 
 export class Store {
@@ -306,6 +431,7 @@ export class Store {
   }
 
   deleteFolderIfEmpty(id: string): boolean {
+    if (this.getFolder(id)?.is_system_inbox === 1) return false;
     const hasChildren = this.db
       .prepare("SELECT 1 FROM folders WHERE parent_id = ? LIMIT 1")
       .get(id);
@@ -401,36 +527,34 @@ export class Store {
       is_private: 0,
       created_at: now(),
     };
-    this.db
-      .prepare(
+    // 收藏落库、变更日志、新入口持久候选同事务，崩溃不能留下「已收藏但永远未登记」的空窗。
+    this.db.exec("SAVEPOINT mf_create_bookmark");
+    try {
+      this.db.prepare(
         "INSERT INTO bookmarks (id, folder_id, url_raw, url_canonical, title, description, status, favicon_url, cover_url, added_at, last_checked_at, pinned, created_at, url_key_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      )
-      .run(
-        row.id,
-        row.folder_id,
-        row.url_raw,
-        row.url_canonical,
-        row.title,
-        row.description,
-        row.status,
-        row.favicon_url,
-        row.cover_url,
-        row.added_at,
-        row.last_checked_at,
-        row.pinned,
-        row.created_at,
-        input.urlKeyVersion ?? 2,
+      ).run(
+        row.id, row.folder_id, row.url_raw, row.url_canonical, row.title, row.description,
+        row.status, row.favicon_url, row.cover_url, row.added_at, row.last_checked_at,
+        row.pinned, row.created_at, input.urlKeyVersion ?? 2,
       );
-      // D81 复核 R05：upsert 载荷必须是含 content_revision 的完整行——
-      // 新建书签的 DB 默认修订（1）不在内存 row 里，若直接以 row 作载荷，端侧收不到修订号，
-      // 后续出站操作绑定不到 baseRevision，真实并发冲突检测被旁路（本地过期意图覆盖库侧修改）
-      this.recordChange("bookmark", row.id, "upsert", this.getBookmark(row.id) ?? row);
-    return row;
+      // D81 R05：完整行含 DB 默认修订，端侧才能固定生成时的 baseRevision。
+      this.recordChange("bookmark", row.id, "upsert", this.getBookmark(row.id)!);
+      if (this.getFolder(input.folderId)?.is_system_inbox === 1) this.registerMaterialCandidate(row.id);
+      this.db.exec("RELEASE mf_create_bookmark");
+      return this.getBookmark(row.id)!;
+    } catch (err) {
+      this.db.exec("ROLLBACK TO mf_create_bookmark");
+      this.db.exec("RELEASE mf_create_bookmark");
+      throw err;
+    }
   }
 
   updateBookmark(id: string, fields: Partial<BookmarkRow>): void {
+    const before = this.getBookmark(id);
+    // 隐藏行的 FK 锚点及生命周期仅由转换/恢复内核修改；普通后台更新不能移出锚点。
+    const lifecycleCols = ["id", "materialized_at", "materialized_from_folder_id", "materialized_generation", "materialized_version_id"];
     const keys = Object.keys(fields).filter(
-      (k) => k !== "id" && fields[k as keyof BookmarkRow] !== undefined,
+      (k) => !lifecycleCols.includes(k) && !(before?.materialized_at && k === "folder_id") && fields[k as keyof BookmarkRow] !== undefined,
     );
     if (keys.length === 0) return;
     const set = keys.map((k) => `${k} = ?`).join(", ");
@@ -446,6 +570,11 @@ export class Store {
       this.db
         .prepare("UPDATE bookmarks SET content_revision = content_revision + 1 WHERE id = ?")
         .run(id);
+    }
+    // 隐藏资料更新不得发活 upsert/move（会复活浏览器节点）；materialize 携带完整新修订。
+    if (before?.materialized_at) {
+      this.recordChange("bookmark", id, "materialize", this.getBookmark(id)!);
+      return;
     }
     // D46 双向同步：同步相关字段的修改进变更日志（此前只 create/move/delete 有日志，
     // 改名/置顶不会传播到浏览器侧）。folder_id 变化记 move（与 moveBookmark 同形）。
@@ -472,7 +601,7 @@ export class Store {
 
   moveBookmark(id: string, toFolderId: string): BookmarkRow | undefined {
     const before = this.getBookmark(id);
-    if (!before) return undefined;
+    if (!before || before.materialized_at) return undefined;
     // D46：move 变更日志由 updateBookmark(folder_id) 统一记录，此处不再重复
     this.updateBookmark(id, { folder_id: toFolderId });
     return before;
@@ -505,20 +634,201 @@ export class Store {
     return before;
   }
 
+  /** 新收纳盒入口登记；已恢复/已取消的条目不会被自动重新转换。 */
+  registerMaterialCandidate(bookmarkId: string, newEntry = false): void {
+    const bm = this.getBookmark(bookmarkId);
+    if (!bm || bm.materialized_at || (bm.materialized_generation ?? 0) > 0 ||
+        this.getFolder(bm.folder_id)?.is_system_inbox !== 1) return;
+    const previous = this.getMaterialCandidate(bookmarkId);
+    if (previous && !newEntry) return;
+    this.db.prepare(
+      `INSERT INTO material_conversion_candidate
+       (bookmark_id, entry_id, url_raw, content_revision, privacy_revision, updated_at)
+       VALUES (?,?,?,?,?,?) ON CONFLICT(bookmark_id) DO UPDATE SET
+       entry_id=excluded.entry_id, url_raw=excluded.url_raw, content_revision=excluded.content_revision,
+       privacy_revision=excluded.privacy_revision, state='pending', authorized_text=NULL,
+       evidence_kind=NULL, attempts=0, fail_reason=NULL, next_attempt_at=NULL, updated_at=excluded.updated_at`,
+    ).run(bookmarkId, newId(), bm.url_raw, bm.content_revision ?? 1, this.privacyRevision(), now());
+  }
+
+  getMaterialCandidate(bookmarkId: string): MaterialConversionCandidate | undefined {
+    return this.db.prepare("SELECT * FROM material_conversion_candidate WHERE bookmark_id = ?")
+      .get(bookmarkId) as MaterialConversionCandidate | undefined;
+  }
+
+  materialCandidateMatches(cand: MaterialConversionCandidate): boolean {
+    const bm = this.getBookmark(cand.bookmark_id);
+    const current = this.getMaterialCandidate(cand.bookmark_id);
+    return Boolean(bm && current && current.entry_id === cand.entry_id &&
+      ["pending", "retry", "ready"].includes(current.state) &&
+      !bm.materialized_at && !bm.archived_into && bm.status !== "archived" && bm.is_private !== 1 &&
+      bm.url_raw === cand.url_raw && (bm.content_revision ?? 1) === cand.content_revision &&
+      this.privacyRevision() === cand.privacy_revision &&
+      !isPrivacyDomain(bm.url_raw, { patterns: this.privacyPatterns() }));
+  }
+
+  /** 仅自动归位/捕获元数据更新可重绑修订；用户移动/撤销通过 clearInboxState 永久取消资格。 */
+  rebaseMaterialCandidate(bookmarkId: string, previousRevision: number): void {
+    const bm = this.getBookmark(bookmarkId);
+    if (!bm) return;
+    this.db.prepare(`UPDATE material_conversion_candidate SET content_revision = ?, updated_at = ?
+      WHERE bookmark_id = ? AND content_revision = ? AND state IN ('pending','retry') AND url_raw = ?`)
+      .run(bm.content_revision ?? 1, now(), bookmarkId, previousRevision, bm.url_raw);
+  }
+
+  authorizeMaterialCandidateText(bookmarkId: string, text: string): void {
+    const cand = this.getMaterialCandidate(bookmarkId);
+    if (!cand || !this.materialCandidateMatches(cand)) return;
+    this.db.prepare("UPDATE material_conversion_candidate SET authorized_text = ?, updated_at = ? WHERE bookmark_id = ?")
+      .run(text.slice(0, 20_000), now(), bookmarkId);
+  }
+
+  setMaterialCandidateState(bookmarkId: string, state: string, reason: string | null = null, kind?: string): void {
+    const retryAt = state === "retry" ? new Date(Date.now() + 60_000).toISOString() : null;
+    this.db.prepare(`UPDATE material_conversion_candidate SET state = ?, fail_reason = ?, evidence_kind = ?,
+      authorized_text = CASE WHEN ? IN ('done','cancelled') THEN NULL ELSE authorized_text END,
+      next_attempt_at = ?, attempts = attempts + CASE WHEN ? = 'retry' THEN 1 ELSE 0 END, updated_at = ?
+      WHERE bookmark_id = ?`).run(state, reason, kind ?? null, state, retryAt, state, now(), bookmarkId);
+  }
+
+  pendingMaterialCandidates(limit = 10): MaterialConversionCandidate[] {
+    return this.db.prepare(`SELECT * FROM material_conversion_candidate
+      WHERE state IN ('pending','retry','ready') AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+      ORDER BY updated_at, bookmark_id LIMIT ?`).all(now(), limit) as unknown as MaterialConversionCandidate[];
+  }
+
+  /** 短事务内：当前轮成功证据 + URL/实体/策略 CAS；隐藏行归唯一系统盒，避免普通目录树删级联毁资料。 */
+  convertToMaterial(bookmarkId: string, undo?: { revision: number; generation: number; versionId: string }): { folderId: string } | false {
+    const bm = this.getBookmark(bookmarkId);
+    if (!bm || bm.archived_into || bm.status === "archived" || bm.materialized_at || bm.is_private === 1 ||
+        isPrivacyDomain(bm.url_raw, { patterns: this.privacyPatterns() })) return false;
+    if (undo) {
+      if (bm.content_revision !== undo.revision || bm.materialized_generation !== undo.generation ||
+          bm.materialized_version_id !== undo.versionId) return false;
+    } else {
+      const cand = this.getMaterialCandidate(bookmarkId);
+      if (!cand || cand.state !== "ready" || !cand.evidence_kind || !this.materialCandidateMatches(cand) ||
+          (bm.materialized_generation ?? 0) > 0) return false;
+    }
+    if (!this.getActiveMaterialByBookmark(bookmarkId)) return false;
+    const inbox = this.inboxFolder() ?? this.createFolder(INBOX_FOLDER_TITLE, null, "user", true);
+    this.db.prepare(`UPDATE bookmarks SET materialized_at = ?, materialized_from_folder_id = folder_id,
+      folder_id = ?, content_revision = content_revision + 1,
+      materialized_generation = materialized_generation + 1, materialized_version_id = NULL WHERE id = ?`)
+      .run(now(), inbox.id, bookmarkId);
+    this.upsertInboxState(bookmarkId, "placed", null, "资料库", 0);
+    this.setMaterialCandidateState(bookmarkId, "done");
+    this.recordChange("bookmark", bookmarkId, "materialize", this.getBookmark(bookmarkId)!);
+    return { folderId: bm.folder_id };
+  }
+
+  /** 恢复仍保留资料；原普通目录不在则落「未整理」。恢复/撤销都取消自动转换资格。 */
+  restoreMaterialBookmark(bookmarkId: string, expected?: { revision: number; generation: number; versionId: string }): BookmarkRow | undefined {
+    const bm = this.getBookmark(bookmarkId);
+    if (!bm?.materialized_at) return undefined;
+    if (expected && (bm.content_revision !== expected.revision || bm.materialized_generation !== expected.generation ||
+        bm.materialized_version_id !== expected.versionId)) return undefined;
+    const original = bm.materialized_from_folder_id ? this.getFolder(bm.materialized_from_folder_id) : undefined;
+    const target = original && !original.is_system_inbox ? original : this.ensurePath(["未整理"]);
+    this.db.prepare(`UPDATE bookmarks SET materialized_at = NULL, folder_id = ?,
+      content_revision = content_revision + 1, materialized_version_id = NULL WHERE id = ?`)
+      .run(target.id, bookmarkId);
+    this.setMaterialCandidateState(bookmarkId, "cancelled", "restored_by_user");
+    this.setInboxConvertVersion(bookmarkId, null);
+    this.markClassificationReviewed(bookmarkId);
+    const after = this.getBookmark(bookmarkId)!;
+    this.recordChange("bookmark", bookmarkId, "upsert", after);
+    return after;
+  }
+
+  setMaterialVersion(bookmarkId: string, versionId: string): void {
+    this.db.prepare("UPDATE bookmarks SET materialized_version_id = ? WHERE id = ?").run(versionId, bookmarkId);
+    if (this.getBookmark(bookmarkId)?.materialized_at) this.setInboxConvertVersion(bookmarkId, versionId);
+  }
+
+  /**
+   * D92 显式整理任务转资料：资格来自用户圈定的目录任务（不伪造收纳盒候选，也不借 undo 参数绕过）。
+   * 调用方必须在同一短事务内已完成本轮内容证据校验；本方法内再查实体生命周期、隐私与资料状态。
+   * 资料 + 分类 + 软移出必须同事务成立——任何一步不满足即返回 error，不留半转换。
+   * 版本归属由调用方保存任务版本后经 setMaterialVersion 回填。
+   */
+  convertToMaterialFromTask(
+    bookmarkId: string,
+    input: { type: string; signals?: string[]; meta?: Record<string, unknown>; category: string[] },
+  ):
+    | {
+        materialId: string;
+        materialCreated: boolean;
+        categoryBefore: string | null;
+        categorySourceBefore: string | null;
+        categoryRevisionAfter: number;
+        fromFolderId: string;
+      }
+    | { error: "bookmark_unavailable" | "material_dismissed" | "category_invalid" }
+  {
+    const bm = this.getBookmark(bookmarkId);
+    if (
+      !bm ||
+      bm.archived_into ||
+      bm.status === "archived" ||
+      bm.materialized_at ||
+      bm.is_private === 1 ||
+      isPrivacyDomain(bm.url_raw, { patterns: this.privacyPatterns() })
+    ) {
+      return { error: "bookmark_unavailable" };
+    }
+    const cleanCategory = input.category.map((s) => s.trim()).filter(Boolean);
+    if (cleanCategory.length === 0 || cleanCategory.length > 2 || cleanCategory.some((s) => s.length > 20 || s.includes("/"))) {
+      return { error: "category_invalid" };
+    }
+    const existing = this.db
+      .prepare("SELECT id, status, category, category_source FROM material WHERE bookmark_id = ?")
+      .get(bookmarkId) as { id: string; status: string; category: string | null; category_source: string | null } | undefined;
+    // 此前已移出资料库是用户的决定：不隐式复活，也不隐藏对应书签
+    if (existing && existing.status !== "active") return { error: "material_dismissed" };
+    const materialId = existing?.id ?? this.upsertMaterial({ bookmarkId, type: input.type, signals: input.signals, meta: input.meta }).id;
+    if (!this.setMaterialCategory(materialId, cleanCategory, { source: "organize_task" })) {
+      return { error: "category_invalid" };
+    }
+    const inbox = this.inboxFolder() ?? this.createFolder(INBOX_FOLDER_TITLE, null, "user", true);
+    this.db.prepare(`UPDATE bookmarks SET materialized_at = ?, materialized_from_folder_id = folder_id,
+      folder_id = ?, content_revision = content_revision + 1,
+      materialized_generation = materialized_generation + 1, materialized_version_id = NULL WHERE id = ?`)
+      .run(now(), inbox.id, bookmarkId);
+    // 显式整理即用户意图：退出旧收纳盒自动归位/自检/转换候选资格
+    this.clearInboxState(bookmarkId);
+    this.recordChange("bookmark", bookmarkId, "materialize", this.getBookmark(bookmarkId)!);
+    return {
+      materialId,
+      materialCreated: !existing,
+      categoryBefore: existing?.category ?? null,
+      categorySourceBefore: existing?.category_source ?? null,
+      categoryRevisionAfter: this.getMaterialCategoryState(materialId)!.category_revision,
+      fromFolderId: bm.folder_id,
+    };
+  }
+
   /** D52：URL 编辑后正文缓存作废（快照是历史资产，保留） */
   clearCache(bookmarkId: string): void {
     this.db.prepare("DELETE FROM content_cache WHERE bookmark_id = ?").run(bookmarkId);
   }
 
   /** D46 首次对齐：本设备全部身份映射 + 应用侧书签是否仍存在（孤儿映射=库已删，浏览器侧待清） */
-  identitiesWithState(deviceId: string): Array<{ browser_bookmark_id: string; app_bookmark_id: string; app_exists: boolean }> {
-    return this.db
-      .prepare(
-        `SELECT i.browser_bookmark_id, i.app_bookmark_id,
-                (SELECT COUNT(*) FROM bookmarks b WHERE b.id = i.app_bookmark_id) > 0 AS app_exists
-         FROM bookmark_identity i WHERE i.device_id = ?`,
-      )
-      .all(deviceId) as unknown as Array<{ browser_bookmark_id: string; app_bookmark_id: string; app_exists: boolean }>;
+  identitiesWithState(deviceId: string): Array<{
+    browser_bookmark_id: string; app_bookmark_id: string; app_exists: boolean;
+    materialized: number; url_raw: string | null;
+  }> {
+    return this.db.prepare(
+      `SELECT i.browser_bookmark_id, i.app_bookmark_id,
+              (b.id IS NOT NULL AND b.materialized_at IS NULL AND b.archived_into IS NULL) AS app_exists,
+              CASE WHEN b.materialized_at IS NOT NULL THEN 1 ELSE 0 END AS materialized,
+              b.url_raw
+       FROM bookmark_identity i LEFT JOIN bookmarks b ON b.id = i.app_bookmark_id
+       WHERE i.device_id = ?`,
+    ).all(deviceId) as unknown as Array<{
+      browser_bookmark_id: string; app_bookmark_id: string; app_exists: boolean;
+      materialized: number; url_raw: string | null;
+    }>;
   }
 
   listBookmarks(filter?: {
@@ -569,8 +879,8 @@ export class Store {
     // 追加 id 保证分页稳定排序（同 added_at 时不错位）；A3-5：软归档书签不出现在常规列表
     const offset = filter?.offset ?? 0;
     const sql = wantSuspect
-      ? `SELECT b.* FROM bookmarks b LEFT JOIN content_cache cc ON cc.bookmark_id = b.id ${where ? where + " AND" : "WHERE"} b.archived_into IS NULL ORDER BY b.pinned DESC, b.added_at DESC, b.id LIMIT ${limit} OFFSET ${offset}`
-      : `SELECT * FROM bookmarks ${where ? where + " AND" : "WHERE"} archived_into IS NULL ORDER BY pinned DESC, added_at DESC, id LIMIT ${limit} OFFSET ${offset}`;
+      ? `SELECT b.* FROM bookmarks b LEFT JOIN content_cache cc ON cc.bookmark_id = b.id ${where ? where + " AND" : "WHERE"} b.archived_into IS NULL AND b.materialized_at IS NULL ORDER BY b.pinned DESC, b.added_at DESC, b.id LIMIT ${limit} OFFSET ${offset}`
+      : `SELECT * FROM bookmarks ${where ? where + " AND" : "WHERE"} archived_into IS NULL AND materialized_at IS NULL ORDER BY pinned DESC, added_at DESC, id LIMIT ${limit} OFFSET ${offset}`;
     return this.db.prepare(sql).all(...args) as unknown as BookmarkRow[];
   }
 
@@ -585,7 +895,7 @@ export class Store {
       .prepare(
         `SELECT DISTINCT b.* FROM bookmarks b
          LEFT JOIN content_cache c ON c.bookmark_id = b.id
-         WHERE b.archived_into IS NULL${privacyCond} AND (b.title LIKE ? OR b.url_canonical LIKE ? OR IFNULL(b.description,'') LIKE ? OR IFNULL(c.l2_text,'') LIKE ?)
+         WHERE b.archived_into IS NULL AND b.materialized_at IS NULL${privacyCond} AND (b.title LIKE ? OR b.url_canonical LIKE ? OR IFNULL(b.description,'') LIKE ? OR IFNULL(c.l2_text,'') LIKE ?)
          LIMIT ?`,
       )
       .all(like, like, like, like, limit) as unknown as BookmarkRow[];
@@ -594,7 +904,7 @@ export class Store {
   countBookmarks(): { total: number; dead: number; suspect: number } {
     const row = this.db
       .prepare(
-        "SELECT COUNT(*) as total, SUM(status='dead') as dead, SUM(status='suspect') as suspect FROM bookmarks WHERE archived_into IS NULL",
+        "SELECT COUNT(*) as total, SUM(status='dead') as dead, SUM(status='suspect') as suspect FROM bookmarks WHERE archived_into IS NULL AND materialized_at IS NULL",
       )
       .get() as { total: number; dead: number | null; suspect: number | null };
     return { total: row.total, dead: row.dead ?? 0, suspect: row.suspect ?? 0 };
@@ -643,7 +953,7 @@ export class Store {
     return this.db
       .prepare(
         `SELECT b.* FROM bookmarks b LEFT JOIN content_cache c ON c.bookmark_id = b.id
-         WHERE c.bookmark_id IS NULL AND b.status = 'normal' LIMIT ?`,
+         WHERE c.bookmark_id IS NULL AND b.status = 'normal' AND b.archived_into IS NULL AND b.materialized_at IS NULL LIMIT ?`,
       )
       .all(limit) as unknown as BookmarkRow[];
   }
@@ -658,6 +968,7 @@ export class Store {
       .prepare(
         `SELECT b.* FROM bookmarks b JOIN content_cache cc ON cc.bookmark_id = b.id
          WHERE b.archived_into IS NULL AND b.is_private = 0
+           AND (b.materialized_at IS NULL OR EXISTS (SELECT 1 FROM material m WHERE m.bookmark_id = b.id AND m.status = 'active'))
            AND LENGTH(IFNULL(cc.l2_text,'')) >= 40
            AND IFNULL(cc.l1_summary,'') = ''
            AND (cc.fail_reason IS NULL OR cc.fail_reason NOT LIKE 'privacy_%')
@@ -714,17 +1025,7 @@ export class Store {
    * 摘要取 L1，正文只取长度——全文走 /materials/:id 详情，列表不拖 20KB 正文）。
    * 默认排除私密书签（与 search/listBookmarks 同边界）；软归档书签的条目一并隐藏。
    */
-  listMaterials(filter: {
-    type?: string;
-    q?: string;
-    tag?: string;
-    category?: string;
-    uncategorized?: boolean;
-    folderId?: string;
-    limit?: number;
-    offset?: number;
-    includePrivate?: boolean;
-  }): Array<Record<string, unknown>> {
+  private materialWhere(filter: MaterialFilter): { conds: string[]; args: (string | number)[] } {
     const conds: string[] = ["m.status = 'active'", "b.archived_into IS NULL"];
     const args: (string | number)[] = [];
     if (!filter.includePrivate) conds.push("b.is_private = 0");
@@ -769,11 +1070,23 @@ export class Store {
       );
       args.push(like, like, like, like);
     }
-    const limit = filter.limit ?? 60;
+    return { conds, args };
+  }
+
+  countFilteredMaterials(filter: MaterialFilter): number {
+    const { conds, args } = this.materialWhere(filter);
+    return (this.db.prepare(`SELECT COUNT(*) AS total FROM material m
+      JOIN bookmarks b ON b.id = m.bookmark_id LEFT JOIN content_cache cc ON cc.bookmark_id = b.id
+      WHERE ${conds.join(" AND ")}`).get(...args) as { total: number }).total;
+  }
+
+  listMaterials(filter: MaterialFilter): Array<Record<string, unknown>> {
+    const { conds, args } = this.materialWhere(filter);
+    const limit = filter.limit ?? 10;
     const offset = filter.offset ?? 0;
     const sql = [
       "SELECT m.id, m.bookmark_id, m.type, m.category, m.cover_url, m.cover_mime, m.cover_size, m.meta, m.signals, m.created_at, m.updated_at,",
-      "  b.title, b.url_canonical, b.url_raw, b.favicon_url, b.folder_id, b.added_at,",
+      "  b.title, b.url_canonical, b.url_raw, b.favicon_url, b.folder_id, b.added_at, IFNULL(b.materialized_at,'') <> '' AS materialized,",
       "  cc.l1_summary, cc.l1_tags, LENGTH(IFNULL(cc.l2_text,'')) AS l2_len,",
       "  (SELECT COUNT(*) FROM snapshot s WHERE s.bookmark_id = b.id) AS snapshot_count,",
       "  (SELECT name FROM folders f WHERE f.id = b.folder_id) AS folder_name",
@@ -790,6 +1103,7 @@ export class Store {
       r.meta = JSON.parse((r.meta as string) ?? "{}");
       r.l1_tags = JSON.parse((r.l1_tags as string) ?? "[]");
       r.has_cover = r.cover_mime != null && (r.cover_size as number) > 0;
+      r.materialized = Number(r.materialized) === 1 ? 1 : 0;
     }
     return rows;
   }
@@ -799,7 +1113,7 @@ export class Store {
     const row = this.db
       .prepare(
         [
-          "SELECT m.*, b.title, b.url_canonical, b.url_raw, b.favicon_url, b.folder_id, b.is_private,",
+          "SELECT m.*, b.title, b.url_canonical, b.url_raw, b.favicon_url, b.folder_id, b.is_private, IFNULL(b.materialized_at,'') <> '' AS materialized,",
           "  cc.l1_summary, cc.l1_tags, cc.l2_text, LENGTH(IFNULL(cc.l2_text,'')) AS l2_len,",
           "  (SELECT COUNT(*) FROM snapshot s WHERE s.bookmark_id = b.id) AS snapshot_count,",
           "  (SELECT name FROM folders f WHERE f.id = b.folder_id) AS folder_name",
@@ -815,6 +1129,7 @@ export class Store {
       row.meta = JSON.parse((row.meta as string) ?? "{}");
       row.l1_tags = JSON.parse((row.l1_tags as string) ?? "[]");
       row.has_cover = row.cover_mime != null && (row.cover_size as number) > 0;
+      row.materialized = Number(row.materialized) === 1 ? 1 : 0;
     }
     return row;
   }
@@ -858,16 +1173,50 @@ export class Store {
     return { categories, tags };
   }
 
-  /** 写入 AI 分类路径（存储形态 "一级/二级"；空数组=清空为未分类） */
-  setMaterialCategory(id: string, path: string[]): void {
+  /**
+   * 写入 AI 分类路径（存储形态 "一级/二级"；空数组=清空为未分类）。
+   * D92 分类 CAS：category_revision 随每次写入递增；来源优先级——迟到的摘要（D65）与分类回填
+   * 不得覆盖显式整理任务/用户指定的分类，返回 false 表示本次未写入。
+   */
+  setMaterialCategory(id: string, path: string[], opts: { source?: "auto" | "organize_task" } = {}): boolean {
+    const source = opts.source ?? "auto";
+    if (source === "auto") {
+      const cur = this.db
+        .prepare("SELECT category, category_source FROM material WHERE id = ?")
+        .get(id) as { category: string | null; category_source: string | null } | undefined;
+      if (!cur) return false;
+      if (cur.category !== null && (cur.category_source === "organize_task" || cur.category_source === "manual")) {
+        return false;
+      }
+    }
     const clean = path
       .map((s) => s.trim().slice(0, 20))
       .filter(Boolean)
       .slice(0, 2);
     const category = clean.length > 0 ? clean.join("/") : null;
     this.db
-      .prepare("UPDATE material SET category = ?, updated_at = ? WHERE id = ?")
-      .run(category, now(), id);
+      .prepare("UPDATE material SET category = ?, category_source = ?, category_revision = category_revision + 1, updated_at = ? WHERE id = ?")
+      .run(category, category === null ? null : source, now(), id);
+    return true;
+  }
+
+  /** D92：分类修订回读（撤销守卫：后续被改过分类的资料不再被整次撤销覆盖） */
+  getMaterialCategoryState(id: string): { id: string; category: string | null; category_revision: number; category_source: string | null } | undefined {
+    return this.db
+      .prepare("SELECT id, category, category_revision, category_source FROM material WHERE id = ?")
+      .get(id) as { id: string; category: string | null; category_revision: number; category_source: string | null } | undefined;
+  }
+
+  /** D92 撤销：分类回到任务写入前的值与来源；修订不符（用户或后续任务改过）则保留并返回 false */
+  restoreMaterialCategory(
+    id: string,
+    before: { category: string | null; source: string | null },
+    expectedRevision: number,
+  ): boolean {
+    const res = this.db
+      .prepare("UPDATE material SET category = ?, category_source = ?, category_revision = category_revision + 1, updated_at = ? WHERE id = ? AND category_revision = ?")
+      .run(before.category, before.source, now(), id, expectedRevision);
+    return res.changes > 0;
   }
 
   /** 待分类回灌候选：已有 L1 摘要（内容证据充分）但尚无分类的资料条目 */
@@ -973,21 +1322,38 @@ export class Store {
   saveVersion(
     sessionId: string | null,
     actions: unknown[],
-    opts: { kind?: "apply" | "undo"; revertsVersionId?: string | null } = {},
+    opts: {
+      kind?: "apply" | "undo";
+      revertsVersionId?: string | null;
+      label?: string | null;
+      /** D92：目录整理任务关联——一次任务的多批版本可聚合展示与整次撤销 */
+      taskId?: string | null;
+      taskBatch?: number | null;
+    } = {},
   ): string {
     const id = newId();
     this.db
       .prepare(
-        "INSERT INTO organize_version (id, session_id, actions, created_at, reverted, kind, reverts_version_id) VALUES (?,?,?,?,0,?,?)",
+        "INSERT INTO organize_version (id, session_id, actions, created_at, reverted, kind, reverts_version_id, label, task_id, task_batch) VALUES (?,?,?,?,0,?,?,?,?,?)",
       )
-      .run(id, sessionId, JSON.stringify(actions), now(), opts.kind ?? "apply", opts.revertsVersionId ?? null);
+      .run(
+        id,
+        sessionId,
+        JSON.stringify(actions),
+        now(),
+        opts.kind ?? "apply",
+        opts.revertsVersionId ?? null,
+        opts.label ?? null,
+        opts.taskId ?? null,
+        opts.taskBatch ?? null,
+      );
     return id;
   }
 
-  getVersion(id: string): { id: string; actions: unknown[]; reverted: number; session_id: string | null; kind: string; reverts_version_id: string | null } | undefined {
+  getVersion(id: string): { id: string; actions: unknown[]; reverted: number; session_id: string | null; kind: string; reverts_version_id: string | null; label: string | null; task_id: string | null } | undefined {
     const row = this.db
       .prepare("SELECT * FROM organize_version WHERE id = ?")
-      .get(id) as { id: string; actions: string; reverted: number; session_id: string | null; kind: string; reverts_version_id: string | null } | undefined;
+      .get(id) as { id: string; actions: string; reverted: number; session_id: string | null; kind: string; reverts_version_id: string | null; label: string | null; task_id: string | null } | undefined;
     if (!row) return undefined;
     return { ...row, actions: JSON.parse(row.actions) as unknown[] };
   }
@@ -1005,19 +1371,26 @@ export class Store {
     this.db.prepare("UPDATE organize_version SET reverted = 1 WHERE id = ?").run(id);
   }
 
-  /** 列出会话/撤销历史（DEV-14 前置；刷新后仍可查看） */
-  listVersions(limit = 50): Array<{ id: string; session_id: string | null; kind: string; reverted: number; created_at: string; actionCount: number }> {
+  /** 列出会话/撤销历史（DEV-14 前置；刷新后仍可查看）。D91：带 label（material_convert）；D92：带任务关联 */
+  countVersions(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS total FROM organize_version").get() as { total: number }).total;
+  }
+
+  listVersions(limit = 50, offset = 0): Array<{ id: string; session_id: string | null; kind: string; reverted: number; created_at: string; actionCount: number; label: string | null; task_id: string | null; task_batch: number | null }> {
     const rows = this.db
       .prepare(
-        "SELECT id, session_id, kind, reverted, created_at, actions FROM organize_version ORDER BY created_at DESC LIMIT ?",
+        "SELECT id, session_id, kind, reverted, created_at, actions, label, task_id, task_batch FROM organize_version ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
       )
-      .all(limit) as unknown as Array<{
+      .all(limit, offset) as unknown as Array<{
       id: string;
       session_id: string | null;
       kind: string;
       reverted: number;
       created_at: string;
       actions: string;
+      label: string | null;
+      task_id: string | null;
+      task_batch: number | null;
     }>;
     return rows.map((r) => ({
       id: r.id,
@@ -1026,6 +1399,9 @@ export class Store {
       reverted: r.reverted,
       created_at: r.created_at,
       actionCount: (JSON.parse(r.actions) as unknown[]).length,
+      label: r.label ?? null,
+      task_id: r.task_id ?? null,
+      task_batch: r.task_batch ?? null,
     }));
   }
 
@@ -1136,6 +1512,8 @@ export class Store {
       for (const bm of rows) {
         lastId = bm.id;
         if (!isPrivacy(bm.url_canonical) && bm.is_private === 0) continue;
+        // D91：待识别的授权正文也是派生内容，必须与缓存同步清理并终止旧入口任务。
+        this.setMaterialCandidateState(bm.id, "cancelled", "privacy_rules_changed");
         const cache = this.getCache(bm.id);
         if (cache) {
           this.db
@@ -1517,7 +1895,7 @@ export class Store {
       const watermark = this.maxChangeId();
       const folders = this.listFolders();
       const bookmarks = this.db
-        .prepare("SELECT id, folder_id, title, url_raw, url_canonical, pinned, status, IFNULL(content_revision,0) AS content_revision FROM bookmarks WHERE archived_into IS NULL")
+        .prepare("SELECT id, folder_id, title, url_raw, url_canonical, pinned, status, IFNULL(content_revision,0) AS content_revision FROM bookmarks WHERE archived_into IS NULL AND materialized_at IS NULL")
         .all() as unknown as Array<{ id: string; folder_id: string; title: string; url_raw: string; url_canonical: string; pinned: number; status: string; content_revision: number }>;
       const generation = this.syncGeneration();
       const minAvailableId = this.minChangeId();
@@ -1633,6 +2011,7 @@ export class Store {
     return this.db
       .prepare(
         `SELECT * FROM bookmarks WHERE status != 'archived' AND is_private = 0
+         AND archived_into IS NULL AND materialized_at IS NULL
          ORDER BY IFNULL(last_checked_at, '1970') ASC LIMIT ${limit}`,
       )
       .all() as unknown as BookmarkRow[];
@@ -1658,7 +2037,7 @@ export class Store {
   staleStats(daysThreshold = 365): { stale: number; oldestCheck: string | null } {
     const threshold = new Date(Date.now() - daysThreshold * 86_400_000).toISOString();
     const row = this.db
-      .prepare("SELECT COUNT(*) as c, MIN(added_at) as o FROM bookmarks WHERE added_at < ? AND is_private = 0")
+      .prepare("SELECT COUNT(*) as c, MIN(added_at) as o FROM bookmarks WHERE added_at < ? AND is_private = 0 AND archived_into IS NULL AND materialized_at IS NULL")
       .get(threshold) as { c: number; o: string | null };
     return { stale: row.c, oldestCheck: row.o };
   }
@@ -1671,7 +2050,7 @@ export class Store {
         `SELECT id, title, url_canonical, folder_id, added_at,
                 (id IN (SELECT bookmark_id FROM snapshot)) AS has_snapshot
          FROM bookmarks
-         WHERE status = 'normal' AND pinned = 0 AND archived_into IS NULL AND is_private = 0 AND added_at < ?
+         WHERE status = 'normal' AND pinned = 0 AND archived_into IS NULL AND materialized_at IS NULL AND is_private = 0 AND added_at < ?
          ORDER BY added_at LIMIT ?`,
       )
       .all(cutoff, limit) as Array<{ id: string; title: string; url_canonical: string; folder_id: string; added_at: string; has_snapshot: number }>;
@@ -1708,19 +2087,23 @@ export class Store {
   }
 
   /** D76：每目录代表书签（置顶优先→新入库；排除用户归档与合并软归档）——整理 prompt 用内容
-   *  归纳目录语义，不再只给扁平目录名让模型凭字面猜（「在线工具」吞掉原生远控客户端的教训） */
+   *  归纳目录语义，不再只给扁平目录名让模型凭字面猜（「在线工具」吞掉原生远控客户端的教训）。
+   *  D92 隐私前置：样本会进入模型输入，私密书签与隐私域名的标题一律不作为代表书签外发。 */
   folderSampleTitles(perFolder = 3): Map<string, string[]> {
     const rows = this.db
       .prepare(
-        `SELECT folder_id, title FROM (
-           SELECT folder_id, title, ROW_NUMBER() OVER (PARTITION BY folder_id ORDER BY pinned DESC, added_at DESC) AS rn
-           FROM bookmarks WHERE archived_into IS NULL AND status <> 'archived' AND title <> ''
+        `SELECT folder_id, title, url_canonical FROM (
+           SELECT folder_id, title, url_canonical, ROW_NUMBER() OVER (PARTITION BY folder_id ORDER BY pinned DESC, added_at DESC) AS rn
+           FROM bookmarks WHERE archived_into IS NULL AND materialized_at IS NULL AND status <> 'archived' AND title <> '' AND is_private = 0
          ) WHERE rn <= ?`,
       )
-      .all(perFolder) as Array<{ folder_id: string; title: string }>;
+      .all(perFolder + 6) as Array<{ folder_id: string; title: string; url_canonical: string }>;
+    const patterns = this.privacyPatterns();
     const out = new Map<string, string[]>();
     for (const r of rows) {
+      if (isPrivacyDomain(r.url_canonical, { patterns })) continue;
       const arr = out.get(r.folder_id) ?? [];
+      if (arr.length >= perFolder) continue;
       arr.push(r.title);
       out.set(r.folder_id, arr);
     }
@@ -1818,14 +2201,14 @@ export class Store {
     const folders = this.listFolders();
     const counts = new Map<string, number>();
     const rows = this.db
-      .prepare("SELECT folder_id, COUNT(*) as c FROM bookmarks WHERE archived_into IS NULL GROUP BY folder_id")
+      .prepare("SELECT folder_id, COUNT(*) as c FROM bookmarks WHERE archived_into IS NULL AND materialized_at IS NULL GROUP BY folder_id")
       .all() as unknown as Array<{ folder_id: string; c: number }>;
     for (const r of rows) counts.set(r.folder_id, r.c);
     // 排除私密书签的计数（与列表可见性一致）
     if (privateVisibleOnly) {
       const visibleCounts = new Map<string, number>();
       const visRows = this.db
-        .prepare("SELECT folder_id, COUNT(*) as c FROM bookmarks WHERE is_private = 0 AND archived_into IS NULL GROUP BY folder_id")
+        .prepare("SELECT folder_id, COUNT(*) as c FROM bookmarks WHERE is_private = 0 AND archived_into IS NULL AND materialized_at IS NULL GROUP BY folder_id")
         .all() as unknown as Array<{ folder_id: string; c: number }>;
       for (const r of visRows) visibleCounts.set(r.folder_id, r.c);
       for (const f of folders) {
@@ -2030,7 +2413,7 @@ export class Store {
                 (b.id IN (SELECT bookmark_id FROM snapshot)) AS has_snapshot
          FROM bookmarks b
          LEFT JOIN content_cache c ON c.bookmark_id = b.id
-         WHERE b.archived_into IS NULL AND b.is_private = 0 AND b.status != 'archived'
+         WHERE b.archived_into IS NULL AND b.materialized_at IS NULL AND b.is_private = 0 AND b.status != 'archived'
            AND (b.id IN (SELECT bookmark_id FROM nav_site_bookmark WHERE slug = ?)
                 OR b.folder_id IN (SELECT folder_id FROM nav_site_folder WHERE slug = ?))`,
       )
@@ -2101,7 +2484,7 @@ export class Store {
   countBySiteType(): Record<string, number> {
     const rows = this.db
       .prepare(
-        "SELECT COALESCE(site_type, 'unanalyzed') AS k, COUNT(*) AS c FROM bookmarks WHERE archived_into IS NULL GROUP BY k",
+        "SELECT COALESCE(site_type, 'unanalyzed') AS k, COUNT(*) AS c FROM bookmarks WHERE archived_into IS NULL AND materialized_at IS NULL GROUP BY k",
       )
       .all() as Array<{ k: string; c: number }>;
     return Object.fromEntries(rows.map((r) => [r.k, r.c]));
@@ -2110,7 +2493,7 @@ export class Store {
   listBySiteType(siteType: string, limit = 500): Array<{ id: string; title: string; url_canonical: string; folder_id: string }> {
     return this.db
       .prepare(
-        "SELECT id, title, url_canonical, folder_id FROM bookmarks WHERE site_type = ? AND archived_into IS NULL ORDER BY added_at DESC LIMIT ?",
+        "SELECT id, title, url_canonical, folder_id FROM bookmarks WHERE site_type = ? AND archived_into IS NULL AND materialized_at IS NULL ORDER BY added_at DESC LIMIT ?",
       )
       .all(siteType, limit) as Array<{ id: string; title: string; url_canonical: string; folder_id: string }>;
   }
@@ -2233,7 +2616,7 @@ export class Store {
     const rows = this.db
       .prepare(
         `SELECT s.bookmark_id FROM inbox_state s JOIN bookmarks b ON b.id = s.bookmark_id
-         WHERE s.state = 'placed' AND s.reviewed_at IS NULL AND b.is_private = 0 AND b.archived_into IS NULL
+         WHERE s.state = 'placed' AND s.reviewed_at IS NULL AND b.is_private = 0 AND b.archived_into IS NULL AND b.materialized_at IS NULL
          ORDER BY s.updated_at DESC LIMIT ?`,
       )
       .all(limit) as Array<{ bookmark_id: string }>;
@@ -2247,31 +2630,49 @@ export class Store {
 
   clearInboxState(bookmarkId: string): void {
     this.db.prepare("DELETE FROM inbox_state WHERE bookmark_id = ?").run(bookmarkId);
+    this.setMaterialCandidateState(bookmarkId, "cancelled", "manual_intent");
   }
 
   setInboxStateVersion(bookmarkId: string, versionId: string): void {
     this.db.prepare("UPDATE inbox_state SET version_id = ? WHERE bookmark_id = ?").run(versionId, bookmarkId);
   }
 
-  /** 收纳盒面板「已自动归位」区：最近 placed 条目（已移出箱，含撤销入口的版本） */
-  listInboxRecentPlaced(limit = 5): Array<{
+  /** D91：记录/清除本条的转资料版本（去向行「撤销」直达转换版本；恢复时清除） */
+  setInboxConvertVersion(bookmarkId: string, versionId: string | null): void {
+    this.db
+      .prepare("UPDATE inbox_state SET convert_version_id = ? WHERE bookmark_id = ?")
+      .run(versionId, bookmarkId);
+  }
+
+  /** 收纳盒面板「已自动归位」区：最近 placed 条目（已移出箱，含撤销入口的版本）。
+   *  D91：转资料条目（materialized_at 非空）仍在去向历史中，去向显示「资料库」。 */
+  countInboxRecentPlaced(): number {
+    return (this.db.prepare(`SELECT COUNT(*) AS total FROM inbox_state s JOIN bookmarks b ON b.id = s.bookmark_id
+      WHERE s.state = 'placed' AND b.archived_into IS NULL`).get() as { total: number }).total;
+  }
+
+  listInboxRecentPlaced(limit = 10, offset = 0): Array<{
     bookmark_id: string; title: string; url_canonical: string; reason: string | null;
     updated_at: string; version_id: string | null; folder_name: string | null;
+    materialized: number; convert_version_id: string | null;
   }> {
     // D54：带归位目标目录名（用户的核心问题「它去哪了」）
     return this.db
       .prepare(
         `SELECT s.bookmark_id, b.title, b.url_canonical, s.reason, s.updated_at, s.version_id,
-                f.name AS folder_name
+                f.name AS folder_name,
+                IFNULL(b.materialized_at, '') <> '' AS materialized,
+                s.convert_version_id
          FROM inbox_state s
          JOIN bookmarks b ON b.id = s.bookmark_id
          LEFT JOIN folders f ON f.id = b.folder_id
          WHERE s.state = 'placed' AND b.archived_into IS NULL
-         ORDER BY s.updated_at DESC LIMIT ?`,
+         ORDER BY s.updated_at DESC, s.bookmark_id DESC LIMIT ? OFFSET ?`,
       )
-      .all(limit) as Array<{
+      .all(limit, offset) as Array<{
       bookmark_id: string; title: string; url_canonical: string; reason: string | null;
       updated_at: string; version_id: string | null; folder_name: string | null;
+      materialized: number; convert_version_id: string | null;
     }>;
   }
 
@@ -2287,7 +2688,7 @@ export class Store {
         `SELECT b.id, b.title, b.url_canonical, b.added_at, b.is_private,
                 COALESCE(s.state, 'pending') AS state, s.confidence, s.reason, COALESCE(s.attempts, 0) AS attempts
          FROM bookmarks b LEFT JOIN inbox_state s ON s.bookmark_id = b.id
-         WHERE b.folder_id = ? AND b.archived_into IS NULL
+         WHERE b.folder_id = ? AND b.archived_into IS NULL AND b.materialized_at IS NULL
          ORDER BY b.added_at DESC LIMIT 200`,
       )
       .all(inbox.id) as Array<{
@@ -2339,9 +2740,297 @@ export class Store {
       .prepare(
         `SELECT b.id, b.title, b.url_canonical, b.favicon_url, c.clicks
          FROM bookmark_click c JOIN bookmarks b ON b.id = c.bookmark_id
-         WHERE b.archived_into IS NULL AND b.is_private = 0 AND b.status != 'archived'
+         WHERE b.archived_into IS NULL AND b.materialized_at IS NULL AND b.is_private = 0 AND b.status != 'archived'
          ORDER BY c.clicks DESC, c.last_at DESC LIMIT ?`,
       )
       .all(limit) as Array<{ id: string; title: string; url_canonical: string; favicon_url: string | null; clicks: number }>;
+  }
+
+  // ---------- D92 目录整理任务（organize_task / organize_task_item） ----------
+
+  /** 目录子树内全部有效书签（软归档/已转资料排除）——任务范围快照用；递归 CTE 去重，目录成环时自然终止 */
+  subtreeBookmarks(rootFolderId: string): BookmarkRow[] {
+    return this.db
+      .prepare(
+        `WITH RECURSIVE sub(id) AS (
+           SELECT ?
+           UNION
+           SELECT f.id FROM folders f JOIN sub s ON f.parent_id = s.id
+         )
+         SELECT b.* FROM bookmarks b
+         WHERE b.folder_id IN (SELECT id FROM sub) AND b.archived_into IS NULL AND b.materialized_at IS NULL
+         ORDER BY b.added_at DESC, b.id`,
+      )
+      .all(rootFolderId) as unknown as BookmarkRow[];
+  }
+
+  /** 目录自根起的深度（根级 = 1；不存在返回 0） */
+  folderDepth(folderId: string): number {
+    let depth = 0;
+    let cur = this.getFolder(folderId);
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur.id)) {
+      depth += 1;
+      seen.add(cur.id);
+      cur = cur.parent_id ? this.getFolder(cur.parent_id) : undefined;
+    }
+    return depth;
+  }
+
+  private static readonly TASK_COLUMNS = new Set([
+    "status", "phase", "phase_note", "mode", "total", "moved", "converted", "new_materials", "reused_materials", "unchanged",
+    "skipped", "failed", "protected_count", "excluded_archived", "planned_new_folders", "created_folders",
+    "reused_folders", "planned_categories", "new_categories", "reused_categories", "plan_json", "error", "lease",
+    "lease_at", "revision", "can_continue", "continue_expires_at", "undo_status", "undo_cursor", "undo_restored",
+    "undo_kept", "undo_categories", "undo_folders", "started_at", "phase_at", "finished_at",
+  ]);
+
+  getOrganizeTask(id: string): OrganizeTaskRow | undefined {
+    return this.db.prepare("SELECT * FROM organize_task WHERE id = ?").get(id) as OrganizeTaskRow | undefined;
+  }
+
+  findOrganizeTaskByRequest(requestId: string): OrganizeTaskRow | undefined {
+    return this.db.prepare("SELECT * FROM organize_task WHERE request_id = ?").get(requestId) as OrganizeTaskRow | undefined;
+  }
+
+  /** 账号级准入：进行中的整理任务或进行中的撤销（二者共用同一执行槽） */
+  activeOrganizeTask(): OrganizeTaskRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM organize_task
+         WHERE status IN ('queued','running','stopping') OR undo_status IN ('pending','running')
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get() as OrganizeTaskRow | undefined;
+  }
+
+  /** 启动/定时恢复：进程重启或 worker 异常退出后仍挂在活动态的任务 */
+  interruptibleOrganizeTasks(): OrganizeTaskRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM organize_task
+         WHERE status IN ('queued','running','stopping') OR undo_status IN ('pending','running')
+         ORDER BY created_at`,
+      )
+      .all() as unknown as OrganizeTaskRow[];
+  }
+
+  countOrganizeTasks(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS total FROM organize_task").get() as { total: number }).total;
+  }
+
+  listOrganizeTasks(limit = 10, offset = 0): OrganizeTaskRow[] {
+    return this.db
+      .prepare("SELECT * FROM organize_task ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
+      .all(limit, offset) as unknown as OrganizeTaskRow[];
+  }
+
+  updateOrganizeTask(id: string, fields: Record<string, unknown>): void {
+    const keys = Object.keys(fields).filter((k) => Store.TASK_COLUMNS.has(k));
+    if (keys.length === 0) return;
+    this.db
+      .prepare(`UPDATE organize_task SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`)
+      .run(...(keys.map((k) => fields[k] as string | number | null) as Array<string | number | null>), id);
+  }
+
+  /** 任务状态推进：revision 单调递增（轮询/SSE 门铃据此判断有无变化），可同时刷新阶段时间 */
+  bumpOrganizeTask(id: string, fields: Record<string, unknown> = {}, touchPhase = true): void {
+    const keys = Object.keys(fields).filter((k) => Store.TASK_COLUMNS.has(k));
+    const sets = ["revision = revision + 1", ...(touchPhase ? ["phase_at = ?"] : []), ...keys.map((k) => `${k} = ?`)];
+    this.db
+      .prepare(`UPDATE organize_task SET ${sets.join(", ")} WHERE id = ?`)
+      .run(
+        ...(touchPhase ? [now()] : []),
+        ...(keys.map((k) => fields[k] as string | number | null) as Array<string | number | null>),
+        id,
+      );
+  }
+
+  /** 已形成规划但尚未提交的条目数（规划阶段进度） */
+  countOrganizeTaskPlanned(taskId: string): number {
+    return (
+      this.db
+        .prepare("SELECT COUNT(*) AS c FROM organize_task_item WHERE task_id = ? AND decision = 'remaining' AND plan_decision IS NOT NULL")
+        .get(taskId) as { c: number }
+    ).c;
+  }
+
+  /** 任务视图用：已落库的书签目录 / 资料分类承接数（只聚合，不加载明细） */
+  organizeTaskTargetCounts(taskId: string): { folders: Map<string, number>; categories: Map<string, number> } {
+    const folders = new Map<string, number>();
+    for (const r of this.db
+      .prepare("SELECT plan_target_key AS k, COUNT(*) AS c FROM organize_task_item WHERE task_id = ? AND decision = 'moved' AND plan_target_key IS NOT NULL GROUP BY plan_target_key")
+      .all(taskId) as Array<{ k: string; c: number }>) folders.set(r.k, r.c);
+    const categories = new Map<string, number>();
+    for (const r of this.db
+      .prepare("SELECT plan_category AS k, COUNT(*) AS c FROM organize_task_item WHERE task_id = ? AND decision = 'converted' AND plan_category IS NOT NULL GROUP BY plan_category")
+      .all(taskId) as Array<{ k: string; c: number }>) categories.set(r.k, r.c);
+    return { folders, categories };
+  }
+
+  /** 新建任务 + 范围快照（同事务）：固定总数，此后新收藏不混入本任务 */
+  createOrganizeTask(task: OrganizeTaskRow, items: OrganizeTaskItemRow[]): void {
+    this.db.exec("SAVEPOINT mf_organize_task_create");
+    try {
+      const { id, ...rest } = task;
+      const taskCols = Object.keys(rest);
+      this.db
+        .prepare(
+          `INSERT INTO organize_task (id, ${taskCols.join(", ")}) VALUES (?, ${taskCols.map(() => "?").join(", ")})`,
+        )
+        .run(id, ...(taskCols.map((c) => rest[c as keyof typeof rest] as string | number | null) as Array<string | number | null>));
+      const ins = this.db.prepare(
+        `INSERT INTO organize_task_item (id, task_id, bookmark_id, seq, title, base_folder_id, base_revision, privacy_revision,
+          kind, material_type, evidence_ref, decision, reason, plan_decision, plan_target_key, plan_category, plan_material_type,
+          plan_reason, from_path, to_path, category_before, material_before, attempts, batch, version_id, retryable, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      );
+      for (const it of items) {
+        ins.run(
+          it.id, it.task_id, it.bookmark_id, it.seq, it.title, it.base_folder_id, it.base_revision, it.privacy_revision,
+          it.kind, it.material_type, it.evidence_ref, it.decision, it.reason, it.plan_decision, it.plan_target_key,
+          it.plan_category, it.plan_material_type, it.plan_reason, it.from_path, it.to_path, it.category_before,
+          it.material_before, it.attempts, it.batch, it.version_id, it.retryable, it.updated_at,
+        );
+      }
+      this.db.exec("RELEASE mf_organize_task_create");
+    } catch (err) {
+      this.db.exec("ROLLBACK TO mf_organize_task_create");
+      this.db.exec("RELEASE mf_organize_task_create");
+      throw err;
+    }
+  }
+
+  /** 任务项分页。decisions 为空 = 全部；分页前总数由 countOrganizeTaskItems 给出 */
+  listOrganizeTaskItems(
+    taskId: string,
+    opts: { decisions?: string[]; limit?: number; offset?: number; recent?: boolean } = {},
+  ): OrganizeTaskItemRow[] {
+    const limit = Math.min(200, Math.max(1, opts.limit ?? 10));
+    const offset = Math.max(0, opts.offset ?? 0);
+    const order = opts.recent ? "updated_at DESC, seq DESC" : "seq ASC";
+    if (!opts.decisions || opts.decisions.length === 0) {
+      return this.db
+        .prepare(`SELECT * FROM organize_task_item WHERE task_id = ? ORDER BY ${order} LIMIT ? OFFSET ?`)
+        .all(taskId, limit, offset) as unknown as OrganizeTaskItemRow[];
+    }
+    const marks = opts.decisions.map(() => "?").join(",");
+    return this.db
+      .prepare(`SELECT * FROM organize_task_item WHERE task_id = ? AND decision IN (${marks}) ORDER BY ${order} LIMIT ? OFFSET ?`)
+      .all(taskId, ...opts.decisions, limit, offset) as unknown as OrganizeTaskItemRow[];
+  }
+
+  countOrganizeTaskItems(taskId: string, decisions?: string[]): number {
+    if (!decisions || decisions.length === 0) {
+      return (this.db.prepare("SELECT COUNT(*) AS c FROM organize_task_item WHERE task_id = ?").get(taskId) as { c: number }).c;
+    }
+    const marks = decisions.map(() => "?").join(",");
+    return (
+      this.db
+        .prepare(`SELECT COUNT(*) AS c FROM organize_task_item WHERE task_id = ? AND decision IN (${marks})`)
+        .get(taskId, ...decisions) as { c: number }
+    ).c;
+  }
+
+  private static readonly TASK_ITEM_COLUMNS = new Set([
+    "kind", "material_type", "evidence_ref", "decision", "reason", "plan_decision", "plan_target_key", "plan_category",
+    "plan_material_type", "plan_reason", "from_path", "to_path", "category_before", "material_before", "attempts",
+    "batch", "version_id", "retryable", "updated_at",
+  ]);
+
+  updateOrganizeTaskItem(id: string, fields: Record<string, unknown>): void {
+    const keys = Object.keys(fields).filter((k) => Store.TASK_ITEM_COLUMNS.has(k));
+    if (keys.length === 0) return;
+    this.db
+      .prepare(`UPDATE organize_task_item SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`)
+      .run(...(keys.map((k) => fields[k] as string | number | null) as Array<string | number | null>), id);
+  }
+
+  getOrganizeTaskItemByBookmark(taskId: string, bookmarkId: string): OrganizeTaskItemRow | undefined {
+    return this.db
+      .prepare("SELECT * FROM organize_task_item WHERE task_id = ? AND bookmark_id = ?")
+      .get(taskId, bookmarkId) as OrganizeTaskItemRow | undefined;
+  }
+
+  /** 运行器取任务项（不分页；决策集合为内部枚举，空数组 = 全部） */
+  organizeTaskItemsByDecision(taskId: string, decisions: string[]): OrganizeTaskItemRow[] {
+    if (decisions.length === 0) {
+      return this.db
+        .prepare("SELECT * FROM organize_task_item WHERE task_id = ? ORDER BY seq")
+        .all(taskId) as unknown as OrganizeTaskItemRow[];
+    }
+    const marks = decisions.map(() => "?").join(",");
+    return this.db
+      .prepare(`SELECT * FROM organize_task_item WHERE task_id = ? AND decision IN (${marks}) ORDER BY seq`)
+      .all(taskId, ...decisions) as unknown as OrganizeTaskItemRow[];
+  }
+
+  /** 一次任务的全部批次版本（提交顺序；撤销按其逆序） */
+  taskVersions(taskId: string): Array<{ id: string; batch: number | null; reverted: number }> {
+    return this.db
+      .prepare("SELECT id, task_batch, reverted FROM organize_version WHERE task_id = ? ORDER BY created_at, rowid")
+      .all(taskId) as unknown as Array<{ id: string; batch: number | null; reverted: number }>;
+  }
+
+  /** 按分类结果聚合计数（任务计数器的唯一来源——每次提交后由明细行重算，不做增量加减） */
+  organizeTaskCounters(taskId: string): {
+    moved: number;
+    converted: number;
+    newMaterials: number;
+    reusedMaterials: number;
+    unchanged: number;
+    skipped: number;
+    failed: number;
+    remaining: number;
+    /** unchanged 中「证据不足」的条目数 */
+    insufficient: number;
+  } {
+    const rows = this.db
+      .prepare(
+        `SELECT decision, IFNULL(material_before,'') AS mb, COUNT(*) AS c FROM organize_task_item
+         WHERE task_id = ? GROUP BY decision, mb`,
+      )
+      .all(taskId) as Array<{ decision: string; mb: string; c: number }>;
+    const out = { moved: 0, converted: 0, newMaterials: 0, reusedMaterials: 0, unchanged: 0, skipped: 0, failed: 0, remaining: 0, insufficient: 0 };
+    for (const r of rows) {
+      if (r.decision === "moved") out.moved += r.c;
+      else if (r.decision === "converted") {
+        out.converted += r.c;
+        if (r.mb === "active") out.reusedMaterials += r.c;
+        else out.newMaterials += r.c;
+      } else if (r.decision === "keep") out.unchanged += r.c;
+      else if (r.decision === "skip") out.skipped += r.c;
+      else if (r.decision === "fail") out.failed += r.c;
+      else out.remaining += r.c;
+    }
+    // 证据不足单独计：AI 模式下属于「需要说明的问题」，不是「位置本来就好」
+    out.insufficient = (
+      this.db
+        .prepare("SELECT COUNT(*) AS c FROM organize_task_item WHERE task_id = ? AND decision = 'keep' AND reason = 'insufficient_evidence'")
+        .get(taskId) as { c: number }
+    ).c;
+    return out;
+  }
+
+  /**
+   * D92 明细保留：终态任务 30 天 / 每库最近 20 次之外先原子禁用「继续」，再裁剪逐条明细与计划。
+   * 版本事实不裁剪——历史版本的撤销入口不因明细过期失效。
+   */
+  pruneOrganizeTasks(): number {
+    const terminal = "('stopped','completed','completed_with_issues','failed')";
+    const cutoff = new Date(Date.now() - 30 * 86400_000).toISOString();
+    this.db
+      .prepare(`UPDATE organize_task SET can_continue = 0 WHERE can_continue = 1 AND status IN ${terminal} AND created_at < ?`)
+      .run(cutoff);
+    this.db
+      .prepare(
+        `UPDATE organize_task SET can_continue = 0 WHERE can_continue = 1 AND status IN ${terminal}
+           AND id IN (SELECT id FROM organize_task WHERE status IN ${terminal} ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET 20)`,
+      )
+      .run();
+    this.db.prepare("UPDATE organize_task SET plan_json = NULL WHERE can_continue = 0").run();
+    return Number(
+      this.db.prepare("DELETE FROM organize_task_item WHERE task_id IN (SELECT id FROM organize_task WHERE can_continue = 0)").run().changes,
+    );
   }
 }
