@@ -70,9 +70,11 @@ test("options 总开关：开启双向同步 → 全量对齐入库 → 成功�
   const page = await ctx.newPage();
   await page.goto(`chrome-extension://${extId}/options.html`);
   await page.waitForLoadState();
-  await page.locator("#server").fill(BASE);
-  await page.getByRole("button", { name: "保存" }).click();
-  await page.waitForTimeout(500);
+  // D70 简化后：指向本 spec 的 server 走「＋添加」流（探测通过即激活）
+  await page.locator("#add-toggle").click();
+  await page.locator("#add-url").fill(BASE);
+  await page.locator("#add-save").click();
+  await page.waitForTimeout(800);
   await expect(page.locator("#sync-status-line")).toBeVisible();
   await page.waitForTimeout(800); // 等首次状态刷新回执，避免覆写竞态
   await page.locator("#sync-master").check();

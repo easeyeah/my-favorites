@@ -49,10 +49,10 @@ test("options 测试连接：localhost 失败时自动回退 127.0.0.1 并成功
   const page = await ctx.newPage();
   await page.goto(`chrome-extension://${extId}/options.html`);
   await page.waitForLoadState();
-  // 填 localhost:3007（E2E 演示端口）→ 点测试连接
-  await page.locator("#server").fill("http://localhost:3007");
-  await page.getByRole("button", { name: "测试连接" }).click();
-  await expect(page.locator("#msg-connect")).toContainText("连接成功", { timeout: 15_000 });
-  // localhost 不可达时应自动切 127.0.0.1；可达时直接成功——两种都算过
+  // 填 localhost:3007（E2E 演示端口）→ 添加服务端（探测含同一套 localhost→127.0.0.1 回退）
+  await page.locator("#add-toggle").click();
+  await page.locator("#add-url").fill("http://localhost:3007");
+  await page.locator("#add-save").click();
+  await expect(page.locator("#msg-add")).toContainText("已添加", { timeout: 15_000 });
   await ctx.close();
 }, 90_000);

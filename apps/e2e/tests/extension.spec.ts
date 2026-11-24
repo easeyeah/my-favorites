@@ -310,7 +310,7 @@ test("动作即同步（D50）：管理台改动零手动收敛到浏览器", as
 /** D51 回归：系统收纳盒是投递口，同步引擎必须整体绕开——
  *  旧缺陷：树扫描跳过收纳盒 → ensureBrowserFolder 永远找不到 → 每轮对齐/同步都在书签栏
  *  新建一个重复「📥 收纳盒」并把库内收纳盒条目搬进去（用户实机出现 3 个）。 */
-test("收纳盒不参与同步（D51）：对齐后书签栏仍只有一个 📥 收纳盒", async () => {
+test("收纳盒不参与同步（D51/D78）：对齐后书签栏仅一个 📥 收纳盒，盒内条目收敛在投递口", async () => {
   const sw = context.serviceWorkers().find((w) => w.url().startsWith("chrome-extension://"));
   if (!sw) throw new Error("service worker unavailable");
   const tag = Date.now();
@@ -319,9 +319,9 @@ test("收纳盒不参与同步（D51）：对齐后书签栏仍只有一个 📥
   // 浏览器侧建收纳盒（走正规管线：setup-inbox 幂等）
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/options.html`);
-  await page.evaluate(
-    () => new Promise<unknown>((res) => chrome.runtime.sendMessage({ type: "setup-inbox" }, res)),
-  );
+  const inboxInfo = (await page.evaluate(
+    () => new Promise<{ serverId: string; extId: string }>((res) => chrome.runtime.sendMessage({ type: "setup-inbox" }, res)),
+  )) as { serverId: string; extId: string };
 
   // 库侧收纳盒塞一条待归位条目
   const inboxFolder = (await (
@@ -349,15 +349,17 @@ test("收纳盒不参与同步（D51）：对齐后书签栏仍只有一个 📥
   );
   expect(inboxCount).toBe(1);
 
-  // 断言 2：库内收纳盒条目不被放置到浏览器（投递口内容归收纳盒管线）
-  const leaked = await sw.evaluate(
+  // 断言 2（D78 语义更新）：库内盒中条目收敛到「投递口」——不被放置进普通目录，
+  // 但浏览器投递口里必须可见（旧 D51 断言「浏览器完全不存在」致管理台入盒两侧分叉）
+  const parents = await sw.evaluate(
     (u: string) =>
-      new Promise<number>((res) => {
-        chrome.bookmarks.search({ url: u }, (ns) => res(ns.length));
+      new Promise<string[]>((res) => {
+        chrome.bookmarks.search({ url: u }, (ns) => res(ns.map((n) => n.parentId ?? "")));
       }),
     inboxUrl,
   );
-  expect(leaked).toBe(0);
+  expect(parents.length).toBe(1);
+  expect(parents[0]).toBe(inboxInfo.extId); // 在投递口内，而非普通目录
 
   await master.uncheck();
   await page.waitForTimeout(500);
@@ -552,6 +554,281 @@ test("浏览器删大目录（D56 复现 C）：目录级删除不受书签保�
   console.log("[D56C] deleteGuard=", JSON.stringify(guard ?? null));
   expect(guard).toBeUndefined(); // 目录级删除不应挂保险丝
   expect(await libFolderByName(fname)).toBeNull();
+
+  await master.uncheck();
+  await page.waitForTimeout(400);
+  await page.close();
+}, 240_000);
+
+/** D75 回归：「对齐之后」浏览器新建的目录（不在初始基线里），删除也要同步。
+ *  旧缺陷：基线只增量登记引擎自建目录与书签，用户新建目录从不入基线——删它时
+ *  diff「基线有、当前树无」看不见 → 库目录永久残留（实测：用户删「开发」目录不同步）。
+ *  D56 三例都在对齐「前」建目录（全量快照进基线），从未覆盖此盲区。 */
+test("浏览器删对齐后新建目录（D75 回归）：库目录+子书签应随之消失", async () => {
+  const sw = context.serviceWorkers().find((w) => w.url().startsWith("chrome-extension://"));
+  if (!sw) throw new Error("service worker unavailable");
+  const tag = Date.now();
+  const fname = `对齐后新目录-${tag}`;
+
+  const sendMsg = (page: import("@playwright/test").Page, msg: Record<string, unknown>) =>
+    page.evaluate((m) => new Promise<Record<string, unknown>>((res) => chrome.runtime.sendMessage(m, res)), msg);
+  const libFolderByName = async (name: string) => {
+    const fs = (await (await fetch(`${BASE}/api/v1/folders`)).json()) as Array<{ id: string; name: string }>;
+    return fs.find((f) => f.name === name) ?? null;
+  };
+
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/options.html`);
+  const master = page.locator("#sync-master");
+  if (await master.isChecked()) await master.uncheck();
+  await master.check();
+  await expect(page.locator("#msg-sync")).toContainText("已开启并完成全量对齐", { timeout: 90_000 });
+
+  // ★ 对齐「之后」建目录 + 书签（用户动作）→ 事件 tick 推入库
+  const folderId = await sw.evaluate(
+    async ([name, tag2]: [string, number]) => {
+      const f = await chrome.bookmarks.create({ parentId: "1", title: name });
+      await chrome.bookmarks.create({ parentId: f.id, title: "对齐后项", url: `https://d75-${tag2}.test/a` });
+      return f.id;
+    },
+    [fname, tag] as [string, number],
+  );
+
+  // 等库目录出现（推送收敛；D75 修复后该 tick 开局 walk 即把新目录登记进基线）
+  let libFolder: { id: string } | null = null;
+  for (let t = 0; t < 90 && !libFolder; t++) {
+    await page.waitForTimeout(1000);
+    libFolder = await libFolderByName(fname);
+  }
+  expect(libFolder).not.toBeNull();
+  await sendMsg(page, { type: "sync-now" }); // 保险：确保基线固化轮跑过
+  await page.waitForTimeout(1500);
+
+  // 删浏览器目录 → 库目录树应随之消失（旧实现：目录不在基线 → 删除被静默忽略）
+  await sw.evaluate((id: string) => chrome.bookmarks.removeTree(id), folderId);
+  let after: { id: string } | null = libFolder;
+  for (let t = 0; t < 30 && after; t++) {
+    await sendMsg(page, { type: "sync-now" });
+    await page.waitForTimeout(1500);
+    after = await libFolderByName(fname);
+  }
+  expect(after).toBeNull();
+
+  await master.uncheck();
+  await page.waitForTimeout(400);
+  await page.close();
+}, 240_000);
+
+/** D78 回归：收纳盒入口双向收敛。
+ *  A 管理台把条目移入盒 → 浏览器节点跟随入投递口（旧：D51 豁免致两侧分叉）；
+ *  B 浏览器把已同步节点移入投递口 → 库条目入盒重分类且不被同步引擎误删
+ *    （旧：基线 diff 把「入盒」判成删除 → 数据丢失；/inbox/map 旧逻辑还把节点弹回）。 */
+test("收纳盒入口双向收敛（D78）：管理台移入盒浏览器跟随；浏览器移入盒库不丢", async () => {
+  const sw = context.serviceWorkers().find((w) => w.url().startsWith("chrome-extension://"));
+  if (!sw) throw new Error("service worker unavailable");
+  const tag = Date.now();
+  const urlA = `https://d78-a-${tag}.example.com/`;
+  const urlB = `https://d78-b-${tag}.example.com/`;
+
+  const sendMsg = (page: import("@playwright/test").Page, msg: Record<string, unknown>) =>
+    page.evaluate((m) => new Promise<Record<string, unknown>>((res) => chrome.runtime.sendMessage(m, res)), msg);
+  const libByUrl = async (u: string) => {
+    const bs = (await (await fetch(`${BASE}/api/v1/bookmarks?limit=2000`)).json()) as Array<{ id: string; url_raw: string; folder_id: string }>;
+    return bs.find((b) => b.url_raw === u) ?? null;
+  };
+
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/options.html`);
+  const inbox = (await page.evaluate(
+    () => new Promise<{ serverId: string; extId: string }>((res) => chrome.runtime.sendMessage({ type: "setup-inbox" }, res)),
+  )) as { serverId: string; extId: string };
+  expect(inbox.extId).toBeTruthy();
+  const master = page.locator("#sync-master");
+  if (await master.isChecked()) await master.uncheck();
+  await master.check();
+  await expect(page.locator("#msg-sync")).toContainText("已开启并完成全量对齐", { timeout: 90_000 });
+
+  // 两条浏览器书签（栏根）→ 同步入库
+  const nodeIds = await sw.evaluate(
+    async ([a, b]: [string, string]) => {
+      const na = await chrome.bookmarks.create({ parentId: "1", title: "D78甲", url: a });
+      const nb = await chrome.bookmarks.create({ parentId: "1", title: "D78乙", url: b });
+      return [na.id, nb.id];
+    },
+    [urlA, urlB] as [string, string],
+  );
+  let libA: { id: string } | null = null;
+  let libB: { id: string } | null = null;
+  for (let t = 0; t < 90 && (!libA || !libB); t++) {
+    await page.waitForTimeout(1000);
+    libA = await libByUrl(urlA);
+    libB = await libByUrl(urlB);
+  }
+  expect(libA && libB).toBeTruthy();
+  await sendMsg(page, { type: "sync-now" });
+  await page.waitForTimeout(1500);
+
+  // A：管理台把甲移入收纳盒 → 浏览器节点跟随入投递口
+  await fetch(`${BASE}/api/v1/bookmarks/${libA!.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ folderId: inbox.serverId }),
+  });
+  let inSlot = false;
+  for (let t = 0; t < 30 && !inSlot; t++) {
+    await sendMsg(page, { type: "sync-now" });
+    await page.waitForTimeout(1500);
+    inSlot = await sw.evaluate(
+      ([nid, slot]: [string, string]) =>
+        new Promise<boolean>((res) => chrome.bookmarks.get(nid, (n) => res(n[0]?.parentId === slot))),
+      [nodeIds[0], inbox.extId] as [string, string],
+    );
+  }
+  expect(inSlot).toBe(true); // ★ 旧实现：pull 豁免入盒移动，节点永远留在原目录
+
+  // B：浏览器把乙移入投递口 → flush 投递入盒 + 同步引擎不得误删
+  await sw.evaluate(
+    ([nid, slot]: [string, string]) => chrome.bookmarks.move(nid, { parentId: slot }),
+    [nodeIds[1], inbox.extId] as [string, string],
+  );
+  await page.waitForTimeout(3000); // 即时 flush
+  for (let t = 0; t < 3; t++) {
+    await sendMsg(page, { type: "sync-now" });
+    await page.waitForTimeout(2000);
+  }
+  const stillB = await libByUrl(urlB);
+  expect(stillB).not.toBeNull(); // ★ 旧实现：入盒=基线 diff 判删 → 库条目消失（数据丢失）
+  expect(stillB!.folder_id).toBe(inbox.serverId); // 已入盒（重分类意图被尊重，不弹回）
+  const bInSlot = await sw.evaluate(
+    ([nid, slot]: [string, string]) =>
+      new Promise<boolean>((res) => chrome.bookmarks.get(nid, (n) => res(n[0]?.parentId === slot))),
+    [nodeIds[1], inbox.extId] as [string, string],
+  );
+  expect(bInSlot).toBe(true); // 节点未被弹回（无 LLM → 留盒待分类，两侧一致）
+
+  await master.uncheck();
+  await page.waitForTimeout(400);
+  await page.close();
+}, 240_000);
+
+/** D79 回归 A：关闭同步期间浏览器删目录，重开后不得被 align 复活。
+ *  旧实现重开直接进加法 align（库目录全量保障），把用户关闭期间删掉的目录重建回浏览器。 */
+test("重开同步不复活关闭期间删除的目录（D79）", async () => {
+  const sw = context.serviceWorkers().find((w) => w.url().startsWith("chrome-extension://"));
+  if (!sw) throw new Error("service worker unavailable");
+  const tag = Date.now();
+  const fname = `关闭期删目录-${tag}`;
+
+  const sendMsg = (page: import("@playwright/test").Page, msg: Record<string, unknown>) =>
+    page.evaluate((m) => new Promise<Record<string, unknown>>((res) => chrome.runtime.sendMessage(m, res)), msg);
+  const libFolderByName = async (name: string) => {
+    const fs = (await (await fetch(`${BASE}/api/v1/folders`)).json()) as Array<{ id: string; name: string }>;
+    return fs.find((f) => f.name === name) ?? null;
+  };
+
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/options.html`);
+  const master = page.locator("#sync-master");
+  if (await master.isChecked()) await master.uncheck();
+  await master.check();
+  await expect(page.locator("#msg-sync")).toContainText("已开启并完成全量对齐", { timeout: 90_000 });
+
+  // 建目录+书签 → 入库入基线
+  const folderId = await sw.evaluate(
+    async ([name, tag2]: [string, number]) => {
+      const f = await chrome.bookmarks.create({ parentId: "1", title: name });
+      await chrome.bookmarks.create({ parentId: f.id, title: "项", url: `https://d79-off-${tag2}.test/a` });
+      return f.id;
+    },
+    [fname, tag] as [string, number],
+  );
+  let libFolder: { id: string } | null = null;
+  for (let t = 0; t < 90 && !libFolder; t++) {
+    await page.waitForTimeout(1000);
+    libFolder = await libFolderByName(fname);
+  }
+  expect(libFolder).not.toBeNull();
+  await sendMsg(page, { type: "sync-now" });
+  await page.waitForTimeout(1500);
+
+  // 关闭同步 → 浏览器删目录（关闭期间引擎不工作）
+  await master.uncheck();
+  await page.waitForTimeout(600);
+  await sw.evaluate((id: string) => chrome.bookmarks.removeTree(id), folderId);
+
+  // 重开 → 旧实现 align 复活目录；D79 先 tick 收敛删除
+  await master.check();
+  await expect(page.locator("#msg-sync")).toContainText("已开启", { timeout: 90_000 });
+  let after: { id: string } | null = libFolder;
+  for (let t = 0; t < 20 && after; t++) {
+    await page.waitForTimeout(1500);
+    after = await libFolderByName(fname);
+  }
+  expect(after).toBeNull(); // ★ 库目录随关闭期间的浏览器删除一并消失
+  const browserGone = await sw.evaluate(
+    (name: string) =>
+      new Promise<boolean>((res) => chrome.bookmarks.search({ title: name }, (ns) => res(ns.filter((n) => !n.url).length === 0))),
+    fname,
+  );
+  expect(browserGone).toBe(true); // 浏览器侧也没有被 align 重建
+
+  await master.uncheck();
+  await page.waitForTimeout(400);
+  await page.close();
+}, 240_000);
+
+/** D79 回归 B：浏览器删除盒内「待分类」节点 = 取消 → 库条目消失，不得被入口收敛复活。 */
+test("浏览器删盒内待分类条目即取消（D79）：库不残留、节点不复活", async () => {
+  const sw = context.serviceWorkers().find((w) => w.url().startsWith("chrome-extension://"));
+  if (!sw) throw new Error("service worker unavailable");
+  const tag = Date.now();
+  const url = `https://d79-cancel-${tag}.example.com/`;
+
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/options.html`);
+  const inbox = (await page.evaluate(
+    () => new Promise<{ serverId: string; extId: string }>((res) => chrome.runtime.sendMessage({ type: "setup-inbox" }, res)),
+  )) as { serverId: string; extId: string };
+  const master = page.locator("#sync-master");
+  if (await master.isChecked()) await master.uncheck();
+  await master.check();
+  await expect(page.locator("#msg-sync")).toContainText("已开启并完成全量对齐", { timeout: 90_000 });
+
+  // 丢入投递口 → 库内盒中条目（无 LLM → 留 pending）
+  const nodeId = await sw.evaluate(
+    async ([u, slot]: [string, string]) => {
+      const n = await chrome.bookmarks.create({ parentId: slot, title: "D79待取消", url: u });
+      return n.id;
+    },
+    [url, inbox.extId] as [string, string],
+  );
+  const libByUrl = async () => {
+    const bs = (await (await fetch(`${BASE}/api/v1/bookmarks?folderId=${inbox.serverId}&limit=500`)).json()) as Array<{ id: string; url_raw: string }>;
+    return bs.find((b) => b.url_raw === url) ?? null;
+  };
+  let libItem: { id: string } | null = null;
+  for (let t = 0; t < 60 && !libItem; t++) {
+    await page.waitForTimeout(1000);
+    libItem = await libByUrl();
+  }
+  expect(libItem).not.toBeNull();
+
+  // 浏览器删除盒内节点 → 取消意图
+  await sw.evaluate((id: string) => chrome.bookmarks.remove(id), nodeId);
+  let gone = false;
+  for (let t = 0; t < 20 && !gone; t++) {
+    await page.waitForTimeout(1500);
+    gone = (await libByUrl()) === null;
+  }
+  expect(gone).toBe(true); // ★ 旧实现：库条目残留，D78 收敛还会把节点补建回来
+  // 再等一轮收敛，确认节点不复活
+  await page.evaluate(() => new Promise((r) => chrome.runtime.sendMessage({ type: "sync-now" }, () => r())));
+  await page.waitForTimeout(2500);
+  const revived = await sw.evaluate(
+    (u: string) => new Promise<number>((res) => chrome.bookmarks.search({ url: u }, (ns) => res(ns.length))),
+    url,
+  );
+  expect(revived).toBe(0);
 
   await master.uncheck();
   await page.waitForTimeout(400);
