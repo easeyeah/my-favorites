@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { openDb } from "./db";
 import { Store } from "./store";
+import { Registry } from "./registry";
+import { UserDbManager, currentUserId } from "./tenancy";
 import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
 import { SemanticService } from "./semantic";
@@ -20,6 +22,8 @@ export interface TestEnv extends AppDeps {
   cleanup: () => void;
   dataDir: string;
   store: Store;
+  registry: Registry;
+  userDbs: UserDbManager;
   pipeline: Pipeline;
   organize: OrganizeService;
   semantic: SemanticService;
@@ -34,16 +38,22 @@ export function makeEnv(
     embedClient?: LlmClient | null;
     /** D61：封面抓取替身（loopback 属内置隐私域，材料库集成测试注入 stub） */
     coverFetcher?: CoverFetcher;
+    /** D70：补抓替身（article 资料扫描测试用；隐私判定前置不放宽） */
+    crawlFetcher?: import("./pipeline").CrawlFetcher;
   } = {},
 ): TestEnv {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "mf-test-"));
-  const store = new Store(openDb(dataDir));
+  const mainDb = openDb(dataDir);
+  const userDbs = new UserDbManager(dataDir, mainDb);
+  const store = new Store(() => userDbs.dbFor(currentUserId()));
+  const registry = new Registry(mainDb);
   const llmFor = () => llm;
   const pipeline = new Pipeline(store, llmFor, {
     syncAi,
     dataDir, // D61：资料库封面落盘（封面下载走 loopback 放行的 guardConfig）
     guardConfig: { mode: "selfhosted_allowlist", allowedCidrs: ["127.0.0.0/8", "::1/128"] },
     coverFetcher: opts.coverFetcher,
+    crawlFetcher: opts.crawlFetcher,
   });
   const organize = new OrganizeService(store, llmFor);
   const semantic = new SemanticService(
@@ -65,11 +75,15 @@ export function makeEnv(
     semantic,
     maintenance,
     adminPassword: opts.adminPassword,
+    registry,
+    userDbs,
     guardConfig: { mode: "selfhosted_allowlist", allowedCidrs: ["127.0.0.1/32", "::1/128"] },
   });
   return {
     app,
     store,
+    registry,
+    userDbs,
     llmFor,
     pipeline,
     organize,

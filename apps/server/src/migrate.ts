@@ -9,7 +9,7 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync, copyFileSync, rmSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { canonicalizeUrl } from "@mf/shared";
 
@@ -452,6 +452,144 @@ export const MIGRATION_V11_MATERIAL_CATEGORY: Migration = {
   },
 };
 
+/**
+ * 版本 12：多形态账号内核（D67，2026-11-21）。
+ *  - users：统一用户账号（owner id='self'；D68 起也会 provisioning 到 users 表）；
+ *  - tokens.user_id：令牌归属（存量回填 'self'；云端按用户签发/隔离列表）；
+ *  - public_slugs：公开站点 slug → 数据属主索引（云端 /s/:slug 路由到用户库）；
+ *    存量已发布站点回填 'self'（自建主库生效；用户库内行不被消费，无害）。
+ *  数据隔离策略：每用户一个 SQLite 文件（云端注册即建库跑同一套迁移），
+ *  主库承载 users/令牌/部署级设置/认证审计/公开索引——仓储层 SQL 零改写。
+ */
+export const MIGRATION_V12_MULTIUSER: Migration = {
+  version: 12,
+  name: "multiuser_accounts",
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        password_hash TEXT NOT NULL,
+        display_name TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS public_slugs (
+        slug TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    const cols = db.prepare("PRAGMA table_info(tokens)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "user_id")) {
+      db.prepare("ALTER TABLE tokens ADD COLUMN user_id TEXT").run();
+    }
+    db.prepare("UPDATE tokens SET user_id = 'self' WHERE user_id IS NULL").run();
+    db.prepare(
+      "INSERT OR IGNORE INTO public_slugs (slug, user_id, updated_at) SELECT slug, 'self', ? FROM nav_site WHERE published = 1",
+    ).run(new Date().toISOString());
+  },
+};
+
+/**
+ * 版本 13：统一部署的系统管理（D73，2026-11-22）。
+ *  - users.role：首个账号与既有 owner 为 admin，其余默认 user；
+ *  - users.disabled_at：停用即撤销访问，数据文件保留，可随时恢复；
+ *  既有纯注册部署若没有 owner，最早注册者提升为管理员，避免升级后无人能进系统管理。
+ */
+export const MIGRATION_V13_SYSTEM_ADMIN: Migration = {
+  version: 13,
+  name: "system_admin_and_user_status",
+  up: (db) => {
+    const cols = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "role")) {
+      db.prepare("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'").run();
+    }
+    if (!cols.some((c) => c.name === "disabled_at")) {
+      db.prepare("ALTER TABLE users ADD COLUMN disabled_at TEXT").run();
+    }
+    db.prepare("UPDATE users SET role = 'admin' WHERE id = 'self'").run();
+    db.prepare(
+      `UPDATE users SET role = 'admin'
+       WHERE id = (SELECT id FROM users ORDER BY created_at, id LIMIT 1)
+         AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'admin')`,
+    ).run();
+  },
+};
+
+/**
+ * v14（D77 分类自检）：inbox_state.reviewed_at——自动归位条目的一次性复核标记。
+ * 复核（kept/moved）即终结，防 LLM 非确定性来回振荡；NULL=待复核（ patrol 候选）。
+ */
+export const MIGRATION_V14_PLACEMENT_REVIEW: Migration = {
+  version: 14,
+  name: "placement_review",
+  up: (db) => {
+    const cols = db.prepare("PRAGMA table_info(inbox_state)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "reviewed_at")) {
+      db.prepare("ALTER TABLE inbox_state ADD COLUMN reviewed_at TEXT").run();
+    }
+  },
+};
+
+/**
+ * v15（D81 同步协议整改，评审 §3-A/C/D）：
+ *  - folder_identity：目录稳定身份（device_id + browser_folder_id ↔ app_folder_id）。
+ *    路径名仅作初次导入匹配，绑定后按 ID 同步——根治改名/搬家/同名族分叉（D80 Tier1-A）。
+ *  - folders.root：浏览器根映射（bar=书签栏 / other=其他书签），不同根下同名目录不串号。
+ *  - device.sync_enabled：已同步设备标记——停发镜像 ops（D80 Tier2-D），mirrorGuard 时间窗退役。
+ *  - sync_op_receipt：操作回执（opId 幂等，事务内数据修改+变更日志+回执；7 天保留裁剪）。
+ *  - sync_meta.generation：库代际标识——DB 恢复/替换后游标失效判定（reset_required 协议）。
+ */
+export const MIGRATION_V15_SYNC_PROTOCOL: Migration = {
+  version: 15,
+  name: "sync_protocol",
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS folder_identity (
+        device_id TEXT NOT NULL,
+        browser_folder_id TEXT NOT NULL,
+        app_folder_id TEXT NOT NULL,
+        mapped_at TEXT NOT NULL,
+        PRIMARY KEY (device_id, browser_folder_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_folder_identity_app ON folder_identity(device_id, app_folder_id);
+      CREATE TABLE IF NOT EXISTS sync_op_receipt (
+        op_id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        result TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `);
+    const folderCols = db.prepare("PRAGMA table_info(folders)").all() as Array<{ name: string }>;
+    if (!folderCols.some((c) => c.name === "root")) {
+      db.prepare("ALTER TABLE folders ADD COLUMN root TEXT NOT NULL DEFAULT 'bar'").run();
+    }
+    const deviceCols = db.prepare("PRAGMA table_info(device)").all() as Array<{ name: string }>;
+    if (!deviceCols.some((c) => c.name === "sync_enabled")) {
+      db.prepare("ALTER TABLE device ADD COLUMN sync_enabled INTEGER NOT NULL DEFAULT 0").run();
+    }
+    db.prepare("INSERT OR IGNORE INTO sync_meta (key, value) VALUES ('generation', ?)").run(randomUUID());
+  },
+};
+
+/**
+ * v16（D81 复核 SYNC-R04/R05）：folders.rev——目录修订号。
+ *  目录改名/搬家（含跨根）递增；变更载荷、同步回执、快照与目录列表均携带。
+ *  与书签 content_revision 对称：出站操作的 baseRevision 固定绑定生成时的库侧修订，
+ *  服务端据此检测「响应丢失后重放的过期操作」——不覆盖后续修改（不宣称后发生效）。
+ */
+export const MIGRATION_V16_FOLDER_REVISION: Migration = {
+  version: 16,
+  name: "folder_revision",
+  up: (db) => {
+    const cols = db.prepare("PRAGMA table_info(folders)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "rev")) {
+      db.prepare("ALTER TABLE folders ADD COLUMN rev INTEGER NOT NULL DEFAULT 0").run();
+    }
+  },
+};
+
 /** 全部迁移按版本升序注册（只追加） */
 export const MIGRATIONS: Migration[] = [
   BASELINE_MIGRATION,
@@ -465,6 +603,11 @@ export const MIGRATIONS: Migration[] = [
   MIGRATION_V9_AUDIT_LOG,
   MIGRATION_V10_MATERIAL,
   MIGRATION_V11_MATERIAL_CATEGORY,
+  MIGRATION_V12_MULTIUSER,
+  MIGRATION_V13_SYSTEM_ADMIN,
+  MIGRATION_V14_PLACEMENT_REVIEW,
+  MIGRATION_V15_SYNC_PROTOCOL,
+  MIGRATION_V16_FOLDER_REVISION,
 ];
 
 export function appliedVersions(db: DatabaseSync): Set<number> {

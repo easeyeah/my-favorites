@@ -10,6 +10,8 @@ export interface ChangeEvent {
   entity_id: string;
   op: string;
   device: string | null;
+  /** D67：变更所属用户（请求上下文解析）；SSE 订阅按此过滤，自建恒 self */
+  user?: string;
 }
 
 export class ChangeHub {

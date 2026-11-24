@@ -431,9 +431,8 @@ export async function guardedFetch(
   );
 }
 
-/** 从环境构建配置：MF_FORM=cloud → 云端模式；MF_ALLOW_INTRANET_FETCH=1 → 自建显式放行 */
+/** D73：所有部署同一安全默认；仅 MF_ALLOW_INTRANET_FETCH=1 显式放行内网。 */
 export function fetchGuardConfigFromEnv(): FetchGuardConfig {
-  if (process.env.MF_FORM === "cloud") return { mode: "cloud" };
   if (process.env.MF_ALLOW_INTRANET_FETCH === "1") {
     const cidrs = (process.env.MF_ALLOW_INTRANET_CIDRS ?? "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
       .split(",")

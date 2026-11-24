@@ -1,10 +1,11 @@
 /** 仓储层 —— 全部 SQL 集中在此，路由不直接摸 SQL */
 import { rmSync } from "node:fs";
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { canonicalizeUrl } from "@mf/shared";
 import type { Db } from "./db";
 import { newId, now } from "./db";
 import { protectKeyForStorage, keyForUse } from "./secret-box";
+import { currentSyncDevice, currentUserId } from "./tenancy";
 
 export interface FolderRow {
   id: string;
@@ -14,7 +15,20 @@ export interface FolderRow {
   source: string;
   is_system_inbox: number;
   created_at: string;
+  /** D81 §3-A：浏览器根映射（bar=书签栏 / other=其他书签）——不同根下同名目录不串号 */
+  root?: string;
+  /** 目录修订号（D81 复核 R05，v16）：改名/搬家递增；同步回执与变更载荷携带，baseRevision 冲突检测依据 */
+  rev?: number;
 }
+
+/** 目录变更载荷统一出口（upsert/move 共用字段口径：id/name/parent_id/root/rev） */
+const folderChangePayload = (f: FolderRow): Record<string, unknown> => ({
+  id: f.id,
+  name: f.name,
+  parent_id: f.parent_id,
+  root: f.root === "other" ? "other" : "bar",
+  rev: f.rev ?? 0,
+});
 
 export interface BookmarkRow {
   id: string;
@@ -41,17 +55,30 @@ export interface BookmarkRow {
   suspect_streak?: number;
   /** 可解释失败原因（报告明细「为什么访问不了」） */
   last_fail_reason?: string | null;
+  /** 查重键规则版本（DEV-13；url 编辑时随 canonical 一并更新） */
+  url_key_version?: number;
 }
 
 export class Store {
-  constructor(readonly db: Db) {}
-
   /**
-   * D46 双向同步：sync-apply 执行期间的变更日志自动携带发起设备（device 列），
-   * 该设备 pullChanges 时被排除——浏览器→库的改动不再回声到浏览器（防回环）。
-   * 其他改动路径（整理/管理台）此值为 null，日志照旧全员下发。
+   * D67：数据源可以是固定 Db（自建/既有测试）或解析器（云端按请求上下文取用户库）。
+   * this.db 每次访问时解析——公开路由/后台无上下文时回退主库（tenancy.ts）。
    */
-  syncApplyDevice: string | null = null;
+  private readonly dbSource: Db | (() => Db);
+
+  constructor(dbSource: Db | (() => Db)) {
+    this.dbSource = dbSource;
+  }
+
+  get db(): Db {
+    return typeof this.dbSource === "function" ? this.dbSource() : this.dbSource;
+  }
+
+  // ---------- 变更日志（多端同步） ----------
+  // D46 防回环的发起设备标记已迁至请求上下文（tenancy.currentSyncDevice）：
+  // sync-apply 以 runAsSyncDevice 包裹执行体，产生的变更日志自动携带发起设备
+  //（该设备 pullChanges 时被排除）；其他改动路径无上下文，device=null 全员下发。
+  // D67 由单例可变字段改为 ALS——多用户下全局字段会跨用户污染防回环标记。
 
   // ---------- folders ----------
   listFolders(): FolderRow[] {
@@ -66,22 +93,24 @@ export class Store {
       | undefined;
   }
 
-  /** 目录重命名（收纳盒等系统目录拒绝改名） */
+  /** 目录重命名（收纳盒等系统目录拒绝改名）。D81 复核 R05：递增 rev，变更载荷带 root/rev */
   renameFolder(id: string, name: string): FolderRow | undefined {
     const row = this.getFolder(id);
     if (!row || row.is_system_inbox === 1) return undefined;
-    this.db.prepare("UPDATE folders SET name = ? WHERE id = ?").run(name, id);
-    this.recordChange("folder", id, "upsert", { id, name, parent_id: row.parent_id });
-    return this.getFolder(id);
+    this.db.prepare("UPDATE folders SET name = ?, rev = rev + 1 WHERE id = ?").run(name, id);
+    const after = this.getFolder(id)!;
+    this.recordChange("folder", id, "upsert", folderChangePayload(after));
+    return after;
   }
 
   /** 系统收纳盒改名：仅供 /inbox/setup 幂等校准（D36 术语迁移），用户面重命名仍走 renameFolder */
   renameSystemFolder(id: string, name: string): FolderRow | undefined {
     const row = this.getFolder(id);
     if (!row) return undefined;
-    this.db.prepare("UPDATE folders SET name = ? WHERE id = ?").run(name, id);
-    this.recordChange("folder", id, "upsert", { id, name, parent_id: row.parent_id });
-    return this.getFolder(id);
+    this.db.prepare("UPDATE folders SET name = ?, rev = rev + 1 WHERE id = ?").run(name, id);
+    const after = this.getFolder(id)!;
+    this.recordChange("folder", id, "upsert", folderChangePayload(after));
+    return after;
   }
 
   findFolderByName(name: string): FolderRow | undefined {
@@ -90,11 +119,63 @@ export class Store {
       .get(name) as FolderRow | undefined;
   }
 
+  /**
+   * 目录子树 ID 集合（含自身）。D89：目录级整理/资料提取的作用域——
+   * 树是扁平 parent_id 结构，用一次全量目录表在内存做闭包，避免递归 SQL。
+   */
+  folderSubtreeIds(folderId: string): string[] {
+    const folders = this.listFolders();
+    const children = new Map<string | null, string[]>();
+    for (const f of folders) {
+      const key = f.parent_id ?? null;
+      const arr = children.get(key) ?? [];
+      arr.push(f.id);
+      children.set(key, arr);
+    }
+    const out: string[] = [];
+    const queue = [folderId];
+    const seen = new Set<string>();
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+      for (const child of children.get(id) ?? []) queue.push(child);
+    }
+    return out;
+  }
+
+  /** D81 §3-A：同父同名同根查找（folder.create 幂等绑定用；根级含悬空父，与 ensurePath 同口径） */
+  findFolderUnder(name: string, parentId: string | null, root = "bar"): FolderRow | undefined {
+    return (parentId
+      ? this.db.prepare("SELECT * FROM folders WHERE name = ? AND parent_id = ? AND IFNULL(root,'bar') = ? LIMIT 1").get(name, parentId, root)
+      : this.db
+          .prepare(
+            `SELECT * FROM folders WHERE name = ?
+             AND (parent_id IS NULL OR parent_id NOT IN (SELECT id FROM folders))
+             AND IFNULL(root,'bar') = ?
+             ORDER BY (parent_id IS NULL) DESC, sort, name LIMIT 1`,
+          )
+          .get(name, root)) as FolderRow | undefined;
+  }
+
+  /** 初次同步只认领本设备尚未占用的候选；同名兄弟是不同实体，不按名称合并。 */
+  findUnclaimedFolderUnder(name: string, parentId: string | null, root: string, deviceId: string): FolderRow | undefined {
+    return this.db.prepare(
+      `SELECT f.* FROM folders f
+       WHERE f.name = ? AND IFNULL(f.root,'bar') = ?
+         AND (f.parent_id = ? OR (? IS NULL AND (f.parent_id IS NULL OR f.parent_id NOT IN (SELECT id FROM folders))))
+         AND NOT EXISTS (SELECT 1 FROM folder_identity i WHERE i.device_id = ? AND i.app_folder_id = f.id)
+       ORDER BY (f.parent_id IS NULL) DESC, f.sort, f.rowid LIMIT 1`,
+    ).get(name, root, parentId, parentId, deviceId) as FolderRow | undefined;
+  }
+
   createFolder(
     name: string,
     parentId: string | null,
     source = "user",
     isSystemInbox = false,
+    root = "bar",
   ): FolderRow {
     const row: FolderRow = {
       id: newId(),
@@ -104,10 +185,12 @@ export class Store {
       source,
       is_system_inbox: isSystemInbox ? 1 : 0,
       created_at: now(),
+      root,
+      rev: 0,
     };
     this.db
       .prepare(
-        "INSERT INTO folders (id, parent_id, name, sort, source, is_system_inbox, created_at) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO folders (id, parent_id, name, sort, source, is_system_inbox, created_at, root, rev) VALUES (?,?,?,?,?,?,?,?,0)",
       )
       .run(
         row.id,
@@ -117,31 +200,103 @@ export class Store {
         row.source,
         row.is_system_inbox,
         row.created_at,
+        root,
       );
-      this.recordChange("folder", row.id, "upsert", { id: row.id, name: row.name, parent_id: row.parent_id });
+      this.recordChange("folder", row.id, "upsert", folderChangePayload(row));
     return row;
   }
 
-  /** 沿 folderPath 逐级 find-or-create（ingest 的目录树映射） */
-  ensurePath(path: string[]): FolderRow {
+  /** 沿 folderPath 逐级 find-or-create（ingest 的目录树映射）。D81：root 维度隔离同名目录 */
+  ensurePath(path: string[], root = "bar"): FolderRow {
     let parentId: string | null = null;
     let current: FolderRow | null = null;
     for (const name of path) {
+      // D79：根级匹配含「悬空父」目录（parent_id 指向不存在的 id，如传入浏览器根 "1"）——
+      // 扩展 fetchAppFolders 的路径构造把悬空父视同根级，ensurePath 必须同口径，
+      // 否则同名根目录被重复创建（create 绑定尊重目录后暴露：绑定把书签移进重复目录）
       const stmt = current
         ? this.db.prepare(
-            "SELECT * FROM folders WHERE name = ? AND parent_id = ? LIMIT 1",
+            "SELECT * FROM folders WHERE name = ? AND parent_id = ? AND IFNULL(root,'bar') = ? LIMIT 1",
           )
         : this.db.prepare(
-            "SELECT * FROM folders WHERE name = ? AND parent_id IS NULL LIMIT 1",
+            `SELECT * FROM folders WHERE name = ?
+             AND (parent_id IS NULL OR parent_id NOT IN (SELECT id FROM folders))
+             AND IFNULL(root,'bar') = ?
+             ORDER BY (parent_id IS NULL) DESC, sort, name LIMIT 1`,
           );
       const found = (
-        current ? stmt.get(name, current.id) : stmt.get(name)
+        current ? stmt.get(name, current.id, root) : stmt.get(name, root)
       ) as FolderRow | undefined;
-      current = found ?? this.createFolder(name, parentId, "imported");
+      current = found ?? this.createFolder(name, parentId, "imported", false, root);
       parentId = current.id;
     }
-    // path 为空时落到根下的"未整理"
+    // path 为空时落到根下的"未整理"（ loose 书签不分根，统一落 bar 的未整理）
     return current ?? this.ensurePath(["未整理"]);
+  }
+
+  /**
+   * D81 §3-A / 复核 R04：目录搬家（reparent）——父目录与根归属纳入同一次移动。
+   *  - 根继承：搬到某父目录下 → 继承该父的 root；搬到根级（newParentId=null）→ 取 newRoot ?? 当前 root；
+   *  - 跨根移动 → 子孙 root 在同一事务内一致更新（root 逐行存储，不更新则子树路径键与另一根串号）；
+   *  - 无变化判定 = 父相同 **且** 根相同（两端 parent_id 同为 null 的跨根移动不是 noop）；
+   *  - 校验父存在、禁止成环；系统收纳盒不可移动。
+   * 变更日志 op=move，载荷 {to, parent_id, root, rev} 供同步引擎搬运浏览器节点并推进修订缓存。
+   */
+  moveFolder(id: string, newParentId: string | null, newRoot?: string): FolderRow | undefined {
+    const row = this.getFolder(id);
+    if (!row || row.is_system_inbox === 1) return undefined;
+    const curRoot = row.root === "other" ? "other" : "bar";
+    let targetRoot = curRoot;
+    if (newParentId !== null) {
+      const parent = this.getFolder(newParentId);
+      if (!parent) return undefined;
+      // 成环校验：从新父沿 parent_id 上溯，命中自身即成环
+      let cur: FolderRow | undefined = parent;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur.id)) {
+        if (cur.id === id) return undefined;
+        seen.add(cur.id);
+        cur = cur.parent_id ? this.getFolder(cur.parent_id) : undefined;
+      }
+      if (newParentId === id) return undefined;
+      targetRoot = parent.root === "other" ? "other" : "bar";
+    } else if (newRoot === "other" || newRoot === "bar") {
+      targetRoot = newRoot;
+    }
+    if ((row.parent_id ?? null) === newParentId && targetRoot === curRoot) return row; // noop：父与根都未变
+    this.db.exec("SAVEPOINT mf_move_folder");
+    try {
+      this.db.prepare("UPDATE folders SET parent_id = ?, rev = rev + 1 WHERE id = ?").run(newParentId, id);
+      if (targetRoot !== curRoot) this.updateSubtreeRoot(id, targetRoot);
+      this.recordChange("folder", id, "move", {
+        id,
+        to: newParentId,
+        name: row.name,
+        parent_id: newParentId,
+        root: targetRoot,
+        rev: (row.rev ?? 0) + 1,
+      });
+      this.db.exec("RELEASE mf_move_folder");
+    } catch (err) {
+      this.db.exec("ROLLBACK TO mf_move_folder");
+      this.db.exec("RELEASE mf_move_folder");
+      throw err;
+    }
+    return this.getFolder(id);
+  }
+
+  /** 子孙 root 一致更新（递归 CTE；R04：子树跨根搬家事务内同改） */
+  private updateSubtreeRoot(rootId: string, root: string): void {
+    this.db
+      .prepare(
+        `WITH RECURSIVE sub(id) AS (
+           SELECT ?
+           UNION ALL
+           SELECT f.id FROM folders f JOIN sub s ON f.parent_id = s.id
+         )
+         UPDATE folders SET root = ? WHERE id IN (SELECT id FROM sub)`,
+      )
+      .run(rootId, root);
   }
 
   inboxFolder(): FolderRow | undefined {
@@ -158,8 +313,11 @@ export class Store {
       .prepare("SELECT 1 FROM bookmarks WHERE folder_id = ? LIMIT 1")
       .get(id);
     if (hasChildren || hasBookmarks) return false;
+    const folderName = this.getFolder(id)?.name ?? "";
     this.db.prepare("DELETE FROM folders WHERE id = ?").run(id);
-    this.recordChange("folder", id, "delete", { id });
+    this.deleteFolderIdentitiesForApp(id); // D81：目录身份随目录删除清理
+    // D73：载荷带目录名——同步引擎按名定位浏览器对应目录（id 映射在目录删除后无法反查）
+    this.recordChange("folder", id, "delete", { id, name: folderName });
     return true;
   }
 
@@ -173,12 +331,14 @@ export class Store {
     const folder = this.getFolder(id);
     if (!folder || folder.is_system_inbox === 1) return { folders: 0, bookmarks: 0 };
     const acc = { folders: 0, bookmarks: 0 };
-    this.db.exec("BEGIN");
+    // D81：SAVEPOINT 替代 BEGIN——可嵌套于 sync-apply 的每操作 SAVEPOINT（原子性不变）
+    this.db.exec("SAVEPOINT mf_dft");
     try {
       this.deleteFolderTreeInner(id, opts, acc);
-      this.db.exec("COMMIT");
+      this.db.exec("RELEASE mf_dft");
     } catch (err) {
-      this.db.exec("ROLLBACK");
+      this.db.exec("ROLLBACK TO mf_dft");
+      this.db.exec("RELEASE mf_dft");
       throw err;
     }
     return acc;
@@ -193,8 +353,11 @@ export class Store {
       this.deleteBookmark(b.id, opts);
       acc.bookmarks++;
     }
+    const folderName = this.getFolder(id)?.name ?? "";
     this.db.prepare("DELETE FROM folders WHERE id = ?").run(id);
-    this.recordChange("folder", id, "delete", { id });
+    this.deleteFolderIdentitiesForApp(id); // D81：目录身份随树删清理
+    // D73：载荷带目录名（同上）
+    this.recordChange("folder", id, "delete", { id, name: folderName });
     acc.folders++;
   }
 
@@ -258,7 +421,10 @@ export class Store {
         row.created_at,
         input.urlKeyVersion ?? 2,
       );
-      this.recordChange("bookmark", row.id, "upsert", row);
+      // D81 复核 R05：upsert 载荷必须是含 content_revision 的完整行——
+      // 新建书签的 DB 默认修订（1）不在内存 row 里，若直接以 row 作载荷，端侧收不到修订号，
+      // 后续出站操作绑定不到 baseRevision，真实并发冲突检测被旁路（本地过期意图覆盖库侧修改）
+      this.recordChange("bookmark", row.id, "upsert", this.getBookmark(row.id) ?? row);
     return row;
   }
 
@@ -290,11 +456,16 @@ export class Store {
     }
     if (keys.includes("folder_id") && fields.folder_id !== undefined) {
       const after = this.getBookmark(id);
+      // D81 复核 R05：move 载荷带 content_revision 与 url_raw——移动本身递增修订，
+      // 端侧若仍持旧修订提交后续编辑会假冲突（用户修改被回退）
       this.recordChange("bookmark", id, "move", {
         from: null,
         to: String(fields.folder_id),
         url: after?.url_canonical,
+        url_raw: after?.url_raw,
         title: after?.title,
+        folder_id: String(fields.folder_id),
+        content_revision: after?.content_revision ?? 0,
       });
     }
   }
@@ -316,8 +487,11 @@ export class Store {
     // D44 受控镜像删除 / D46：有浏览器身份映射（A2-1）的书签入队 remove 操作。
     // 服务端只排队；是否真的动浏览器节点由扩展端同步开关决定（默认关）。
     // skipMirrorRemoveForDevice：浏览器→库方向的删除不回程删发起方自己。
+    // D81 §3-D-4（D80 Tier2-D）：已同步设备停发镜像 ops——删除由同步引擎 pull 收敛，
+    // 镜像 remove 与引擎两套机制搬同一节点是回环/竞态病灶；mirrorGuard 时间窗随之退役。
     for (const ident of this.identitiesForApp(id)) {
       if (opts.skipMirrorRemoveForDevice && ident.device_id === opts.skipMirrorRemoveForDevice) continue;
+      if (this.deviceSyncEnabled(ident.device_id)) continue;
       this.enqueueBrowserOpIdempotent({
         deviceId: ident.device_id,
         op: "remove",
@@ -349,6 +523,8 @@ export class Store {
 
   listBookmarks(filter?: {
     folderId?: string;
+    /** D89：子树范围（IN 查询，目录级整理/资料扫描用；与 folderId 互斥选择） */
+    folderIds?: string[];
     status?: string;
     siteType?: string;
     hasSnapshot?: boolean;
@@ -360,6 +536,15 @@ export class Store {
     if (filter?.folderId) {
       conds.push("folder_id = ?");
       args.push(filter.folderId);
+    }
+    if (filter?.folderIds && filter.folderIds.length > 0) {
+      const ids = filter.folderIds.slice(0, 500);
+      // 极端子树（>500 目录）截断保护 SQL 变量上限——超出的深层分支本轮不进作用域，下轮续扫
+      if (filter.folderIds.length > 500) {
+        console.warn(`[listBookmarks] folderIds truncated 500/${filter.folderIds.length}`);
+      }
+      conds.push(`folder_id IN (${ids.map(() => "?").join(",")})`);
+      args.push(...ids);
     }
     // 疑似失效：未被确认失效、抓取被 403 反爬拦截（保守规则仅标注，见功能文档 D 系列）
     const wantSuspect = filter?.status === "suspect";
@@ -706,6 +891,13 @@ export class Store {
       .get(bookmarkId) as { id: string } | undefined;
   }
 
+  /** D89 目录资料扫描：确认物化是否生效（dismissed 不算——用户已移出不复活） */
+  getActiveMaterialByBookmark(bookmarkId: string): { id: string } | undefined {
+    return this.db
+      .prepare("SELECT id FROM material WHERE bookmark_id = ? AND status = 'active'")
+      .get(bookmarkId) as { id: string } | undefined;
+  }
+
   /** 资料库计数（按类型；口径与列表一致：active + 非软归档 + 非私密） */
   countMaterials(): { total: number; article: number; video: number; image: number } {
     const row = this.db
@@ -1041,6 +1233,93 @@ export class Store {
       .all(appBookmarkId) as unknown as Array<{ device_id: string; browser_bookmark_id: string }>;
   }
 
+  /** D81 §3-D-5：节点退出同步范围（URL 变非 http）→ 解绑身份，库条目保留 */
+  unbindIdentity(deviceId: string, browserBookmarkId: string): void {
+    this.db
+      .prepare("DELETE FROM bookmark_identity WHERE device_id = ? AND browser_bookmark_id = ?")
+      .run(deviceId, browserBookmarkId);
+  }
+
+  // ---------- D81 §3-A：目录稳定身份（folder_identity，迁移 v15） ----------
+  /** 路径名仅作初次导入匹配；绑定后按 ID 同步——改名/搬家/同名族不再分叉 */
+  upsertFolderIdentity(input: { deviceId: string; browserFolderId: string; appFolderId: string; replaceFromAppFolderId?: string; liveBrowserFolderIds?: string[] }): void {
+    const current = this.resolveBoundFolderId(input.deviceId, input.browserFolderId);
+    if (current === input.appFolderId) return; // 旧别名的原样重放不改绑；分离由显式操作逐个完成。
+    if (current && current !== input.replaceFromAppFolderId) throw new Error("folder_identity_changed");
+    // 只有设备完整目录快照能证明旧 ID 已死亡；不按时间、过滤后的子树或单次读取失败猜测。
+    if (Array.isArray(input.liveBrowserFolderIds) && input.liveBrowserFolderIds.every((id) => typeof id === "string")) {
+      const live = new Set(input.liveBrowserFolderIds);
+      if (!live.has(input.browserFolderId)) throw new Error("folder_identity_snapshot_stale");
+      const old = this.db.prepare("SELECT browser_folder_id FROM folder_identity WHERE device_id = ? AND app_folder_id = ?")
+        .all(input.deviceId, input.appFolderId) as Array<{ browser_folder_id: string }>;
+      for (const i of old) if (!live.has(i.browser_folder_id)) this.deleteFolderIdentity(input.deviceId, i.browser_folder_id);
+    }
+    const occupied = this.db.prepare(
+      "SELECT 1 FROM folder_identity WHERE device_id = ? AND app_folder_id = ? AND browser_folder_id != ? LIMIT 1",
+    ).get(input.deviceId, input.appFolderId, input.browserFolderId);
+    if (occupied) throw new Error("folder_identity_occupied");
+    this.db
+      .prepare(
+        `INSERT INTO folder_identity (device_id, browser_folder_id, app_folder_id, mapped_at)
+         VALUES (?,?,?,?)
+         ON CONFLICT(device_id, browser_folder_id) DO UPDATE SET app_folder_id = excluded.app_folder_id, mapped_at = excluded.mapped_at`,
+      )
+      .run(input.deviceId, input.browserFolderId, input.appFolderId, now());
+  }
+
+  findAppFolderId(deviceId: string, browserFolderId: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT app_folder_id FROM folder_identity WHERE device_id = ? AND browser_folder_id = ?")
+      .get(deviceId, browserFolderId) as { app_folder_id: string } | undefined;
+    return row?.app_folder_id;
+  }
+
+  folderIdentities(deviceId: string): Array<{ browser_folder_id: string; app_folder_id: string; app_exists: boolean }> {
+    return this.db
+      .prepare(
+        `SELECT i.browser_folder_id, i.app_folder_id,
+                (SELECT COUNT(*) FROM folders f WHERE f.id = i.app_folder_id) > 0 AS app_exists
+         FROM folder_identity i WHERE i.device_id = ?`,
+      )
+      .all(deviceId) as unknown as Array<{ browser_folder_id: string; app_folder_id: string; app_exists: boolean }>;
+  }
+
+  /** 目录删除时清身份映射（树删逐目录调用） */
+  deleteFolderIdentitiesForApp(appFolderId: string): void {
+    this.db.prepare("DELETE FROM folder_identity WHERE app_folder_id = ?").run(appFolderId);
+  }
+
+  /** 单条目录身份删除（身份指向已不存在的目录 = 陈旧映射，绑定时清理后退路径解析） */
+  deleteFolderIdentity(deviceId: string, browserFolderId: string): void {
+    this.db.prepare("DELETE FROM folder_identity WHERE device_id = ? AND browser_folder_id = ?").run(deviceId, browserFolderId);
+  }
+
+  /**
+   * D81 复核 R03：按浏览器目录 id 解析**仍然有效**的稳定身份。
+   * 命中且库目录存在 → 返回 appFolderId（调用方必须以它为目标，不得被路径回退改写）；
+   * 命中但库目录已不存在 → 清掉陈旧身份返回 undefined（调用方退路径解析）。
+   */
+  resolveBoundFolderId(deviceId: string, browserFolderId: string): string | undefined {
+    const appFolderId = this.findAppFolderId(deviceId, browserFolderId);
+    if (!appFolderId) return undefined;
+    if (this.getFolder(appFolderId)) return appFolderId;
+    this.deleteFolderIdentity(deviceId, browserFolderId);
+    return undefined;
+  }
+
+  // ---------- D81 §3-D-4：已同步设备停发镜像 ops（D80 Tier2-D） ----------
+  setDeviceSyncEnabled(deviceId: string, enabled: boolean): void {
+    this.ensureDevice(deviceId);
+    this.db.prepare("UPDATE device SET sync_enabled = ? WHERE device_id = ?").run(enabled ? 1 : 0, deviceId);
+  }
+
+  deviceSyncEnabled(deviceId: string): boolean {
+    const row = this.db.prepare("SELECT sync_enabled FROM device WHERE device_id = ?").get(deviceId) as
+      | { sync_enabled: number }
+      | undefined;
+    return row?.sync_enabled === 1;
+  }
+
   // ---------- 浏览器待执行操作（A2-3/A2-4 镜像模式 D20：持久队列，不与 DB 事务共用） ----------
   enqueueBrowserOp(input: {
     deviceId: string;
@@ -1050,6 +1329,9 @@ export class Store {
     targetBrowserParentId?: string | null;
     payload?: unknown;
   }): number {
+    // D81 §3-D-4（D80 Tier2-D）：已同步设备停发一切镜像 ops——浏览器写入由同步引擎
+    // 单一执行器负责（pull 收敛 + 收纳盒残留收敛），镜像队列与引擎双写是竞态病灶。
+    if (this.deviceSyncEnabled(input.deviceId)) return 0;
     const r = this.db
       .prepare(
         `INSERT INTO pending_browser_ops
@@ -1154,102 +1436,22 @@ export class Store {
 
   // ==================== M2/M3：鉴权 / 同步 / 维护 / 偏好 / 供应商 / 设置 ====================
 
-  // ---------- 鉴权 token（DEV-05：摘要存储 + 非密 ID + 生命周期） ----------
-  static hashToken(token: string): string {
-    return createHash("sha256").update(token).digest("hex");
-  }
-
-  /**
-   * 签发令牌：原值只在返回时出现一次，库中仅存 SHA-256 摘要与随机非密 ID。
-   * ttlHours 默认 30 天；null = 不过期（ADMIN_PASSWORD 模式可显式选择）。
-   */
-  createToken(label: string, ttlHours: number | null = 24 * 30): { token: string; tokenId: string } {
-    const token =
-      randomBytes(32).toString("base64url");
-    const tokenId = newId();
-    const expiresAt = ttlHours !== null ? new Date(Date.now() + ttlHours * 3600_000).toISOString() : null;
-    this.db
-      .prepare(
-        "INSERT INTO tokens (token, token_id, token_hash, label, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .run(tokenId, tokenId, Store.hashToken(token), label, now(), expiresAt);
-    return { token, tokenId };
-  }
-
-  /** 校验令牌：摘要匹配 + 未撤销 + 未过期；命中时更新 last_used_at */
-  resolveToken(token: string): { tokenId: string; label: string | null } | undefined {
-    const digest = Store.hashToken(token);
-    const row = this.db
-      .prepare(
-        "SELECT token_id, label, expires_at, revoked_at FROM tokens WHERE token_hash = ?",
-      )
-      .get(digest) as
-      | { token_id: string; label: string | null; expires_at: string | null; revoked_at: string | null }
-      | undefined;
-    if (!row || row.revoked_at) return undefined;
-    if (row.expires_at && row.expires_at <= now()) return undefined;
-    this.db
-      .prepare("UPDATE tokens SET last_used_at = ? WHERE token_id = ?")
-      .run(now(), row.token_id);
-    return { tokenId: row.token_id, label: row.label };
-  }
-
-  /** 兼容旧中间件签名：仅判有效与否 */
-  hasToken(token: string): boolean {
-    return this.resolveToken(token) !== undefined;
-  }
-
-  listTokens(): Array<{
-    token_id: string;
-    label: string | null;
-    created_at: string;
-    expires_at: string | null;
-    revoked_at: string | null;
-    last_used_at: string | null;
-  }> {
-    return this.db
-      .prepare(
-        "SELECT token_id, label, created_at, expires_at, revoked_at, last_used_at FROM tokens ORDER BY created_at DESC",
-      )
-      .all() as unknown as Array<{
-      token_id: string;
-      label: string | null;
-      created_at: string;
-      expires_at: string | null;
-      revoked_at: string | null;
-      last_used_at: string | null;
-    }>;
-  }
-
-  /** 按 ID 撤销（列表展示的是非密 ID，用户无需保存完整 token） */
-  revokeTokenById(tokenId: string): boolean {
-    const r = this.db
-      .prepare("UPDATE tokens SET revoked_at = ? WHERE token_id = ? AND revoked_at IS NULL")
-      .run(now(), tokenId);
-    return Number(r.changes) > 0;
-  }
-
-  /** 按原值撤销（logout：当前请求携带的 token） */
-  revokeByRawToken(token: string): boolean {
-    const r = this.db
-      .prepare("UPDATE tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL")
-      .run(now(), Store.hashToken(token));
-    return Number(r.changes) > 0;
-  }
+  // ---------- 鉴权 token（D67 迁至 registry.ts——令牌是跨用户共享面，主库承载） ----------
 
   // ---------- 变更日志（多端同步） ----------
   /** D50：变更日志落库后的进程内广播钩子（buildApp 挂 SSE 推送；异常绝不影响写入主路径） */
-  onRecorded?: (ch: { entity: string; entity_id: string; op: string; device: string | null }) => void;
+  onRecorded?: (ch: { entity: string; entity_id: string; op: string; device: string | null; user?: string }) => void;
 
   recordChange(entity: string, entityId: string, op: string, payload: unknown, device?: string): void {
-    const dev = device ?? this.syncApplyDevice ?? null;
+    const dev = device ?? currentSyncDevice() ?? null;
     this.db
       .prepare(
         "INSERT INTO changes (entity, entity_id, op, payload, device, created_at) VALUES (?,?,?,?,?,?)",
       )
       .run(entity, entityId, op, JSON.stringify(payload ?? null), dev, now());
     try {
-      this.onRecorded?.({ entity, entity_id: entityId, op, device: dev });
+      // D67：附带变更所属用户（请求上下文解析），SSE 按用户过滤（自建恒 self，全量照旧）
+      this.onRecorded?.({ entity, entity_id: entityId, op, device: dev, user: currentUserId() });
     } catch {
       /* 广播失败不影响主路径；SSE 客户端靠兜底告警自愈 */
     }
@@ -1283,6 +1485,64 @@ export class Store {
     return row.m ?? 0;
   }
 
+  // ---------- D81 §3-C：快照水位 + 库代际 + 过期恢复协议 ----------
+  /** 日志保留边界（changes 最小 id；空日志 null）——pull 据此判定游标缺口 */
+  minChangeId(): number | null {
+    const row = this.db.prepare("SELECT MIN(id) as m FROM changes").get() as { m: number | null };
+    return row.m ?? null;
+  }
+
+  /** 库代际标识（迁移 v15 生成）：DB 恢复/替换后与设备存储的代际不符 → reset_required */
+  syncGeneration(): string {
+    const row = this.db.prepare("SELECT value FROM sync_meta WHERE key = 'generation'").get() as
+      | { value: string }
+      | undefined;
+    return row?.value ?? "";
+  }
+
+  /**
+   * 一致性快照（评审 §3-C）：读事务内取水位 + 全量目录/书签——WAL 下读事务是一致性视图，
+   * 水位与数据同边界；快照完成后设备只拉水位之后的变更（期间写入 id > watermark，下轮 pull 接住）。
+   * 书签仅同步必需字段（不含正文/快照，隐私面不变）。
+   */
+  syncSnapshot(): {
+    folders: FolderRow[];
+    bookmarks: Array<{ id: string; folder_id: string; title: string; url_raw: string; url_canonical: string; pinned: number; status: string; content_revision: number }>;
+    watermark: number;
+    generation: string;
+    minAvailableId: number | null;
+  } {
+    this.db.exec("BEGIN");
+    try {
+      const watermark = this.maxChangeId();
+      const folders = this.listFolders();
+      const bookmarks = this.db
+        .prepare("SELECT id, folder_id, title, url_raw, url_canonical, pinned, status, IFNULL(content_revision,0) AS content_revision FROM bookmarks WHERE archived_into IS NULL")
+        .all() as unknown as Array<{ id: string; folder_id: string; title: string; url_raw: string; url_canonical: string; pinned: number; status: string; content_revision: number }>;
+      const generation = this.syncGeneration();
+      const minAvailableId = this.minChangeId();
+      this.db.exec("COMMIT");
+      return { folders, bookmarks, watermark, generation, minAvailableId };
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  // ---------- D81 §3-D-2：操作回执（opId 幂等，事务内数据修改+日志+回执） ----------
+  opReceipt(opId: string): unknown | null {
+    const row = this.db.prepare("SELECT result FROM sync_op_receipt WHERE op_id = ?").get(opId) as
+      | { result: string }
+      | undefined;
+    return row ? JSON.parse(row.result) : null;
+  }
+
+  saveOpReceipt(opId: string, deviceId: string, result: unknown): void {
+    this.db
+      .prepare("INSERT OR REPLACE INTO sync_op_receipt (op_id, device_id, result, created_at) VALUES (?,?,?,?)")
+      .run(opId, deviceId, JSON.stringify(result ?? null), now());
+  }
+
   // ---------- 操作审计日志（D58：认证/令牌/配置/发布四类事件） ----------
   /**
    * 记一条审计事件。红线：detail 是一行人类可读摘要，
@@ -1298,9 +1558,9 @@ export class Store {
   listAudit(limit = 100): Array<{ id: number; kind: string; detail: string | null; source: string | null; created_at: string }> {
     return this.db
       .prepare(
-        `SELECT id, kind, detail, source, created_at FROM audit_log ORDER BY id DESC LIMIT ${Math.min(limit, 500)}`,
+        "SELECT id, kind, detail, source, created_at FROM audit_log ORDER BY created_at DESC, id DESC LIMIT ?",
       )
-      .all() as unknown as Array<{
+      .all(Math.min(Math.max(1, Math.trunc(limit)), 2000)) as unknown as Array<{
       id: number;
       kind: string;
       detail: string | null;
@@ -1331,6 +1591,12 @@ export class Store {
         "DELETE FROM audit_log WHERE id <= (SELECT MAX(id) - 1000 FROM audit_log)",
       ),
     };
+  }
+
+  /** D81：操作回执保留裁剪（7 天，与 idempotency 同口径；opId 幂等窗口足够覆盖重试队列寿命） */
+  pruneOpReceipts(): number {
+    const cutoff = new Date(Date.now() - 7 * 86400_000).toISOString();
+    return Number(this.db.prepare("DELETE FROM sync_op_receipt WHERE created_at < ?").run(cutoff).changes);
   }
 
   // ---------- 维护报告 ----------
@@ -1439,6 +1705,26 @@ export class Store {
       .sort((a, b) => b[1] - a[1])
       .slice(0, limit)
       .map(([k]) => k);
+  }
+
+  /** D76：每目录代表书签（置顶优先→新入库；排除用户归档与合并软归档）——整理 prompt 用内容
+   *  归纳目录语义，不再只给扁平目录名让模型凭字面猜（「在线工具」吞掉原生远控客户端的教训） */
+  folderSampleTitles(perFolder = 3): Map<string, string[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT folder_id, title FROM (
+           SELECT folder_id, title, ROW_NUMBER() OVER (PARTITION BY folder_id ORDER BY pinned DESC, added_at DESC) AS rn
+           FROM bookmarks WHERE archived_into IS NULL AND status <> 'archived' AND title <> ''
+         ) WHERE rn <= ?`,
+      )
+      .all(perFolder) as Array<{ folder_id: string; title: string }>;
+    const out = new Map<string, string[]>();
+    for (const r of rows) {
+      const arr = out.get(r.folder_id) ?? [];
+      arr.push(r.title);
+      out.set(r.folder_id, arr);
+    }
+    return out;
   }
 
   // ---------- BYOK 供应商配置 ----------
@@ -1928,15 +2214,35 @@ export class Store {
       .prepare(
         "INSERT INTO inbox_state (bookmark_id, state, confidence, reason, attempts, updated_at) VALUES (?,?,?,?,?,?) " +
           "ON CONFLICT(bookmark_id) DO UPDATE SET state=excluded.state, confidence=excluded.confidence, reason=excluded.reason, " +
-          "attempts=excluded.attempts, updated_at=excluded.updated_at",
+          "attempts=excluded.attempts, updated_at=excluded.updated_at, " +
+          // D78：重回收纳盒（pending）= 新一轮生命周期 → 清复核标记，归位后重新自检（D77）
+          "reviewed_at = CASE WHEN excluded.state = 'pending' THEN NULL ELSE inbox_state.reviewed_at END",
       )
       .run(bookmarkId, state, confidence ?? null, reason ?? null, attempts ?? 0, now());
   }
 
-  getInboxState(bookmarkId: string): { state: string; confidence: number | null; reason: string | null; attempts: number } | undefined {
-    return this.db.prepare("SELECT state, confidence, reason, attempts FROM inbox_state WHERE bookmark_id = ?").get(bookmarkId) as
-      | { state: string; confidence: number | null; reason: string | null; attempts: number }
+  getInboxState(bookmarkId: string): { state: string; confidence: number | null; reason: string | null; attempts: number; reviewed_at: string | null } | undefined {
+    return this.db.prepare("SELECT state, confidence, reason, attempts, reviewed_at FROM inbox_state WHERE bookmark_id = ?").get(bookmarkId) as
+      | { state: string; confidence: number | null; reason: string | null; attempts: number; reviewed_at: string | null }
       | undefined;
+  }
+
+  /** D77：分类自检候选——自动归位（placed）且未复核；手动归位会 clearInboxState → 天然排除。
+   *  排除私密/软归档；新归位优先（updated_at DESC） */
+  classificationReviewCandidates(limit: number): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT s.bookmark_id FROM inbox_state s JOIN bookmarks b ON b.id = s.bookmark_id
+         WHERE s.state = 'placed' AND s.reviewed_at IS NULL AND b.is_private = 0 AND b.archived_into IS NULL
+         ORDER BY s.updated_at DESC LIMIT ?`,
+      )
+      .all(limit) as Array<{ bookmark_id: string }>;
+    return rows.map((r) => r.bookmark_id);
+  }
+
+  /** D77：复核终结标记（kept/moved 都算）——一次性，防 LLM 非确定性振荡 */
+  markClassificationReviewed(bookmarkId: string): void {
+    this.db.prepare("UPDATE inbox_state SET reviewed_at = ? WHERE bookmark_id = ?").run(now(), bookmarkId);
   }
 
   clearInboxState(bookmarkId: string): void {

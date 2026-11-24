@@ -156,4 +156,42 @@ describe("A2 收件箱全链路：映射 → 处理 → 镜像操作入队", () 
     ).json()) as { ops: unknown[] };
     expect(ops.ops.length).toBeLessThanOrEqual(1); // 幂等：不因重复事件堆操作
   });
+
+  it("D78 已归位条目再丢入投递口 → 库条目移回收纳盒重走流水线（不弹回节点）", async () => {
+    env = makeEnv(null);
+    await env.app.request("/api/v1/inbox/setup", { method: "POST" });
+    const payload = {
+      deviceId: "device-redrop",
+      browserBookmarkId: "node-redrop",
+      url: "https://github.com/redrop/repo",
+      title: "再投递测试",
+    };
+    const mapped = (await (
+      await env.app.request("/api/v1/inbox/map", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+    ).json()) as { bookmarkId: string };
+    await env.app.request("/api/v1/inbox/process", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bookmarkIds: [mapped.bookmarkId], deviceId: "device-redrop" }),
+    });
+    const inboxId = env.store.inboxFolder()!.id;
+    expect(env.store.getBookmark(mapped.bookmarkId)?.folder_id).not.toBe(inboxId); // 已归位（github 规则→开发）
+    env.store.markClassificationReviewed(mapped.bookmarkId); // 假设已复核（D77）
+
+    // 用户把同一节点再次丢入投递口（onInboxEvent → flush → map）
+    await env.app.request("/api/v1/inbox/map", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const after = env.store.getBookmark(mapped.bookmarkId);
+    expect(after?.folder_id).toBe(inboxId); // ★ 旧实现：留在原目录 + 补「移出」镜像把节点弹回
+    const st = env.store.getInboxState(mapped.bookmarkId);
+    expect(st?.state).toBe("pending"); // 重走流水线
+    expect(st?.reviewed_at).toBeNull(); // 新一轮生命周期 → 复核标记清零（D77/D78）
+  });
 });

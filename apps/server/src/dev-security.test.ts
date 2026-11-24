@@ -15,6 +15,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fixturePassword, makeEnv, type TestEnv } from "./test-env";
 import { Store } from "./store";
+import { SELF_USER_ID } from "./tenancy";
 import {
   isForbiddenIp,
   parseIpv6,
@@ -434,27 +435,27 @@ describe("DEV-04 出站网络防护", () => {
 describe("DEV-05 令牌生命周期", () => {
   it("SEC-10：库内只有摘要（备份/查询无 bearer 明文）；过期令牌 401", async () => {
     env = makeEnv(null, false, { adminPassword: fixturePassword("tokenTest") });
-    const { token } = env.store.createToken("device-x", 24);
-    const raw = env.store.db.prepare("SELECT token, token_hash FROM tokens").get() as {
+    const { token } = env.registry.createToken(SELF_USER_ID, "device-x", 24);
+    const raw = env.registry.db.prepare("SELECT token, token_hash FROM tokens").get() as {
       token: string;
       token_hash: string;
     };
     expect(raw.token).not.toContain(token.slice(0, 20)); // 无明文
     expect(raw.token_hash).toHaveLength(64);
-    expect(JSON.stringify(env.store.listTokens())).not.toContain(token);
-    expect(env.store.hasToken(token)).toBe(true);
+    expect(JSON.stringify(env.registry.listTokens())).not.toContain(token);
+    expect(env.registry.hasToken(token)).toBe(true);
 
     // 过期令牌：签发 1 小时 TTL 的过去时间 → 无效
-    const expired = env.store.createToken("device-exp", 0);
+    const expired = env.registry.createToken(SELF_USER_ID, "device-exp", 0);
     // 手动把过期时间拨回过去
-    env.store.db
+    env.registry.db
       .prepare("UPDATE tokens SET expires_at = ? WHERE token_id = ?")
       .run(new Date(Date.now() - 1000).toISOString(), expired.tokenId);
-    expect(env.store.hasToken(expired.token)).toBe(false);
+    expect(env.registry.hasToken(expired.token)).toBe(false);
 
     // 撤销后失效
-    env.store.revokeTokenById(expired.tokenId);
-    expect(env.store.hasToken(expired.token)).toBe(false);
+    env.registry.revokeTokenById(expired.tokenId);
+    expect(env.registry.hasToken(expired.token)).toBe(false);
   });
 
   it("DEV-05：API 层撤销其他设备后该设备 401（生产语义）", async () => {

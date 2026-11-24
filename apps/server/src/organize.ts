@@ -25,7 +25,7 @@
  */
 import { canonicalizeUrl, classifyByRules, isPrivacyDomain, isSensitiveHost, PRIVATE_FOLDER_NAME } from "@mf/shared";
 import { isLlmContentModeration, type LlmClient } from "@mf/ai/llm-client";
-import type { Store } from "./store";
+import type { Store, BookmarkRow } from "./store";
 import { now, newId } from "./db";
 
 const MAX_SCOPE = 500;
@@ -37,6 +37,17 @@ interface PendingItem {
   title: string;
   url: string;
   folderId: string;
+}
+
+/** D89 计划作用域：全库整理不传 allowed/createParent；目录级整理限定子树并在该目录下建子目录 */
+interface PlanScopeOptions {
+  scopeLabel: string;
+  /** 可选目标目录 ID 集合（null/undefined = 全库任意目录） */
+  allowedFolderIds?: Set<string>;
+  /** 新建目录挂载父级（null = 根级） */
+  createParentId?: string | null;
+  /** 目录语义上下文（D76 口径：路径 + 代表书签） */
+  folderContext?: { context: string; names: string[] };
 }
 
 export interface OrganizeActionView {
@@ -51,6 +62,8 @@ export interface OrganizeActionView {
   folderName?: string;
   /** createFolder 动作：计划创建的 folderId；move 动作引用它作为稳定目标（同名可区分） */
   plannedFolderId?: string;
+  /** D89 目录级整理：新建子目录挂载的父目录（缺省=根级，与全库整理一致） */
+  parentFolderId?: string;
 }
 
 /**
@@ -181,8 +194,6 @@ export class OrganizeService {
    * 返回 applied 结果与只读明细。无动作 → answered（仅指引/说明）。
    */
   async handleMessage(message: string): Promise<OrganizeRunResult> {
-    const sessionId = newId();
-
     let answer = "";
     let proposal: OrganizeActionView[] | null = null;
 
@@ -200,6 +211,82 @@ export class OrganizeService {
         "当前支持：①「整理」/「重新分类」——按内容重排书签（可指定范围，如“整理 开发 文件夹”）；②「合并重复」——清理规范化后重复的 URL。请告诉我你想做什么。";
     }
 
+    return this.finish(message, answer, proposal);
+  }
+
+  /**
+   * D89 目录级重新整理：范围 = 该目录（默认含子目录），目标目录限定在子树内，
+   * 允许 AI 在该目录下新建子目录；永不跨出子树、永不删除/归档（红线③）。
+   * 与全库重整理共用计划/提交内核，版本可整批撤销（D27）。
+   */
+  async reclassifyFolder(
+    folderId: string,
+    opts: { includeSubfolders?: boolean } = {},
+  ): Promise<OrganizeRunResult> {
+    const folder = this.store.getFolder(folderId);
+    if (!folder || folder.is_system_inbox === 1) throw new Error("folder_not_found");
+    const includeSubfolders = opts.includeSubfolders !== false;
+    const subtreeIds = includeSubfolders ? this.store.folderSubtreeIds(folderId) : [folderId];
+    // 已归档条目不在当前管理视图内，目录级整理不打扰（状态保持归档）
+    const scope = this.store
+      .listBookmarks({ folderIds: subtreeIds, limit: MAX_SCOPE })
+      .filter((b) => b.status !== "archived");
+    const subtreeIdSet = new Set(subtreeIds);
+    const allowed = this.store
+      .listFolders()
+      .filter((f) => subtreeIdSet.has(f.id) && f.is_system_inbox !== 1);
+    const allowedIds = new Set(allowed.map((f) => f.id));
+    const folderContext = this.buildSubtreeContext(folder, allowed);
+    const { proposal, summary } = await this.planReclassifyRows(scope, {
+      scopeLabel: folder.name,
+      allowedFolderIds: allowedIds,
+      createParentId: folderId,
+      folderContext,
+    });
+    return this.finish(`整理目录「${folder.name}」`, summary, proposal);
+  }
+
+  /**
+   * 目录语义上下文（D76 同口径，路径相对被整理目录）：让模型按代表书签判断子目录收录范围，
+   * 而不是只凭目录名猜测。根 = 被整理目录自身。
+   */
+  private buildSubtreeContext(
+    root: { id: string; name: string },
+    folders: Array<{ id: string; parent_id: string | null; name: string }>,
+  ): { context: string; names: string[] } {
+    const byId = new Map(folders.map((f) => [f.id, f] as const));
+    const samples = this.store.folderSampleTitles(3);
+    const pathCache = new Map<string, string>();
+    const pathOf = (id: string, visiting = new Set<string>()): string => {
+      const hit = pathCache.get(id);
+      if (hit !== undefined) return hit;
+      if (id === root.id) return root.name;
+      const f = byId.get(id);
+      if (!f) return "";
+      // 环守卫：parent_id 数据异常时不无限递归（folderSubtreeIds 已防环，此处防御）
+      if (visiting.has(id)) return f.name;
+      visiting.add(id);
+      const p =
+        f.parent_id && byId.has(f.parent_id) ? `${pathOf(f.parent_id, visiting)}/${f.name}` : f.name;
+      pathCache.set(id, p);
+      return p;
+    };
+    const context = folders
+      .map(
+        (f) =>
+          `${pathOf(f.id)}：${(samples.get(f.id) ?? []).map((t) => t.slice(0, 40)).join("、") || "（空目录）"}`,
+      )
+      .join("\n");
+    return { context, names: folders.map((f) => f.name) };
+  }
+
+  /** 计划会话落库 + 直接提交（D27）：全库与目录级整理共用 */
+  private finish(
+    message: string,
+    answer: string,
+    proposal: OrganizeActionView[] | null,
+  ): OrganizeRunResult {
+    const sessionId = newId();
     // A3-2：动作保存稳定实体 ID + 原始状态（folder 快照）+ 修订版本
     // 冲突定义：提交时书签的 content_revision ≠ 计划时 → 用户手动改过 → 跳过
     const touchedIds = (proposal ?? [])
@@ -269,9 +356,28 @@ export class OrganizeService {
       }
       scope = this.store.listBookmarks({ folderId: folder.id, limit: MAX_SCOPE });
     }
+    const { proposal, summary } = await this.planReclassifyRows(scope, {
+      scopeLabel: scopeFolder ?? "全库",
+    });
+    return { proposal, summary, scope };
+  }
 
+  /** 计划内核（全库 / 目录级共用）：规则命中 → LLM 批量分类 → 只产出 move/createFolder */
+  private async planReclassifyRows(
+    scope: BookmarkRow[],
+    opts: PlanScopeOptions,
+  ): Promise<{ proposal: OrganizeActionView[]; summary: string }> {
     const proposal: OrganizeActionView[] = [];
     const pending: PendingItem[] = [];
+    // D89 目录级：目标目录限定在子树内（含被整理目录自身——归到自身即 no-op）
+    const allowedNames = opts.allowedFolderIds
+      ? new Set(
+          this.store
+            .listFolders()
+            .filter((f) => opts.allowedFolderIds!.has(f.id) && f.is_system_inbox !== 1)
+            .map((f) => f.name),
+        )
+      : null;
 
     for (const bm of scope) {
       // D43 事前旁路：敏感宿主不进 LLM 批次（供应商审核整包拒收），保持原位不动
@@ -290,7 +396,9 @@ export class OrganizeService {
         ? classifyByRules(parsed.registrableDomain, bm.title)
         : null;
       if (rule && rule.source === "domain_map") {
-        const target = this.ensureFolder(rule.category, proposal);
+        // 目录级整理只接受子树内已有目录；规则指向外部目录时保持原位（不跨出子树）
+        if (allowedNames && !allowedNames.has(rule.category)) continue;
+        const target = this.ensureFolder(rule.category, proposal, opts.createParentId ?? null, opts.allowedFolderIds);
         const from = this.store.getFolder(bm.folder_id);
         if (from && from.name !== rule.category) {
           proposal.push({
@@ -312,10 +420,12 @@ export class OrganizeService {
     const prefs = this.store.topCategories();
     let quarantined: PendingItem[] = [];
     if (pending.length > 0 && llm) {
-      const folderNames = this.store
-        .listFolders()
-        .filter((f) => !f.is_system_inbox)
-        .map((f) => f.name);
+      const folderNames = opts.allowedFolderIds
+        ? [...(allowedNames ?? [])]
+        : this.store
+            .listFolders()
+            .filter((f) => !f.is_system_inbox)
+            .map((f) => f.name);
       try {
         const userRules = this.store.getOrganizeRules();
         const budget = { calls: 0 };
@@ -326,17 +436,26 @@ export class OrganizeService {
           prefs,
           userRules,
           budget,
+          opts.folderContext?.context,
+          opts.scopeLabel,
         );
         for (const { item, category } of classified) {
-          const target = this.ensureFolder(category, proposal);
+          const categoryName = category.trim();
+          // 目录名卫生：拒绝路径形态/超长/空名（模型偶尔返回「一级/二级」或整句），不据此建目录
+          if (!categoryName || categoryName.includes("/") || categoryName.length > 40) continue;
+          // 目录级：模型可能自拟新目录名（允许在其下新建）；已有目录名必须在子树内
+          if (allowedNames && !allowedNames.has(categoryName) && this.store.findFolderByName(categoryName)) {
+            continue;
+          }
+          const target = this.ensureFolder(categoryName, proposal, opts.createParentId ?? null, opts.allowedFolderIds);
           const from = this.store.getFolder(item.folderId);
-          if (from && from.name !== category) {
+          if (from && from.name !== categoryName) {
             proposal.push({
               type: "move",
               bookmarkId: item.id,
               bookmarkTitle: item.title,
               fromFolder: from.name,
-              toFolder: category,
+              toFolder: categoryName,
               plannedFolderId: target,
             });
           }
@@ -355,11 +474,13 @@ export class OrganizeService {
       quarantined.length > 0
         ? `其中 ${quarantined.length} 条被供应商内容审核拒收，已自动标私密并移入「${PRIVATE_FOLDER_NAME}」（版本历史可撤销）。`
         : "";
+    const scopeNote = opts.allowedFolderIds ? `目录「${opts.scopeLabel}」及其子目录` : "全库";
+    const llmNote = !llm && pending.length > 0 ? "未配置模型：仅应用规则分类，其余保持原位。" : "";
     const summary =
       proposal.length > 0
-        ? `共扫描 ${scope.length} 条，已直接归位 ${proposal.length} 项变更；每一次挪动都记入版本历史，可整批撤销（D27）。${quarantineNote}`
-        : `共扫描 ${scope.length} 条，分类结果与现有目录一致，无需挪动。${quarantineNote}`;
-    return { proposal, summary, scope };
+        ? `${scopeNote}共扫描 ${scope.length} 条，已直接归位 ${proposal.length} 项变更；每一次挪动都记入版本历史，可整批撤销（D27）。${quarantineNote}${llmNote}`
+        : `${scopeNote}共扫描 ${scope.length} 条，分类结果与现有目录一致，无需挪动。${quarantineNote}${llmNote}`;
+    return { proposal, summary };
   }
 
   /**
@@ -377,6 +498,8 @@ export class OrganizeService {
     prefs: unknown[],
     userRules: unknown[],
     budget: { calls: number },
+    folderContext?: string,
+    scopeLabel?: string,
   ): Promise<{ classified: Array<{ item: PendingItem; category: string }>; quarantined: PendingItem[] }> {
     if (items.length === 0) return { classified: [], quarantined: [] };
     try {
@@ -387,11 +510,13 @@ export class OrganizeService {
         {
           role: "system",
           content:
-            "你是书签分类助手。现有目录：" +
-            JSON.stringify(folderNames) +
+            "你是书签分类助手。" +
+            (folderContext
+              ? `现有目录（格式「路径：代表书签」——按代表书签归纳各目录的实际收录范围，不要仅凭目录名字面猜测）：\n${folderContext}\n`
+              : `现有目录：${JSON.stringify(folderNames)}`) +
             (prefs.length > 0 ? `。用户常用目录（优先参考）：${JSON.stringify(prefs)}` : "") +
             (userRules.length > 0 ? `。用户整理偏好（必须遵守）：${JSON.stringify(userRules)}` : "") +
-            '。为每条书签选择目录（可建议新目录）。只返回 JSON {"results":[{"index":0,"category":"...","confidence":0.0}]}。',
+            `。为每条书签选择目录（优先使用现有目录；仅当没有合适目录时才建议新目录${folderContext && scopeLabel ? `，新目录将创建在「${scopeLabel}」下` : ""}）。只返回 JSON {"results":[{"index":0,"category":"...","confidence":0.0}]}。`,
         },
         {
           role: "user",
@@ -425,8 +550,8 @@ export class OrganizeService {
         return { classified: [], quarantined: [] };
       }
       const mid = Math.ceil(items.length / 2);
-      const left = await this.classifyPending(llm, items.slice(0, mid), folderNames, prefs, userRules, budget);
-      const right = await this.classifyPending(llm, items.slice(mid), folderNames, prefs, userRules, budget);
+      const left = await this.classifyPending(llm, items.slice(0, mid), folderNames, prefs, userRules, budget, folderContext, scopeLabel);
+      const right = await this.classifyPending(llm, items.slice(mid), folderNames, prefs, userRules, budget, folderContext, scopeLabel);
       return {
         classified: [...left.classified, ...right.classified],
         quarantined: [...left.quarantined, ...right.quarantined],
@@ -446,16 +571,43 @@ export class OrganizeService {
     };
   }
 
-  private ensureFolder(name: string, proposal: OrganizeActionView[]): string {
-    const existing = this.store.findFolderByName(name);
-    if (existing && !existing.is_system_inbox) return existing.id;
-    // proposal 里已计划创建
+  private ensureFolder(
+    name: string,
+    proposal: OrganizeActionView[],
+    parentId: string | null = null,
+    scopeIds?: Set<string>,
+  ): string {
+    // D89：目录级整理先按「子树任意深度」解析同名现有目录——此前只查直接子级，
+    // 模型返回孙级目录名（如 工作/开发/前端 的「前端」）会在父级下建出重复目录（D55/D71 病灶）。
+    if (scopeIds) {
+      const inScope = this.store
+        .listFolders()
+        .find((f) => scopeIds.has(f.id) && f.name === name && f.is_system_inbox !== 1);
+      if (inScope) return inScope.id;
+    } else if (parentId) {
+      const sibling = this.store
+        .listFolders()
+        .find((f) => f.parent_id === parentId && f.name === name && f.is_system_inbox !== 1);
+      if (sibling) return sibling.id;
+    } else {
+      const existing = this.store.findFolderByName(name);
+      if (existing && !existing.is_system_inbox) return existing.id;
+    }
+    // proposal 里已计划创建（同一父级下同名只建一次）
     const planned = proposal.find(
-      (a) => a.type === "createFolder" && a.folderName === name,
+      (a) =>
+        a.type === "createFolder" &&
+        a.folderName === name &&
+        (a.parentFolderId ?? null) === parentId,
     );
     if (planned?.plannedFolderId) return planned.plannedFolderId;
     const plannedFolderId = newId();
-    proposal.push({ type: "createFolder", folderName: name, plannedFolderId });
+    proposal.push({
+      type: "createFolder",
+      folderName: name,
+      plannedFolderId,
+      ...(parentId ? { parentFolderId: parentId } : {}),
+    });
     return plannedFolderId;
   }
 
@@ -558,11 +710,23 @@ export class OrganizeService {
       const plannedToActual = new Map<string, string>();
       for (const action of proposal) {
         if (action.type === "createFolder" && action.folderName && action.plannedFolderId) {
-          const existing = this.store.findFolderByName(action.folderName);
+          const parentId = action.parentFolderId ?? null;
+          const existing = parentId
+            ? this.store
+                .listFolders()
+                .find((f) => f.parent_id === parentId && f.name === action.folderName && f.is_system_inbox !== 1)
+            : this.store.findFolderByName(action.folderName);
           if (existing && !existing.is_system_inbox) {
             plannedToActual.set(action.plannedFolderId, existing.id);
           } else {
-            const created = this.store.createFolder(action.folderName, null, "ai_created");
+            const parent = parentId ? this.store.getFolder(parentId) : undefined;
+            const created = this.store.createFolder(
+              action.folderName,
+              parentId,
+              "ai_created",
+              false,
+              parent?.root ?? "bar",
+            );
             plannedToActual.set(action.plannedFolderId, created.id);
             versionActions.push({ type: "createFolder", folderId: created.id, name: created.name });
           }
@@ -572,7 +736,10 @@ export class OrganizeService {
       for (const action of proposal) {
         if (action.type === "move" && action.bookmarkId) {
           const targetId =
-            (action.plannedFolderId ? plannedToActual.get(action.plannedFolderId) : undefined) ??
+            (action.plannedFolderId
+              ? plannedToActual.get(action.plannedFolderId) ??
+                this.store.getFolder(action.plannedFolderId)?.id
+              : undefined) ??
             (action.toFolder ? this.store.findFolderByName(action.toFolder)?.id : undefined);
           if (!targetId) continue;
           const before = this.store.getBookmark(action.bookmarkId);
@@ -630,7 +797,10 @@ export class OrganizeService {
             continue;
           }
           const targetId =
-            (action.plannedFolderId ? plannedToActual.get(action.plannedFolderId) : undefined) ??
+            (action.plannedFolderId
+              ? plannedToActual.get(action.plannedFolderId) ??
+                this.store.getFolder(action.plannedFolderId)?.id
+              : undefined) ??
             (action.toFolder ? this.store.findFolderByName(action.toFolder)?.id : undefined);
           const needMove = Boolean(targetId && before.folder_id !== targetId);
           if (before.is_private === 1 && !needMove) continue; // 幂等：已是目标态

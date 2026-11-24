@@ -17,6 +17,7 @@
  */
 import type { Context } from "hono";
 import type { Store } from "./store";
+import { SERVER_VERSION } from "./version";
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(["2025-03-26", "2025-06-18"]);
 const FALLBACK_PROTOCOL_VERSION = "2025-03-26";
@@ -163,7 +164,7 @@ export async function handleMcpRequest(store: Store, c: Context): Promise<Respon
       rpcResult(id, {
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "my-favorites-materials", version: "0.1.0" },
+        serverInfo: { name: "my-favorites-materials", version: SERVER_VERSION },
         instructions:
           "my-favorites 资料库：用户收藏内容的 AI 自动分类库。先 materials_search/materials_recent 定位，再 materials_get 读取全文。",
       }),

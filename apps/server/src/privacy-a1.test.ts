@@ -274,12 +274,12 @@ describe("A1-4 抓取网络访问策略", () => {
     }
   });
 
-  it("环境变量构建：MF_FORM=cloud → cloud；MF_ALLOW_INTRANET_FETCH=1 → allowlist", () => {
+  it("环境变量构建：部署名称不改变抓取策略；MF_ALLOW_INTRANET_FETCH=1 → allowlist", () => {
     const savedForm = process.env.MF_FORM;
     const savedAllow = process.env.MF_ALLOW_INTRANET_FETCH;
     try {
       process.env.MF_FORM = "cloud";
-      expect(fetchGuardConfigFromEnv().mode).toBe("cloud");
+      expect(fetchGuardConfigFromEnv().mode).toBe("selfhosted_strict");
       process.env.MF_FORM = "self-hosted";
       expect(fetchGuardConfigFromEnv().mode).toBe("selfhosted_strict");
       process.env.MF_ALLOW_INTRANET_FETCH = "1";

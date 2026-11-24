@@ -10,6 +10,8 @@
  * 隐私域书签不自动探测（探测行为本身会向第三方暴露该域名在册）。
  */
 import type { Store, BookmarkRow } from "./store";
+import type { Registry } from "./registry";
+import { runAsUser } from "./tenancy";
 import {
   fetchGuardConfigFromEnv,
   guardedFetch,
@@ -263,15 +265,22 @@ export class MaintenanceService {
  * D58：增长表保留裁剪（常驻，不依赖 MF_MAINTENANCE_INTERVAL_HOURS——
  * 未设 env 的部署同样不能让 changes/events/idempotency 无限增长）。
  * 启动即跑一次 + 每日一次；幂等可重跑。
+ * D67：传入 registry 时逐用户库裁剪（自建单用户等价于原行为）。
  */
-export function startRetentionPrune(store: Store): void {
+export function startRetentionPrune(store: Store, registry?: Registry): void {
   const prune = (): void => {
-    try {
-      const r = store.pruneRetention();
-      const total = r.changes + r.events + r.idempotency + r.audit;
-      if (total > 0) console.log(`[retention] pruned ${total} rows (${JSON.stringify(r)})`);
-    } catch (err) {
-      console.error("[retention] prune failed:", String(err));
+    const users = registry ? registry.listUserIds() : ["self"];
+    for (const uid of users) {
+      runAsUser(uid, () => {
+        try {
+          const r = store.pruneRetention();
+          const receipts = store.pruneOpReceipts(); // D81：opId 回执 7 天裁剪
+          const total = r.changes + r.events + r.idempotency + r.audit + receipts;
+          if (total > 0) console.log(`[retention] pruned ${total} rows (${JSON.stringify({ ...r, receipts })})`);
+        } catch (err) {
+          console.error("[retention] prune failed:", String(err));
+        }
+      });
     }
   };
   prune();
@@ -284,14 +293,23 @@ export function startRetentionPrune(store: Store): void {
  * 进程重启丢在途、LLM 当时不可用都会让摘要永久缺失；D57 教训：自动承诺必须有兜底）。
  * 启动即跑一次 + 每 30 分钟一次；每次最多 5 条（涓流，不与整理抢 LLM 配额）；
  * 无 LLM 配置时 backfillSummaries 返回 0（零网络零开销）。
+ * D67：传入 registry 时逐用户库执行。
  */
-export function startSummaryBackfill(pipeline: { backfillSummaries(limit?: number): number }): void {
+export function startSummaryBackfill(
+  pipeline: { backfillSummaries(limit?: number): number },
+  registry?: Registry,
+): void {
   const kick = (): void => {
-    try {
-      const kicked = pipeline.backfillSummaries(5);
-      if (kicked > 0) console.log(`[summary-backfill] kicked ${kicked} summaries`);
-    } catch (err) {
-      console.error("[summary-backfill] sweep failed:", String(err));
+    const users = registry ? registry.listUserIds() : ["self"];
+    for (const uid of users) {
+      runAsUser(uid, () => {
+        try {
+          const kicked = pipeline.backfillSummaries(5);
+          if (kicked > 0) console.log(`[summary-backfill] kicked ${kicked} summaries`);
+        } catch (err) {
+          console.error("[summary-backfill] sweep failed:", String(err));
+        }
+      });
     }
   };
   kick();
@@ -302,30 +320,77 @@ export function startSummaryBackfill(pipeline: { backfillSummaries(limit?: numbe
  * D65 资料分类回灌调度：已有 L1 摘要但缺分类的资料条目，涓流补分类。
  * 启动即跑一次 + 每 30 分钟一次（≤5 条/轮，不与整理抢 LLM 配额）；
  * 无 LLM 配置时 backfillCategories 返回 0（零网络零开销）。
+ * D67：传入 registry 时逐用户库执行。
  */
-export function startCategoryBackfill(pipeline: { backfillCategories(limit?: number): Promise<number> }): void {
+export function startCategoryBackfill(
+  pipeline: { backfillCategories(limit?: number): Promise<number> },
+  registry?: Registry,
+): void {
   const kick = (): void => {
-    void pipeline
-      .backfillCategories(5)
-      .then((kicked) => {
-        if (kicked > 0) console.log(`[category-backfill] classified ${kicked} materials`);
-      })
-      .catch((err) => console.error("[category-backfill] sweep failed:", String(err)));
+    const users = registry ? registry.listUserIds() : ["self"];
+    for (const uid of users) {
+      runAsUser(uid, () => {
+        void pipeline
+          .backfillCategories(5)
+          .then((kicked) => {
+            if (kicked > 0) console.log(`[category-backfill] classified ${kicked} materials`);
+          })
+          .catch((err) => console.error("[category-backfill] sweep failed:", String(err)));
+      });
+    }
+  };
+  kick();
+  setInterval(kick, 1800_000);
+}
+
+/**
+ * D77 分类自检 patrol：自动归位条目的一次性复核涓流（启动 + 30min，≤10 条/轮）。
+ * 兜底摘要后钩子（fire-and-forget 遇重启丢失）与旧 prompt 时代存量；无 LLM 零开销。
+ * 仿 D63/D65 常驻模式——不挂可选开关，自动承诺必须有兜底定时器（D57 教训）。
+ */
+export function startClassificationReview(
+  pipeline: { backfillPlacementReviews(limit?: number): Promise<number> },
+  registry?: Registry,
+): void {
+  const kick = (): void => {
+    const users = registry ? registry.listUserIds() : ["self"];
+    for (const uid of users) {
+      runAsUser(uid, () => {
+        void pipeline
+          .backfillPlacementReviews(10)
+          .then((done) => {
+            if (done > 0) console.log(`[placement-review] reviewed ${done} placements`);
+          })
+          .catch((err) => console.error("[placement-review] sweep failed:", String(err)));
+      });
+    }
   };
   kick();
   setInterval(kick, 1800_000);
 }
 
 /** 进程内调度器（自建端 compose 通过 env 启用；默认关闭便于测试） */
-export function startScheduler(store: Store, maintenance: MaintenanceService, pipeline?: { processInbox(bookmarkIds: string[], inboxFolderId: string, opts?: { deviceId?: string }): Promise<unknown> }): void {
+export function startScheduler(
+  store: Store,
+  maintenance: MaintenanceService,
+  pipeline?: { processInbox(bookmarkIds: string[], inboxFolderId: string, opts?: { deviceId?: string }): Promise<unknown> },
+  registry?: Registry,
+): void {
   const hours = Number(process.env.MF_MAINTENANCE_INTERVAL_HOURS ?? 0);
   if (hours <= 0) return;
+  const users = (): string[] => (registry ? registry.listUserIds() : ["self"]);
   const run = async () => {
-    try {
-      await maintenance.runLinkCheck(30);
-      maintenance.runDuplicateScan();
-    } catch (err) {
-      console.error("[maintenance] scheduled run failed:", String(err));
+    for (const uid of users()) {
+      runAsUser(uid, () => {
+        void (async () => {
+          try {
+            await maintenance.runLinkCheck(30);
+            maintenance.runDuplicateScan();
+          } catch (err) {
+            console.error("[maintenance] scheduled run failed:", String(err));
+          }
+        })();
+      });
     }
   };
   setInterval(() => void run(), hours * 3600_000);
@@ -335,19 +400,25 @@ export function startScheduler(store: Store, maintenance: MaintenanceService, pi
   // （浏览器事件 + 定时兜底双保险；无 deviceId = 为全部已注册设备入队镜像）
   if (pipeline) {
     const sweep = async (): Promise<void> => {
-      try {
-        const inbox = store.inboxFolder();
-        if (!inbox) return;
-        const ids = store
-          .listInboxWithState()
-          .filter((i) => i.state === "pending" || i.state === "retry")
-          .map((i) => i.id);
-        if (ids.length > 0) {
-          await pipeline.processInbox(ids, inbox.id, {});
-          console.log(`[inbox] sweep processed ${ids.length}`);
-        }
-      } catch (err) {
-        console.error("[inbox] sweep failed:", String(err));
+      for (const uid of users()) {
+        runAsUser(uid, () => {
+          void (async () => {
+            try {
+              const inbox = store.inboxFolder();
+              if (!inbox) return;
+              const ids = store
+                .listInboxWithState()
+                .filter((i) => i.state === "pending" || i.state === "retry")
+                .map((i) => i.id);
+              if (ids.length > 0) {
+                await pipeline.processInbox(ids, inbox.id, {});
+                console.log(`[inbox] sweep processed ${ids.length}`);
+              }
+            } catch (err) {
+              console.error("[inbox] sweep failed:", String(err));
+            }
+          })();
+        });
       }
     };
     setInterval(() => void sweep(), 3600_000);

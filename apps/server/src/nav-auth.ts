@@ -7,30 +7,37 @@
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Store } from "./store";
+import type { Registry } from "./registry";
 
 /** 凭证有效期：8 小时（短期，限定站点） */
 const ACCESS_TTL_MS = 8 * 3600_000;
 
 export const NAV_ACCESS_COOKIE = (slug: string): string => `mf_nav_${slug}`;
 
-function hmacSecret(store: Store): string {
-  const key = store.getSetting("nav_cookie_secret");
+/**
+ * HMAC 密钥（D67：部署级状态 → registry 主库承载）。
+ * 云端形态下签发（/s/:slug/auth 无用户上下文）与验证（/s/:slug 带站点属主上下文）
+ * 必须用同一把密钥，不能随用户库走。
+ */
+function hmacSecret(store: Store, registry: Registry): string {
+  const key = registry.getSetting("nav_cookie_secret");
   if (key) return key;
   // 首次生成并持久化（重启后已发凭证不失效；不写日志/不下发前端）
   const generated = randomBytes(32).toString("hex");
-  store.setSetting("nav_cookie_secret", generated);
+  registry.setSetting("nav_cookie_secret", generated);
   return generated;
 }
 
-export function signNavAccess(store: Store, slug: string, revision: number): string {
+export function signNavAccess(store: Store, registry: Registry, slug: string, revision: number): string {
   const exp = Date.now() + ACCESS_TTL_MS;
   const payload = `${slug}|${revision}|${exp}`;
-  const sig = createHmac("sha256", hmacSecret(store)).update(payload).digest("hex");
+  const sig = createHmac("sha256", hmacSecret(store, registry)).update(payload).digest("hex");
   return `${exp}|${sig}`;
 }
 
 export function verifyNavAccess(
   store: Store,
+  registry: Registry,
   slug: string,
   revision: number,
   value: string | undefined,
@@ -42,7 +49,7 @@ export function verifyNavAccess(
   const sig = parts[1] ?? "";
   if (!Number.isFinite(exp) || exp < Date.now()) return false;
   const payload = `${slug}|${revision}|${exp}`;
-  const expected = createHmac("sha256", hmacSecret(store)).update(payload).digest("hex");
+  const expected = createHmac("sha256", hmacSecret(store, registry)).update(payload).digest("hex");
   try {
     return timingSafeEqual(Buffer.from(sig, "hex"), Buffer.from(expected, "hex"));
   } catch {

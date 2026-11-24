@@ -91,6 +91,57 @@ describe("D58 认证审计（env 密码模式）", () => {
 });
 
 describe("D58 令牌与配置审计", () => {
+  it("撤销其他会话保留当前令牌，不能撤销别的账号", async () => {
+    env = makeEnv();
+    const current = env.registry.createToken("self", "current");
+    const other = env.registry.createToken("self", "other");
+    const user = env.registry.createUser("another-user", "unused-test-hash", null);
+    const foreign = env.registry.createToken(user.id, "foreign");
+    const headers = { authorization: `Bearer ${current.token}` };
+    const list = await (await env.app.request("/api/v1/auth/tokens", { headers })).json() as { tokens: Array<{ token_id: string; current: boolean }> };
+    expect(list.tokens.filter((t) => t.current).map((t) => t.token_id)).toEqual([current.tokenId]);
+    const res = await env.app.request("/api/v1/auth/tokens/revoke-others", { method: "POST", headers });
+    expect(await res.json()).toEqual({ revoked: 1 });
+    expect(env.registry.hasToken(current.token)).toBe(true);
+    expect(env.registry.hasToken(other.token)).toBe(false);
+    expect(env.registry.hasToken(foreign.token)).toBe(true);
+    expect((await env.app.request("/api/v1/auth/tokens/revoke-others", { method: "POST" })).status).toBe(401);
+  });
+
+  it("分页不遗漏超过 500 条的记录，同时间同内容事件不误去重", async () => {
+    env = makeEnv();
+    const insert = env.store.db.prepare("INSERT INTO audit_log (kind, detail, source, created_at) VALUES ('auth.failed', '重复登录失败', null, ?)");
+    for (let i = 0; i < 537; i++) insert.run("2026-11-23T00:00:00.000Z");
+    const ids = new Set<string>();
+    for (let page = 1; page <= 22; page++) {
+      const res = await env.app.request(`/api/v1/audit?page=${page}&limit=25`);
+      const body = await res.json() as { events: Array<AuditRow & { eventId: string }>; total: number; page: number; totalPages: number };
+      expect(body.total).toBe(537);
+      expect(body.page).toBe(page);
+      expect(body.totalPages).toBe(22);
+      expect(body.events.length).toBe(page === 22 ? 12 : 25);
+      body.events.forEach((e) => ids.add(e.eventId));
+    }
+    expect(ids.size).toBe(537);
+    const invalid = await (await env.app.request("/api/v1/audit?page=Infinity&limit=-1")).json() as { page: number; pageSize: number };
+    expect(invalid).toMatchObject({ page: 1, pageSize: 25 });
+    const last = await (await env.app.request("/api/v1/audit?page=9999&limit=25")).json() as { page: number };
+    expect(last.page).toBe(22);
+  });
+
+  it("注册策略未变化不记重复日志，实际变化有明确摘要", async () => {
+    env = makeEnv();
+    const initial = env.registry.registrationOpen();
+    const update = (registrationOpen: boolean) => env.app.request("/api/v1/admin/system", {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ registrationOpen }),
+    });
+    expect((await update(initial)).status).toBe(200);
+    expect(env.store.listAudit()).toHaveLength(0);
+    expect((await update(!initial)).status).toBe(200);
+    expect((await update(!initial)).status).toBe(200);
+    expect(env.store.listAudit()).toMatchObject([{ kind: "system.registration_changed", detail: initial ? "关闭公开注册" : "开放公开注册" }]);
+  });
+
   it("撤销令牌入审计（列表 ID 与 logout 两路）", async () => {
     const adminPassword = pass();
     env = makeEnv(null, false, { adminPassword });

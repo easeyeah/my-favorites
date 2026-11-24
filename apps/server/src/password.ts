@@ -11,6 +11,13 @@ export async function hashPassword(password: string): Promise<{ hash: string }> 
   return { hash: `s1:${salt}:${hash}` };
 }
 
+/** 同步版（D68 owner 账号 provisioning 用——buildApp 是同步函数，无法 await） */
+export function hashPasswordSync(password: string): string {
+  const salt = randomBytes(16).toString("hex");
+  const hash = scryptSync(password, salt, 32).toString("hex");
+  return `s1:${salt}:${hash}`;
+}
+
 export function verifyPasswordHash(password: string, stored: string): boolean {
   const parts = stored.split(":");
   const version = parts[0];

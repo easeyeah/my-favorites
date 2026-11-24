@@ -67,6 +67,13 @@ describe("A4-1 + DEV-05 非开发部署首启强制凭据与引导流程", () =>
       body: JSON.stringify({ password: fixturePassword("main") }),
     });
     expect(setup.status).toBe(200);
+    expect(env.registry.findUserById("self")).toMatchObject({ username: "admin", role: "admin" });
+    const unifiedLogin = await env.app.request("/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "admin", password: fixturePassword("main"), label: "unified-after-setup" }),
+    });
+    expect(unifiedLogin.status).toBe(200);
     const replay = await env.app.request("/api/v1/admin/setup", {
       method: "POST",
       headers: { "content-type": "application/json", "x-mf-setup-token": bootstrap },

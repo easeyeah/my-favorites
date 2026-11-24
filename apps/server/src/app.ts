@@ -2,7 +2,7 @@
  * 全部路由（技术方案 §5）。buildApp 注入依赖便于测试（app.request 直调）。
  * M2/M3：鉴权、同步、维护周报、语义搜索、BYOK 配置、导航模板/密码、配额、私密书签、迁移回灌。
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
@@ -19,6 +19,7 @@ import {
 } from "@mf/shared";
 import type { LlmClient } from "@mf/ai/llm-client";
 import { newId, now } from "./db";
+import { SERVER_VERSION } from "./version";
 import { Store, type BookmarkRow } from "./store";
 import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
@@ -35,9 +36,12 @@ import {
   type NavTemplate,
   type NavData,
 } from "./nav";
-import { login, mountAuth, authEnabled } from "./auth";
+import { login, authEnabled } from "./auth";
+import { Registry, type AdminUserRow, type UserRole, type UserRow } from "./registry";
+import { UserDbManager, currentUserId, runAsUser, SELF_USER_ID } from "./tenancy";
 import {
   mountSecurity,
+  mountTokenAuth,
   adminSetup,
   loginWithDbHash,
   isProductionLike,
@@ -50,6 +54,7 @@ import { resolveFavicon } from "./favicon";
 import { buildMaterialMarkdown, removeCoverFile } from "./materials";
 import { handleMcpRequest } from "./mcp";
 import { buildSnapshotView } from "./snapshot-view";
+import { buildUserExport } from "./user-export";
 import {
   NAV_ACCESS_COOKIE,
   navAccessCookieHeader,
@@ -70,6 +75,10 @@ export interface AppDeps {
   semantic: SemanticService;
   maintenance: MaintenanceService;
   adminPassword?: string;
+  /** D68 统一部署：registry（主库注册表）/ userDbs（用户库池）——所有部署形态同一套
+   *  用户名登录 + 多用户隔离，不再有 self/cloud 分叉（缺省自建实例，既有测试零改动） */
+  registry?: Registry;
+  userDbs?: UserDbManager;
   /** 网络守卫配置（favicon 等出站抓取用）；缺省按环境变量推断，测试可注入回环放行 */
   guardConfig?: FetchGuardConfig;
 }
@@ -80,9 +89,25 @@ import { hashPassword, verifyPasswordHash } from "./password";
 
 export function buildApp(deps: AppDeps): Hono {
   const { store, llmFor, pipeline, organize, dataDir, semantic, maintenance, adminPassword } = deps;
+  // D68 统一部署：登录=用户名+密码（注册开放，MF_REGISTER_OPEN 可关）；
+  // 多用户隔离=每用户独立 SQLite 文件（owner 'self' 恒主库）；DEPLOY_MODE 分叉退役。
+  const registry = deps.registry ?? new Registry(store.db);
+  const userDbs = deps.userDbs ?? new UserDbManager(dataDir, store.db);
+  // 旧单管理员部署自动 provisioning owner 用户名账号（admin/旧密码）——统一表单可登录既有数据
+  registry.ensureOwnerAccount(adminPassword);
   const guardConfig = deps.guardConfig ?? fetchGuardConfigFromEnv();
   const esc = (v: string): string =>
     v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const safeUser = (user: UserRow): AdminUserRow => ({
+    id: user.id,
+    username: user.username,
+    display_name: user.display_name,
+    role: user.role,
+    disabled_at: user.disabled_at,
+    created_at: user.created_at,
+  });
+  const adminRequired = (c: Context): Response | null =>
+    registry.isAdmin(currentUserId()) ? null : c.json({ error: "admin_required" }, 403);
 
   // D50：变更广播（Store 钩子 → SSE 订阅者）
   const hub = new ChangeHub();
@@ -132,19 +157,18 @@ export function buildApp(deps: AppDeps): Hono {
   });
   api.use("*", sharedCors);
 
-  // ---------- 鉴权（F6.2 + A4-1 安全默认值 + DEV-05 引导凭据/令牌生命周期） ----------
-  // 环境变量密码模式：原逻辑；生产语义无密码：强制 setup 门槛（503）或 DB hash + token
-  if (authEnabled(adminPassword)) {
-    mountAuth(api, store, adminPassword);
-  } else {
-    mountSecurity(api, store, adminPassword);
-    // 首启 setup（唯一免鉴权通道；仅一次）。DEV-05：生产语义要求部署引导凭据，
+  // ---------- 鉴权（F6.2 + A4-1 + DEV-05 + D68 统一） ----------
+  // 注册/用户名登录对一切部署形态开放（root 级公开路由）；令牌即请求上下文。
+  // setup 门槛仅在「生产语义 + 无管理员 + 无任何注册用户」时拦截（首部署可 setup 或 register 二选一）。
+  mountSecurity(api, registry, adminPassword);
+  if (!authEnabled(adminPassword)) {
+    // 首启 setup（legacy 兼容通道；仅一次）。DEV-05：生产语义要求部署引导凭据，
     // 禁止暴露端口后任何人抢先设管理员（凭据来源：MF_SETUP_TOKEN env 或 dataDir 引导文件）
     api.post("/admin/setup", async (c) => {
       const body = (await c.req.json().catch(() => ({}))) as { password?: string };
       if (!body.password) return c.json({ error: "password_required" }, 400);
       const bootstrap = c.req.header("x-mf-setup-token") ?? "";
-      const result = await adminSetup(store, body.password, bootstrap, dataDir);
+      const result = await adminSetup(registry, body.password, bootstrap, dataDir);
       if ("error" in result) return c.json({ error: result.error }, result.error === "setup_token_required" || result.error === "setup_token_invalid" ? 403 : 400);
       store.audit("setup.done", "管理员密码初始化完成（引导凭据已失效）", clientKeyOf(c));
       return c.json(result);
@@ -289,6 +313,16 @@ export function buildApp(deps: AppDeps): Hono {
     });
   });
 
+  // D73：显式「导出我的全部数据」与旧隐私过滤导出分开；包含私密/软归档内容，但绝不含凭据。
+  api.get("/export/user", (c) => {
+    const user = registry.findUserById(currentUserId());
+    const payload = buildUserExport(store.db, user ? safeUser(user) : null);
+    const name = user?.username ?? "owner";
+    c.header("content-disposition", `attachment; filename="my-favorites-${name}-export.json"`);
+    store.audit("data.exported", "导出当前账号全部数据", clientKeyOf(c));
+    return c.json(payload);
+  });
+
   api.post("/import/json", async (c) => {
     const body = (await c.req.json().catch(() => null)) as {
       folders?: Array<{ id: string; parent_id: string | null; name: string; source?: string; is_system_inbox?: number }>;
@@ -403,24 +437,39 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json(folder, 201);
   });
 
-  // 目录重命名（收纳盒等系统目录不可改名）
+  // 目录重命名 / 搬家（D81 §3-A：parentId 触发 reparent，校验父存在+禁止成环；收纳盒等系统目录拒绝）
   api.patch("/folders/:id", async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { name?: string };
-    const name = body.name?.trim();
-    if (!name) return c.json({ error: "name_required" }, 400);
-    const folder = store.renameFolder(c.req.param("id"), name);
+    const body = (await c.req.json().catch(() => ({}))) as { name?: string; parentId?: string | null };
+    const id = c.req.param("id");
+    let folder = store.getFolder(id);
     if (!folder) return c.json({ error: "not_found_or_system" }, 400);
+    if (body.parentId !== undefined) {
+      const moved = store.moveFolder(id, body.parentId || null);
+      if (!moved) return c.json({ error: "invalid_move", hint: "目标父目录不存在、成环或系统目录" }, 400);
+      folder = moved;
+    }
+    const name = body.name?.trim();
+    if (name) {
+      const renamed = store.renameFolder(id, name);
+      if (!renamed) return c.json({ error: "not_found_or_system" }, 400);
+      folder = renamed;
+    }
+    if (body.parentId === undefined && !name) return c.json({ error: "name_or_parentId_required" }, 400);
     return c.json(folder);
   });
 
   // 删除目录：仅允许空目录（无子目录且无书签）——数据安全兜底
-  api.delete("/folders/:id", (c) => {
+  api.delete("/folders/:id", async (c) => {
     const id = c.req.param("id");
     const folder = store.getFolder(id);
     if (!folder) return c.json({ error: "not_found" }, 404);
     if (folder.is_system_inbox === 1) return c.json({ error: "system_folder" }, 400);
-    if (!store.deleteFolderIfEmpty(id)) return c.json({ error: "folder_not_empty" }, 400);
-    return c.json({ ok: true });
+    // D73：目录删除升级为树删（目录 + 全部子书签/子目录），完整同步到浏览器——
+    // 此前仅支持空目录（非空 400 不产生变更），用户删了目录浏览器永远残留。
+    // 镜像链：子书签 deleteBookmark 逐条 remove 镜像；目录删除事件带目录名，
+    // 同步引擎按名移除浏览器对应目录壳（空）；sync-apply 回执cancelled 同旧口径。
+    const acc = store.deleteFolderTree(id);
+    return c.json({ ok: true, folders: acc.folders, bookmarks: acc.bookmarks });
   });
 
   api.get("/bookmarks", (c) => c.json(listVisibleBookmarks(c)));
@@ -509,6 +558,8 @@ export function buildApp(deps: AppDeps): Hono {
       ...(body.isPrivate !== undefined ? { is_private: body.isPrivate ? 1 : 0 } : {}),
       ...(body.description !== undefined ? { description: body.description.slice(0, 2000) } : {}),
     };
+    // D77：手动改目录 = 用户意图神圣 → 清自动归位状态（分类自检永不再复核此条）
+    if (body.folderId !== undefined && body.folderId !== bm.folder_id) store.clearInboxState(id);
     if (body.url !== undefined && body.url !== bm.url_raw) {
       const canon = canonicalizeUrl(body.url);
       if (!canon) return c.json({ error: "invalid_url" }, 400);
@@ -536,6 +587,14 @@ export function buildApp(deps: AppDeps): Hono {
 
   api.delete("/bookmarks/:id", (c) => {
     // 删除由用户显式发起（红线 3：AI 只出建议清单，不自动删除）
+    const bm = store.getBookmark(c.req.param("id"));
+    if (!bm) return c.json({ error: "not_found" }, 404);
+    // D79：盒内待分类条目取消（浏览器删盒内节点）——仅当条目仍在盒内才允许删，
+    // 防止与归位流水线竞态窗口误删已归位条目（归位后删除走普通双向同步）
+    if (c.req.query("ifInbox") === "1") {
+      const inbox = store.inboxFolder();
+      if (!inbox || bm.folder_id !== inbox.id) return c.json({ error: "not_in_inbox" }, 409);
+    }
     const deleted = store.deleteBookmark(c.req.param("id"));
     if (!deleted) return c.json({ error: "not_found" }, 404);
     return c.json({ deleted: deleted.id });
@@ -649,15 +708,13 @@ export function buildApp(deps: AppDeps): Hono {
     const canon = canonicalizeUrl(body.url);
     if (!canon) return c.json({ error: "invalid_url" }, 400);
 
-    // 已有映射 → 直接返回（重复事件幂等）
-    const existingAppId = store.findAppBookmarkId(body.deviceId, body.browserBookmarkId);
-    if (existingAppId && store.getBookmark(existingAppId)) {
-      return c.json({ bookmarkId: existingAppId, mapped: true, duplicate: true });
-    }
-    // canonical 查重（扩展已收藏过 / 导入过）
-    const byCanonical = store.findByCanonical(canon.canonical);
     const inbox = store.inboxFolder() ?? store.createFolder(INBOX_FOLDER_TITLE, null, "user", true);
+
+    // 三路径合一（已有映射 / canonical 查重绑定 / 新建）——D72：镜像补投对一切路径生效
+    const existingAppId = store.findAppBookmarkId(body.deviceId, body.browserBookmarkId);
+    const byCanonical = canon.canonical ? store.findByCanonical(canon.canonical) ?? null : null;
     const bm =
+      (existingAppId ? store.getBookmark(existingAppId) : undefined) ??
       byCanonical ??
       store.createBookmark({
         folderId: inbox.id,
@@ -671,6 +728,14 @@ export function buildApp(deps: AppDeps): Hono {
       browserBookmarkId: body.browserBookmarkId,
       appBookmarkId: bm.id,
     });
+    // D78：已归位条目被再次丢入投递口 = 用户「重新分类」意图 → 库条目移回收纳盒重走流水线。
+    // 旧实现（D72）反向补「移出」镜像，把用户刚丢入的节点弹回原目录——投递口不收已归位条目，
+    // 浏览器与管理台再次分叉。D72 滞留场景（镜像让位致节点 stuck 在盒内）由同步引擎
+    // 身份收敛（②'）负责移出，不靠此处弹回。
+    if (bm.folder_id !== inbox.id) {
+      store.moveBookmark(bm.id, inbox.id);
+      store.upsertInboxState(bm.id, "pending", null, null, 0);
+    }
     return c.json({ bookmarkId: bm.id, mapped: true, duplicate: byCanonical !== undefined });
   });
 
@@ -820,73 +885,14 @@ export function buildApp(deps: AppDeps): Hono {
     const targets = body.ids?.length
       ? body.ids.map((id) => store.getBookmark(id)).filter((b) => b !== undefined)
       : store.bookmarksMissingContent(10);
-    const guardConfig = fetchGuardConfigFromEnv();
     const results: Array<{ id: string; ok: boolean; reason?: string }> = [];
     for (const bm of targets) {
       if (!bm) continue;
-      // A1-3 服务端纵深校验：隐私域/私密书签禁止抓取（独立判定，不信任任何客户端声明）
-      const decision = pipeline.serverDecide("server_fetch", bm.url_raw, {
-        isPrivateBookmark: bm.is_private === 1,
-      });
-      if (!decision.allowed) {
-        store.upsertCache({
-          bookmarkId: bm.id,
-          fetchedVia: "server_crawl",
-          failReason: `privacy_${decision.reason}`,
-        });
-        results.push({ id: bm.id, ok: false, reason: "privacy" });
-        continue;
-      }
-      try {
-        // A1-4 网络访问策略：私网/回环/链路本地禁止（自建显式开启才放行）；每跳重定向重新校验
-        // DEV-13：抓取地址用原始 URL（canonical 只是查重键，不再承担网络目标语义）
-        // DEV-04：连接固定到已校验地址；读取期强制字节上限（先于整包分配）
-        const res = await guardedFetch(
-          bm.url_raw,
-          guardConfig,
-          {
-            headers: {
-              "user-agent": "my-favorites-bot/0.1 (+https://github.com/easeyeah/my-favorites)",
-            },
-          },
-          { maxBytes: 500_000, timeoutMs: 10_000, totalTimeoutMs: 25_000 },
-        );
-        if (!res.ok) {
-          res.dispose();
-          throw new Error(`HTTP ${res.status}`);
-        }
-        const html = (await res.readBody(500_000)).toString("utf8");
-        const description =
-          /<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i.exec(html)?.[1] ??
-          /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']*)["']/i.exec(html)?.[1];
-        const text = html
-          .replace(/<script[\s\S]*?<\/script>/gi, " ")
-          .replace(/<style[\s\S]*?<\/style>/gi, " ")
-          .replace(/<[^>]+>/g, " ")
-          .replace(/\s+/g, " ")
-          .trim()
-          .slice(0, 20_000);
-        store.upsertCache({
-          bookmarkId: bm.id,
-          l2Text: text || null,
-          fetchedVia: "server_crawl",
-        });
-        if (description && !bm.description) {
-          store.updateBookmark(bm.id, { description: description.slice(0, 500) });
-        }
-        await pipeline.maybeSummarize(bm.id);
-        await pipeline.materialize(bm.id); // D61：补漏抓取成功后同步识别入库
-        void semantic.embedBookmark(bm.id);
-        results.push({ id: bm.id, ok: true });
-      } catch (err) {
-        store.upsertCache({
-          bookmarkId: bm.id,
-          fetchedVia: "server_crawl",
-          failReason: `crawl_failed:${String(err).slice(0, 120)}`,
-        });
-        results.push({ id: bm.id, ok: false, reason: "crawl_failed" });
-      }
-      await new Promise((r) => setTimeout(r, 500));
+      // D70：补抓实现收敛到 pipeline.crawlOne（与收纳盒资料扫描共用；隐私/守卫内聚）
+      const r = await pipeline.crawlOne(bm.id);
+      if (r.ok) void semantic.embedBookmark(bm.id);
+      results.push({ id: bm.id, ok: r.ok, reason: r.reason });
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
     return c.json({ processed: results.length, results });
   });
@@ -910,6 +916,35 @@ export function buildApp(deps: AppDeps): Hono {
 
   // 分面统计（左侧双维度面板：分类树计数 + AI 标签频次榜）——先于 /materials/:id 注册避免被截胡
   api.get("/materials/facets", (c) => c.json(store.materialFacets(privateVisible(c))));
+
+  // D89 目录资料扫描（SSE 逐条进度；断开即停）：内容页书签抓正文入资料库，
+  // 抓取失败条目随 done 事件返回「建议丢弃」清单（只建议——归档/删除由用户确认，红线③）
+  api.get("/materials/scan/stream", (c) => {
+    const folderId = c.req.query("folderId");
+    if (!folderId) return c.json({ error: "folderId_required" }, 400);
+    const includeSubfolders = c.req.query("includeSubfolders") !== "0";
+    const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 30) || 30, 1), 60);
+    const uid = currentUserId();
+    return streamSSE(c, async (stream) => {
+      await stream.writeSSE({ event: "start", data: JSON.stringify({ limit }) });
+      try {
+        const result = await runAsUser(uid, () =>
+          pipeline.scanFolderForMaterials(folderId, {
+            includeSubfolders,
+            limit,
+            onItem: (item, done, total) => {
+              if (stream.aborted) return false; // 客户端断开 → 停止后续抓取
+              void stream.writeSSE({ event: "item", data: JSON.stringify({ ...item, done, total }) });
+              return true;
+            },
+          }),
+        );
+        await stream.writeSSE({ event: "done", data: JSON.stringify(result) });
+      } catch (err) {
+        await stream.writeSSE({ event: "error", data: JSON.stringify({ error: String(err).slice(0, 200) }) });
+      }
+    });
+  });
 
   api.get("/materials/:id", (c) => {
     const m = store.getMaterial(c.req.param("id"));
@@ -985,6 +1020,36 @@ export function buildApp(deps: AppDeps): Hono {
       }
       return c.json(result, 201);
     } catch (err) {
+      return c.json({ error: String(err) }, 500);
+    }
+  });
+
+  // D89 目录级重新整理：范围=目录子树，目标限定子树内、可在该目录下新建子目录；
+  // 与全库整理共用版本/撤销内核（红线③：只移动，不删除/不归档）
+  api.post("/organize/folder", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      folderId?: string;
+      includeSubfolders?: boolean;
+    };
+    if (!body.folderId) return c.json({ error: "folderId_required" }, 400);
+    try {
+      const result = await organize.reclassifyFolder(body.folderId, {
+        includeSubfolders: body.includeSubfolders !== false,
+      });
+      for (const a of result.appliedActions ?? []) {
+        if (a.type === "move" && a.toFolderName) store.recordCategoryAdoption(a.toFolderName);
+      }
+      if (result.status === "applied") {
+        dispatchWebhooks(store, "bookmark.organized", {
+          versionId: result.versionId,
+          applied: result.applied ?? 0,
+        });
+      }
+      return c.json(result, 201);
+    } catch (err) {
+      if (String(err).includes("folder_not_found")) {
+        return c.json({ error: "folder_not_found" }, 404);
+      }
       return c.json({ error: String(err) }, 500);
     }
   });
@@ -1139,6 +1204,8 @@ export function buildApp(deps: AppDeps): Hono {
       );
       const site = store.getNavSiteFull(slug)!;
       store.audit("nav.published", `发布导航站 /s/${slug}（公开 ${itemCount} 项）`, clientKeyOf(c));
+      // D67：登记 slug → 数据属主（云端 /s/:slug 借此路由到用户库；自建恒 self）
+      registry.setSlugOwner(slug, currentUserId());
       return c.json(
         { slug, url: `/s/${slug}`, template, itemCount, revision: site.revision, published: site.published === 1 },
         201,
@@ -1159,6 +1226,7 @@ export function buildApp(deps: AppDeps): Hono {
     const slug = c.req.param("slug");
     const ok = store.unpublishNavSite(slug);
     if (!ok) return c.json({ error: "not_found" }, 404);
+    registry.deleteSlug(slug);
     store.audit("nav.unpublished", `下线导航站 /s/${slug}`, clientKeyOf(c));
     return c.json({ unpublished: true });
   });
@@ -1353,7 +1421,32 @@ export function buildApp(deps: AppDeps): Hono {
   api.get("/sync/pull", (c) => {
     const cursor = Number(c.req.query("cursor") ?? 0);
     const device = c.req.query("device") ?? c.req.header("x-mf-device") ?? null;
-    return c.json(store.pullChanges(cursor, device));
+    // D81 §3-C：游标缺口检测 + 库代际校验——过期游标返回 reset_required，
+    // 端侧走快照恢复协议（保留本地未提交操作，快照重建后重放），不静默跳事件。
+    const minAvailableId = store.minChangeId();
+    const maxChangeId = store.maxChangeId();
+    const generation = store.syncGeneration();
+    const clientGen = c.req.query("gen");
+    const gap =
+      (minAvailableId !== null && cursor < minAvailableId - 1) || // 裁剪边界越过
+      (minAvailableId === null && cursor > 0) || // 日志被清空但设备有历史
+      cursor > maxChangeId || // DB 恢复/回退（游标在未来）
+      (clientGen !== undefined && clientGen !== generation); // 库代际不符（DB 替换）
+    if (gap) {
+      return c.json({ reset_required: true, items: [], cursor, minAvailableId, maxChangeId, generation });
+    }
+    return c.json({ ...store.pullChanges(cursor, device), minAvailableId, maxChangeId, generation });
+  });
+
+  /** D81 §3-C：一致性快照 + 固定水位（读事务内取数，快照完成后只拉水位之后的变更） */
+  api.get("/sync/snapshot", (c) => c.json(store.syncSnapshot()));
+
+  /** D81 §3-D-4：设备同步状态上报（开关关闭时显式停标，镜像 ops 恢复 legacy 语义） */
+  api.post("/devices/sync-state", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { deviceId?: string; enabled?: boolean } | null;
+    if (!body?.deviceId) return c.json({ error: "deviceId_required" }, 400);
+    store.setDeviceSyncEnabled(body.deviceId, body.enabled === true);
+    return c.json({ ok: true });
   });
 
   /**
@@ -1363,10 +1456,12 @@ export function buildApp(deps: AppDeps): Hono {
    * 20 秒心跳保活（兼给 MV3 SW 续命）。
    */
   api.get("/events/stream", (c) => {
+    // D67：本连接归属用户（中间件已建上下文）；云端只收自己的变更，自建恒 self 全量照旧
+    const myUser = currentUserId();
     return streamSSE(c, async (stream) => {
       let dirty = false;
-      const unsub = hub.subscribe(() => {
-        dirty = true;
+      const unsub = hub.subscribe((ev) => {
+        if (!ev.user || ev.user === myUser) dirty = true;
       });
       try {
         await stream.writeSSE({ event: "hello", data: "{}" });
@@ -1407,7 +1502,16 @@ export function buildApp(deps: AppDeps): Hono {
   api.get("/browser/identities", (c) => {
     const deviceId = c.req.query("deviceId");
     if (!deviceId) return c.json({ error: "deviceId_required" }, 400);
-    return c.json({ identities: store.identitiesWithState(deviceId) });
+    const browserId = c.req.query("browserId"); // D79：单节点反查（盒内删除取消用，免全量拉取）
+    const all = store.identitiesWithState(deviceId);
+    return c.json({ identities: browserId ? all.filter((i) => i.browser_bookmark_id === browserId) : all });
+  });
+
+  /** D81 §3-A：本设备目录身份映射（folder_identity）——引擎每轮据此重建 fMap，跨 SW 重启不丢 */
+  api.get("/browser/folder-identities", (c) => {
+    const deviceId = c.req.query("deviceId");
+    if (!deviceId) return c.json({ error: "deviceId_required" }, 400);
+    return c.json({ identities: store.folderIdentities(deviceId) });
   });
 
   // ---------- F5 维护（死链/查重/周报/体检） ----------
@@ -1663,18 +1767,155 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json(Object.fromEntries(names.map((n) => [n, store.countEvents(n)])));
   });
 
-  // ---------- 令牌管理（DEV-05：非密 ID 列表 / 按 ID 撤销 / logout 失效） ----------
+  // ---------- D73 系统管理：统一部署唯一的注册策略与用户管理面 ----------
+  api.get("/admin/system", (c) => {
+    const denied = adminRequired(c);
+    if (denied) return denied;
+    return c.json({ registrationOpen: registry.registrationOpen(), users: registry.listUsers() });
+  });
+
+  api.patch("/admin/system", async (c) => {
+    const denied = adminRequired(c);
+    if (denied) return denied;
+    const body = (await c.req.json().catch(() => ({}))) as { registrationOpen?: boolean };
+    if (typeof body.registrationOpen !== "boolean") {
+      return c.json({ error: "registration_open_boolean_required" }, 400);
+    }
+    const changed = registry.registrationOpen() !== body.registrationOpen;
+    registry.setRegistrationOpen(body.registrationOpen);
+    if (changed) store.audit(
+      "system.registration_changed",
+      `${body.registrationOpen ? "开放" : "关闭"}公开注册`,
+      clientKeyOf(c),
+    );
+    return c.json({ registrationOpen: registry.registrationOpen() });
+  });
+
+  api.post("/admin/users", async (c) => {
+    const denied = adminRequired(c);
+    if (denied) return denied;
+    const body = (await c.req.json().catch(() => ({}))) as {
+      username?: string;
+      password?: string;
+      displayName?: string;
+      role?: UserRole;
+    };
+    if (!body.username || !body.password) {
+      return c.json({ error: "username_password_required" }, 400);
+    }
+    if (!/^[A-Za-z0-9_-]{3,32}$/.test(body.username)) {
+      return c.json({ error: "invalid_username", hint: "3-32 位字母/数字/-/_" }, 400);
+    }
+    if (body.password.length < 8) return c.json({ error: "password_too_short_min_8" }, 400);
+    if (body.role !== undefined && body.role !== "admin" && body.role !== "user") {
+      return c.json({ error: "invalid_role" }, 400);
+    }
+    if (registry.findUserByUsername(body.username)) {
+      return c.json({ error: "username_taken" }, 409);
+    }
+    const { hash } = await hashPassword(body.password);
+    const user = registry.createUser(body.username, hash, body.displayName ?? null, body.role ?? "user");
+    userDbs.dbFor(user.id);
+    store.audit("user.created", `管理员创建账号 ${user.username}（${user.role === "admin" ? "管理员" : "普通用户"}）`, clientKeyOf(c));
+    return c.json({ user: safeUser(user) }, 201);
+  });
+
+  api.patch("/admin/users/:id", async (c) => {
+    const denied = adminRequired(c);
+    if (denied) return denied;
+    const target = registry.findUserById(c.req.param("id"));
+    if (!target) return c.json({ error: "user_not_found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      disabled?: boolean;
+      role?: UserRole;
+      newPassword?: string;
+    };
+    if (body.disabled === undefined && body.role === undefined && body.newPassword === undefined) {
+      return c.json({ error: "empty_user_update" }, 400);
+    }
+    if (body.disabled !== undefined && typeof body.disabled !== "boolean") {
+      return c.json({ error: "disabled_boolean_required" }, 400);
+    }
+    if (body.role !== undefined && body.role !== "admin" && body.role !== "user") {
+      return c.json({ error: "invalid_role" }, 400);
+    }
+    if (body.newPassword !== undefined && body.newPassword.length < 8) {
+      return c.json({ error: "password_too_short_min_8" }, 400);
+    }
+    const demoting = body.role === "user" && target.role === "admin";
+    const disabling = body.disabled === true && !target.disabled_at;
+    if (target.id === SELF_USER_ID && (demoting || disabling)) {
+      return c.json({ error: "owner_immutable" }, 400);
+    }
+    if (target.id === currentUserId() && (demoting || disabling)) {
+      return c.json({ error: "cannot_disable_or_demote_self" }, 400);
+    }
+    if ((demoting || disabling) && !target.disabled_at && registry.countActiveAdmins(target.id) === 0) {
+      return c.json({ error: "last_admin_required" }, 400);
+    }
+    if (body.newPassword !== undefined && target.id === SELF_USER_ID) {
+      return c.json({ error: "owner_password_use_account_settings" }, 400);
+    }
+    if (body.role !== undefined) registry.setUserRole(target.id, body.role);
+    if (body.disabled !== undefined) registry.setUserDisabled(target.id, body.disabled);
+    let revokedTokens = 0;
+    if (body.newPassword !== undefined) {
+      const { hash } = await hashPassword(body.newPassword);
+      registry.updateUserPassword(target.id, hash);
+    }
+    if (body.newPassword !== undefined || disabling) {
+      revokedTokens = registry.revokeAllTokensForUser(target.id);
+    }
+    store.audit(
+      "user.updated",
+      `管理员更新账号 ${target.username}${body.role !== undefined && body.role !== target.role ? `（角色改为${body.role === "admin" ? "管理员" : "普通用户"}）` : ""}${disabling ? "（停用）" : ""}${body.disabled === false && target.disabled_at ? "（恢复使用）" : ""}${body.newPassword !== undefined ? "（重置密码）" : ""}`,
+      clientKeyOf(c),
+    );
+    const updated = registry.findUserById(target.id)!;
+    return c.json({ user: safeUser(updated), revokedTokens });
+  });
+
+  api.get("/admin/users/:id/export", (c) => {
+    const denied = adminRequired(c);
+    if (denied) return denied;
+    const target = registry.findUserById(c.req.param("id"));
+    if (!target) return c.json({ error: "user_not_found" }, 404);
+    const payload = runAsUser(target.id, () => buildUserExport(store.db, safeUser(target)));
+    c.header(
+      "content-disposition",
+      `attachment; filename="my-favorites-${target.username}-export.json"`,
+    );
+    store.audit("user.exported", `管理员导出账号 ${target.username} 的数据`, clientKeyOf(c));
+    return c.json(payload);
+  });
+
+  // ---------- 令牌管理（DEV-05：非密 ID 列表 / 按 ID 撤销 / logout 失效；D67 registry 承载） ----------
   api.get("/auth/tokens", (c) => {
-    // 列表不含任何 token 原值/摘要；token_id 为随机非密 ID，可直接用于撤销
-    return c.json({ tokens: store.listTokens() });
+    // 列表不含任何 token 原值/摘要；token_id 为随机非密 ID，可直接用于撤销。
+    // D68：恒按当前用户过滤（owner 'self' 亦然；列表不含任何 token 原值/摘要）
+    const raw = (c.req.header("authorization") ?? "").replace(/^Bearer /, "");
+    const current = raw ? registry.resolveToken(raw) : undefined;
+    return c.json({ tokens: registry.listTokens(currentUserId()).map((t) => ({ ...t, current: t.token_id === current?.tokenId })) });
+  });
+
+  api.post("/auth/tokens/revoke-others", (c) => {
+    const raw = (c.req.header("authorization") ?? "").replace(/^Bearer /, "");
+    const current = raw ? registry.resolveToken(raw) : undefined;
+    if (!current || current.userId !== currentUserId()) return c.json({ error: "unauthorized" }, 401);
+    const revoked = registry.revokeOtherTokens(currentUserId(), current.tokenId);
+    if (revoked) registry.audit("token.revoked", `撤销其他登录会话（${revoked} 个），保留当前会话`, clientKeyOf(c));
+    return c.json({ revoked });
   });
 
   api.delete("/auth/tokens/:tokenId", (c) => {
     const tokenId = c.req.param("tokenId");
-    const target = store.listTokens().find((t) => t.token_id === tokenId);
-    const ok = store.revokeTokenById(tokenId);
+    const mine = registry.listTokens(currentUserId());
+    const target = mine.find((t) => t.token_id === tokenId);
+    // 多用户边界：非本人的 tokenId 与不存在同等 404，绝不能凭 ID 撤销其他用户令牌。
+    if (!target) return c.json({ error: "not_found_or_already_revoked" }, 404);
+    const ok = registry.revokeTokenById(tokenId);
     if (!ok) return c.json({ error: "not_found_or_already_revoked" }, 404);
-    store.audit("token.revoked", `撤销令牌「${target?.label ?? tokenId}」`, clientKeyOf(c));
+    registry.audit("token.revoked", `撤销令牌「${target?.label ?? tokenId}」`, clientKeyOf(c));
     return c.json({ revoked: true });
   });
 
@@ -1682,15 +1923,78 @@ export function buildApp(deps: AppDeps): Hono {
     // 撤销当前请求使用的 token（摘要匹配）
     const header = c.req.header("authorization") ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-    const revoked = token ? store.revokeByRawToken(token) : false;
-    if (revoked) store.audit("token.revoked", "退出登录（撤销当前令牌）", clientKeyOf(c));
+    const revoked = token ? registry.revokeByRawToken(token) : false;
+    if (revoked) registry.audit("token.revoked", "退出登录（撤销当前令牌）", clientKeyOf(c));
     return c.json({ loggedOut: revoked });
+  });
+
+  // ---------- D67 账号安全：改密码 / 当前身份 ----------
+  api.post("/auth/password", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { oldPassword?: string; newPassword?: string };
+    if (!body.oldPassword || !body.newPassword) {
+      return c.json({ error: "old_new_password_required" }, 400);
+    }
+    if (body.newPassword.length < 8) return c.json({ error: "password_too_short_min_8" }, 400);
+    // 改密码是一次凭据校验 → 与登录同级的限速（key 区分场景）
+    const key = `pw:${clientKeyOf(c)}`;
+    if (loginRateLimited(key)) return c.json({ error: "rate_limited" }, 429);
+    const uid = currentUserId();
+    if (uid === SELF_USER_ID && authEnabled(adminPassword)) {
+      // owner + env 密码：凭据由部署环境管理，不提供在线改密
+      return c.json(
+        { error: "env_password_managed_externally", hint: "ADMIN_PASSWORD 由部署环境变量管理，请修改部署配置" },
+        400,
+      );
+    }
+    const owner = registry.findUserById(uid);
+    if (!owner) return c.json({ error: "unauthorized" }, 401);
+    if (!verifyPasswordHash(body.oldPassword, owner.password_hash)) {
+      recordLoginFailure(key);
+      return c.json({ error: "invalid_password" }, 401);
+    }
+    const newHash = (await hashPassword(body.newPassword)).hash;
+    registry.updateUserPassword(uid, newHash);
+    if (uid === SELF_USER_ID) {
+      // owner 双写：DB-hash 旧登录路径（{password}）与新用户名登录保持同一凭据
+      registry.setSetting("admin_password_hash", newHash);
+    }
+    clearLoginFailures(key);
+    // 红线：审计只记事件，绝不落密码
+    registry.audit("password.changed", `修改密码（${owner.username}）`, clientKeyOf(c));
+    return c.json({ changed: true });
+  });
+
+  api.get("/auth/me", (c) => {
+    const user = registry.findUserById(currentUserId());
+    return c.json({
+      userId: currentUserId(),
+      username: user?.username ?? null,
+      displayName: user?.display_name ?? null,
+      role: user?.role ?? (currentUserId() === SELF_USER_ID ? "admin" : "user"),
+      isAdmin: registry.isAdmin(currentUserId()),
+      registrationOpen: registry.registrationOpen(),
+      deployMode: "unified",
+    });
   });
 
   // ---------- 操作审计日志（D58：设置页「操作日志」分区数据源；走上方鉴权中间件） ----------
   api.get("/audit", (c) => {
-    const limit = c.req.query("limit") ? Math.min(Number(c.req.query("limit")), 500) : 100;
-    return c.json({ events: store.listAudit(limit) });
+    const positiveInt = (value: string | undefined, fallback: number, max: number): number => {
+      const n = Number(value);
+      return Number.isSafeInteger(n) && n > 0 ? Math.min(n, max) : fallback;
+    };
+    const limit = positiveInt(c.req.query("limit"), 25, 500);
+    const requestedPage = positiveInt(c.req.query("page"), 1, Number.MAX_SAFE_INTEGER);
+    // 每库保留 1000 条；多取一倍覆盖每日裁剪前的短暂增量。
+    // 同库只读一次，异库保留独立标识，不按内容去重（重复失败也是有效审计）。
+    const events = [
+      ...registry.listAudit(2000).map((e) => ({ ...e, eventId: `registry:${e.id}` })),
+      ...(store.db === registry.db ? [] : store.listAudit(2000).map((e) => ({ ...e, eventId: `user:${e.id}` }))),
+    ].sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id || a.eventId.localeCompare(b.eventId));
+    const total = events.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const page = Math.min(requestedPage, totalPages);
+    return c.json({ events: events.slice((page - 1) * limit, page * limit), total, page, pageSize: limit, totalPages });
   });
 
   // ---------- stats ----------
@@ -1710,26 +2014,63 @@ export function buildApp(deps: AppDeps): Hono {
     c.json({
       ok: true,
       form: process.env.MF_FORM ?? "self-hosted",
-      version: process.env.MF_VERSION ?? "0.1.0",
+      version: SERVER_VERSION,
+      // D73：所有部署同一张登录页；注册入口只由管理员控制的持久化开关决定。
+      deployMode: "unified",
+      registrationOpen: registry.registrationOpen(),
     }),
   );
 
   // F6.2/A4-1 + DEV-05 登录（环境变量密码或 DB hash；两种模式统一限速，key 区分模式）
+  // D67 云端：username + password 多用户登录；自建保持单管理员密码（传 username 直接拒绝）
   root.post("/auth/login", async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { password?: string; label?: string };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      username?: string;
+      password?: string;
+      label?: string;
+    };
     if (!body.password) return c.json({ error: "password_required" }, 400);
     const clientKey = clientKeyOf(c);
     const label = body.label ?? "device";
     // D58：登录三态入审计日志（限速/失败此前只在内存滑窗，重启即失、被爆破无感知）。
-    // detail 只落 label，绝不落密码。
-    // 环境变量模式（兼容既有部署）：同样限速（修复 E07：env 密码无速率限制）
+    // detail 只落 label/username，绝不落密码。
+    // D68 统一：username + password 是一切部署形态的默认登录（自托管=官方云，仅地址不同）
+    if (body.username) {
+      const key = `user:${body.username}:${clientKey}`;
+      if (loginRateLimited(key)) {
+        store.audit("auth.rate_limited", `登录被限速：${body.username}`, clientKey);
+        return c.json({ error: "rate_limited" }, 429);
+      }
+      const user = registry.findUserByUsername(body.username);
+      if (!user || !verifyPasswordHash(body.password, user.password_hash)) {
+        recordLoginFailure(key);
+        // 用户不存在与密码错误同一响应：不暴露账号是否存在
+        store.audit("auth.failed", `登录失败：${body.username}（${label}）`, clientKey);
+        return c.json({ error: "invalid_password" }, 401);
+      }
+      if (user.disabled_at) {
+        store.audit("auth.failed", `停用账号尝试登录：${body.username}（${label}）`, clientKey);
+        return c.json({ error: "account_disabled" }, 403);
+      }
+      clearLoginFailures(key);
+      const created = registry.createToken(user.id, label);
+      store.audit("auth.login", `登录成功：${body.username}（${label}）`, clientKey);
+      return c.json({
+        token: created.token,
+        tokenId: created.tokenId,
+        username: user.username,
+        displayName: user.display_name,
+      });
+    }
+    // 兼容：无 username = 旧单管理员密码登录（owner；旧扩展/脚本不受影响）。
+    // 环境变量模式：同样限速（修复 E07：env 密码无速率限制）
     if (authEnabled(adminPassword)) {
       const key = `admin-env:${clientKey}`;
       if (loginRateLimited(key)) {
         store.audit("auth.rate_limited", `登录被限速（env 模式）`, clientKey);
         return c.json({ error: "rate_limited" }, 429);
       }
-      const result = login(store, adminPassword, body.password, label);
+      const result = login(registry, adminPassword, body.password, label);
       if ("error" in result) {
         recordLoginFailure(key);
         store.audit("auth.failed", `登录失败：密码错误（${label}）`, clientKey);
@@ -1740,8 +2081,8 @@ export function buildApp(deps: AppDeps): Hono {
       return c.json(result);
     }
     // A4-1 DB hash 模式（生产语义首启 setup 后）
-    if (isProductionLike() && !setupRequired(store)) {
-      const result = loginWithDbHash(store, body.password, label, `admin-db:${clientKey}`);
+    if (isProductionLike() && !setupRequired(registry)) {
+      const result = loginWithDbHash(registry, body.password, label, `admin-db:${clientKey}`);
       if ("status" in result) {
         const status = result.status as 401 | 429;
         if (result.error === "rate_limited") store.audit("auth.rate_limited", "登录被限速", clientKey);
@@ -1752,6 +2093,53 @@ export function buildApp(deps: AppDeps): Hono {
       return c.json(result);
     }
     return c.json({ error: "auth_disabled" }, 400);
+  });
+
+  // D68 统一注册：一切部署形态开放（自托管多用户=云多用户，仅地址不同）。
+  // 注册即建用户库（迁移同版）+ 签发首令牌；限速同登录，防批量注册。
+  root.post("/auth/register", async (c) => {
+    // D73：管理员面板持久化控制；MF_REGISTER_OPEN 仅作为首次未设置时的兼容默认值。
+    if (!registry.registrationOpen()) {
+      return c.json({ error: "register_closed", hint: "该实例已关闭注册" }, 403);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      username?: string;
+      password?: string;
+      displayName?: string;
+      label?: string;
+    };
+    if (!body.username || !body.password) {
+      return c.json({ error: "username_password_required" }, 400);
+    }
+    if (!/^[A-Za-z0-9_-]{3,32}$/.test(body.username)) {
+      return c.json({ error: "invalid_username", hint: "3-32 位字母/数字/-/_" }, 400);
+    }
+    if (body.password.length < 8) return c.json({ error: "password_too_short_min_8" }, 400);
+    const clientKey = clientKeyOf(c);
+    const key = `register:${clientKey}`;
+    if (loginRateLimited(key)) {
+      store.audit("auth.rate_limited", "注册被限速", clientKey);
+      return c.json({ error: "rate_limited" }, 429);
+    }
+    if (registry.findUserByUsername(body.username)) {
+      return c.json({ error: "username_taken" }, 409);
+    }
+    const { hash } = await hashPassword(body.password);
+    // 全新部署的第一个账号就是系统管理员；后续公开注册一律普通用户。
+    const firstAccount = registry.countUsers() === 0;
+    const user = registry.createUser(
+      body.username,
+      hash,
+      body.displayName ?? null,
+      firstAccount ? "admin" : "user",
+    );
+    userDbs.dbFor(user.id); // 注册即建数据文件（openDb 内含同版迁移）
+    const created = registry.createToken(user.id, body.label ?? "signup");
+    store.audit("user.registered", `注册账号 ${user.username}`, clientKey);
+    return c.json(
+      { token: created.token, tokenId: created.tokenId, username: user.username, displayName: user.display_name },
+      201,
+    );
   });
 
   // D21（2026-11-18）：删除公开体检报告 HTML 获客页——该功能服务于官方云 SaaS 的
@@ -1812,19 +2200,26 @@ export function buildApp(deps: AppDeps): Hono {
 
   // ---------- 导航站公开页（DEV-01：唯一实现路径；显式发布集合 + POST 密码凭证） ----------
 
+  /** D67：公开站点路由到数据属主（云端 public_slugs 索引；自建恒 self 直查主库，行为不变） */
+  const asSlugOwner = <T>(slug: string, fn: () => T): T => {
+    const owner = registry.slugOwner(slug);
+    return owner && owner !== SELF_USER_ID ? runAsUser(owner, fn) : fn();
+  };
+
   /** 访问判定：站点已发布 且（无密码 或 持有效访问凭证——绑定 slug+revision） */
   const navAccessAllowed = (c: { req: { header: (n: string) => string | undefined } }, site: NonNullable<ReturnType<typeof store.getNavSiteFull>>): boolean => {
     if (site.published !== 1) return false;
     if (!site.password_hash) return true;
     const cookie = c.req.header("cookie") ?? "";
     const match = new RegExp(`(?:^|;\\s*)${NAV_ACCESS_COOKIE(site.slug)}=([^;]+)`).exec(cookie);
-    return verifyNavAccess(store, site.slug, site.revision, match?.[1] ? decodeURIComponent(match[1]) : undefined);
+    return verifyNavAccess(store, registry, site.slug, site.revision, match?.[1] ? decodeURIComponent(match[1]) : undefined);
   };
 
   // 密码验证（POST）：独立于管理员登录的限速（key: nav:<slug>:<client>），
   // 成功签发短期 HttpOnly cookie；旧 ?p= 查询参数通道移除。
   root.post("/s/:slug/auth", async (c) => {
-    const site = store.getNavSiteFull(c.req.param("slug"));
+    const slug = c.req.param("slug");
+    const site = asSlugOwner(slug, () => store.getNavSiteFull(slug));
     if (!site || site.published !== 1 || !site.password_hash) {
       return c.json({ error: "not_found" }, 404);
     }
@@ -1839,53 +2234,56 @@ export function buildApp(deps: AppDeps): Hono {
       return c.body(renderPasswordPage(site.title, site.slug, true), 401);
     }
     clearLoginFailures(key);
-    const token = signNavAccess(store, site.slug, site.revision);
+    const token = signNavAccess(store, registry, site.slug, site.revision);
     c.header("set-cookie", navAccessCookieHeader(site.slug, token, new URL(c.req.url).protocol === "https:"));
     c.header("cache-control", "no-store");
     return c.redirect(`/s/${site.slug}`, 303);
   });
 
   // 公开站首页（模板 + 密码凭证；未发布站点显示占位说明，不回退全库数据）
-  root.get("/s/:slug", (c) => {
-    const site = store.getNavSiteFull(c.req.param("slug"));
-    if (!site) return c.json({ error: "not_found" }, 404);
-    c.header("cache-control", "no-store"); // 站点内容随发布范围变化，禁止中间缓存
-    c.header("referrer-policy", "no-referrer");
-    c.header("content-type", "text/html; charset=utf-8");
-    if (site.published !== 1) {
-      // DEV-01：存量站点缺少显式发布集合 → 待确认/不可公开（升级说明见 docs）
-      return c.body(renderUnpublishedPage(site.title));
-    }
-    if (!navAccessAllowed(c, site)) {
-      return c.body(renderPasswordPage(site.title, site.slug));
-    }
-    return c.body(
-      renderNavHtml(navData(store, site.slug, site.title), {
-        // 原型 13：水印自建端可关（D12 全功能开放）；主题色/显示选项/自定义卡走站点 config
-        watermark: store.getNavSiteConfig(site.slug).watermark !== false,
-        template: (site.template as NavTemplate) ?? "grid",
-        config: store.getNavSiteConfig(site.slug) as { themeColor?: string; showSummary?: boolean; snapshotBadge?: boolean; customCards?: Array<{ title: string; url: string; desc?: string; favicon?: string }> },
-      }),
-    );
-  });
+  root.get("/s/:slug", (c) =>
+    asSlugOwner(c.req.param("slug"), () => {
+      const site = store.getNavSiteFull(c.req.param("slug"));
+      if (!site) return c.json({ error: "not_found" }, 404);
+      c.header("cache-control", "no-store"); // 站点内容随发布范围变化，禁止中间缓存
+      c.header("referrer-policy", "no-referrer");
+      c.header("content-type", "text/html; charset=utf-8");
+      if (site.published !== 1) {
+        // DEV-01：存量站点缺少显式发布集合 → 待确认/不可公开（升级说明见 docs）
+        return c.body(renderUnpublishedPage(site.title));
+      }
+      if (!navAccessAllowed(c, site)) {
+        return c.body(renderPasswordPage(site.title, site.slug));
+      }
+      return c.body(
+        renderNavHtml(navData(store, site.slug, site.title), {
+          // 原型 13：水印自建端可关（D12 全功能开放）；主题色/显示选项/自定义卡走站点 config
+          watermark: store.getNavSiteConfig(site.slug).watermark !== false,
+          template: (site.template as NavTemplate) ?? "grid",
+          config: store.getNavSiteConfig(site.slug) as { themeColor?: string; showSummary?: boolean; snapshotBadge?: boolean; customCards?: Array<{ title: string; url: string; desc?: string; favicon?: string }> },
+        }),
+      );
+    }),
+  );
 
   // 站内搜索（q 全量转义；仅该站显式发布集合；密码站需有效凭证）
-  root.get("/s/:slug/search", (c) => {
-    const site = store.getNavSiteFull(c.req.param("slug"));
-    if (!site || site.published !== 1) return c.json({ error: "not_found" }, 404);
-    c.header("cache-control", "no-store");
-    c.header("referrer-policy", "no-referrer");
-    c.header("content-type", "text/html; charset=utf-8");
-    if (!navAccessAllowed(c, site)) {
-      return c.body(renderPasswordPage(site.title, site.slug));
-    }
-    const q = c.req.query("q") ?? "";
-    const items = store
-      .navSiteItems(site.slug)
-      .filter((it) => it.title.toLowerCase().includes(q.toLowerCase()) || it.url_raw.toLowerCase().includes(q.toLowerCase()))
-      .slice(0, 50);
-    return c.body(
-      `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>${esc(q)} - 搜索结果</title>
+  root.get("/s/:slug/search", (c) =>
+    asSlugOwner(c.req.param("slug"), () => {
+      const site = store.getNavSiteFull(c.req.param("slug"));
+      if (!site || site.published !== 1) return c.json({ error: "not_found" }, 404);
+      c.header("cache-control", "no-store");
+      c.header("referrer-policy", "no-referrer");
+      c.header("content-type", "text/html; charset=utf-8");
+      if (!navAccessAllowed(c, site)) {
+        return c.body(renderPasswordPage(site.title, site.slug));
+      }
+      const q = c.req.query("q") ?? "";
+      const items = store
+        .navSiteItems(site.slug)
+        .filter((it) => it.title.toLowerCase().includes(q.toLowerCase()) || it.url_raw.toLowerCase().includes(q.toLowerCase()))
+        .slice(0, 50);
+      return c.body(
+        `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>${esc(q)} - 搜索结果</title>
 <style>
   :root { --bg:#f7f7f8; --text:#222; --muted:#888; --card:#fff; --border:#e5e5e8; }
   @media (prefers-color-scheme: dark) { :root { --bg:#161618; --text:#eee; --muted:#999; --card:#222225; --border:#333; } }
@@ -1897,10 +2295,11 @@ export function buildApp(deps: AppDeps): Hono {
   .back { color:var(--muted); font-size:13px; }
 </style>
 </head><body><h1>“${esc(q)}”的搜索结果</h1><ul>${items
-        .map((r) => `<li><a href="${esc(r.url_raw)}">${esc(r.title)}</a></li>`)
-        .join("")}</ul><p><a class="back" href="/s/${esc(site.slug)}">← 返回</a></p></body></html>`,
-    );
-  });
+          .map((r) => `<li><a href="${esc(r.url_raw)}">${esc(r.title)}</a></li>`)
+          .join("")}</ul><p><a class="back" href="/s/${esc(site.slug)}">← 返回</a></p></body></html>`,
+      );
+    }),
+  );
 
   root.route("/", api);
   return root;
