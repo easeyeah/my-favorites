@@ -4,7 +4,7 @@
  * 行内新建/重命名目录、书签行直接拖到目录树归位、全文搜索、收纳盒 AI 归位。
  * 隐私条目显示「🛡 仅元数据」徽章（红线②）；删除永不自动执行（红线③）。
  */
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import {
     Archive,
     ArchiveRestore,
@@ -50,6 +50,10 @@ import {
 } from '@/components/shared'
 import { CheckupSection, DupSection, HistorySection, HistoryTrigger, ReorgButton, ReorgSection } from '@/components/TidyPanel'
 import { useRoute, useShell } from '@/components/layout'
+import { useServerChanges } from '@/lib/events'
+import { useLiveRefresh } from '@/lib/live-refresh'
+import { isMock, mockMaterialScanStream } from '@/lib/mock'
+import { consumeSse } from '@/lib/sse'
 import {
     ApiError,
     apiCall,
@@ -69,7 +73,20 @@ const PAGE = 100
 // 新增渲染点禁止手拼 `📥 ${name}`，一律调用本函数。
 const inboxLabel = (name: string): string => `📥 ${name.replace(/^(?:\u{1F4E5}\s*)+/u, "")}`
 
+/** 按 ID 去重（追加加载与背景刷新窗口重叠时防重复行） */
+const dedupeById = (rows: Bookmark[]): Bookmark[] => {
+    const seen = new Set<string>()
+    return rows.filter(b => (seen.has(b.id) ? false : (seen.add(b.id), true)))
+}
+
 type StatusFilter = 'all' | 'dead' | 'normal' | 'archived' | 'duplicate'
+/** 右键菜单动作项（书签行/目录树共用形状） */
+interface MenuAction {
+    label: string
+    icon: React.ReactNode
+    run: () => void
+    disabled?: boolean
+}
 // 「正常」不设筛选：全部 vs 正常 只差那几条坏链接，而坏链接正是需要看见的（有圆点标记 + 自动化动态播报），
 // 藏起来是负价值；要清理走「失效」。normal 保留在类型里（API 兼容），仅不出现筛选入口。
 const STATUS_CHIPS: Array<[StatusFilter, string]> = [
@@ -135,8 +152,34 @@ export function Library() {
     const [editForm, setEditForm] = useState({ title: '', url: '', description: '' })
     const [savingEdit, setSavingEdit] = useState(false)
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; b: Bookmark } | null>(null)
+    // ---- D89 目录右键菜单（与书签行右键同款轻量浮层；收纳盒行另有专属菜单）----
+    const [folderCtx, setFolderCtx] = useState<{ x: number; y: number; folder: FolderTreeNode } | null>(null)
+    const [folderMoveTarget, setFolderMoveTarget] = useState<FolderTreeNode | null>(null)
+    const [folderDeleteTarget, setFolderDeleteTarget] = useState<FolderTreeNode | null>(null)
+    const [scanTarget, setScanTarget] = useState<FolderTreeNode | null>(null)
+    // 目录重整理执行中（菜单项与树行显示加载态）
+    const [reorgFolderId, setReorgFolderId] = useState<string | null>(null)
     // D54：收纳盒「最近自动归位」区（去向可见 + 可撤销）
     const [placedRows, setPlacedRows] = useState<InboxPlaced[] | null>(null)
+
+    // ---- D82 实时更新：视图竞态防护 + 编辑冲突 + 滚动锚点 ----
+    // epoch：视图/账号/服务端身份变化即递增并作废旧请求——旧响应无权写入新视图
+    const epochRef = useRef(0)
+    const abortRef = useRef<AbortController | null>(null)
+    // listGen：同视图内列表写入代数——初始/手动/背景刷新任一落地即递增，
+    // 晚到的旧响应（如首查被延迟期间背景刷新已校准）无权覆盖（追加加载除外，去重合并）
+    const listGenRef = useRef(0)
+    // 刷新批次读最新状态镜像（避免闭包过期与依赖抖动）
+    const live = useRef({ tree, items, selected, multiFolders, statusFilter, searching, q, reorgActive, historyActive, detailId, editing })
+    live.current = { tree, items, selected, multiFolders, statusFilter, searching, q, reorgActive, historyActive, detailId, editing }
+    // 编辑草稿保护：进入编辑时的基线快照 + 外部变化标记（deleted=已被删除 / modified=被外部修改）
+    const editBaseRef = useRef<{ title: string; url: string; description: string } | null>(null)
+    const [editConflict, setEditConflict] = useState<null | 'deleted' | 'modified'>(null)
+    const [externalDetail, setExternalDetail] = useState<BookmarkDetail | null>(null)
+    // 详情内「移动到…」/ 树行「目录搬家」弹窗的开合计数（子组件局部态，上报供阻塞判定）
+    const [moveDialogs, setMoveDialogs] = useState(0)
+    // 后台刷新滚动锚点：可见首行 ID + 视口偏移；锚点被删时恢复邻近仍存在的行
+    const pendingAnchorRef = useRef<{ id: string; top: number; ids: string[] } | null>(null)
 
     useEffect(() => {
         if (!ctxMenu) return
@@ -153,6 +196,23 @@ export function Library() {
             window.removeEventListener('keydown', onKey)
         }
     }, [ctxMenu])
+
+    // 目录右键菜单同款关闭行为（开合计入 D82 blocked，后台刷新不替换树）
+    useEffect(() => {
+        if (!folderCtx) return
+        const close = () => setFolderCtx(null)
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setFolderCtx(null)
+        }
+        window.addEventListener('mousedown', close)
+        window.addEventListener('resize', close)
+        window.addEventListener('keydown', onKey)
+        return () => {
+            window.removeEventListener('mousedown', close)
+            window.removeEventListener('resize', close)
+            window.removeEventListener('keydown', onKey)
+        }
+    }, [folderCtx])
 
     // 树的行内编辑状态
     const [creating, setCreating] = useState<{ parentId: string | null } | null>(null)
@@ -172,10 +232,11 @@ export function Library() {
     const inboxNode = tree.find(f => f.is_system_inbox === 1)
 
     const loadTree = useCallback(() => {
+        // D82：树请求失败保留旧树——不得当作「全部目录已删除」（选中回退只在成功取树后执行）
         fetchers
             .folderTree(cfg)
             .then(setTree)
-            .catch(() => setTree([]))
+            .catch(() => {})
     }, [cfg])
     useEffect(loadTree, [loadTree])
 
@@ -253,9 +314,14 @@ export function Library() {
 
     const loadPage = useCallback(
         async (view: string | 'all', offset: number, append: boolean, status: StatusFilter) => {
+            const gen = listGenRef.current
+            // 晚到旧响应丢弃是安全的：代数递增意味着已有更新的数据落地（不会停在骨架态）
+            const staleGen = () => gen !== listGenRef.current
             if (!append) setItems(null)
             // 「重复」是组视图（DupSection 渲染），不走书签列表
             if (status === 'duplicate') {
+                if (staleGen()) return
+                listGenRef.current++
                 setItems([])
                 setHasMore(false)
                 return
@@ -267,23 +333,53 @@ export function Library() {
                     fetchers.bookmarks(cfg, { folderId, status: 'dead', limit: 200 }),
                     fetchers.bookmarks(cfg, { folderId, status: 'suspect', limit: 200 }),
                 ]).catch(() => [[], []] as Bookmark[][])
-                setItems(prev => (append ? [...(prev ?? []), ...deadList, ...suspectList] : [...deadList, ...suspectList]))
+                if (staleGen()) return
+                listGenRef.current++
+                setItems(prev => (append ? dedupeById([...(prev ?? []), ...deadList, ...suspectList]) : [...deadList, ...suspectList]))
                 setHasMore(false)
                 return
             }
-            const batch = await fetchers
-                .bookmarks(cfg, {
-                    folderId: view === 'all' ? undefined : view,
-                    status: status === 'all' ? undefined : status,
-                    limit: PAGE,
-                    offset,
-                })
-                .catch(() => [] as Bookmark[])
-            setItems(prev => (append ? [...(prev ?? []), ...batch] : batch))
+            const query = {
+                folderId: view === 'all' ? undefined : view,
+                status: status === 'all' ? undefined : status,
+                limit: PAGE,
+                offset,
+            }
+            let batch = await fetchers.bookmarks(cfg, query).catch(() => [] as Bookmark[])
+            if (append) {
+                // 追加与背景刷新重叠致代数失效时重取（最多 3 轮）——「加载更多」不得被静默丢弃
+                let g = gen
+                for (let attempt = 0; g !== listGenRef.current && attempt < 3; attempt++) {
+                    g = listGenRef.current
+                    batch = await fetchers.bookmarks(cfg, query).catch(() => [] as Bookmark[])
+                }
+                if (g !== listGenRef.current) return
+                listGenRef.current++
+                setItems(prev => dedupeById([...(prev ?? []), ...batch]))
+                setHasMore(batch.length === PAGE)
+                return
+            }
+            if (staleGen()) return
+            listGenRef.current++
+            setItems(batch)
             setHasMore(batch.length === PAGE)
         },
         [cfg],
     )
+
+    // D82：视图身份（账号/服务端/目录/筛选/关键词/面板）变化 → 递增 epoch 并取消旧请求。
+    // 声明在视图加载 effect 之前，保证加载开始时 epoch/abort 已就位。
+    const viewKey = [
+        cfg.serverUrl, cfg.token, selected, statusFilter,
+        [...multiFolders].sort().join(','),
+        searching ? `q:${q}` : '', reorgActive ? 'reorg' : '', historyActive ? 'history' : '',
+    ].join('|')
+    useEffect(() => {
+        epochRef.current++
+        abortRef.current?.abort()
+        abortRef.current = new AbortController()
+        pendingAnchorRef.current = null // 视图切换：旧锚点作废（新视图允许重置位置）
+    }, [viewKey])
 
     useEffect(() => {
         if (multiFolders.size >= 2) return // 多目录并集视图由下方 effect 负责
@@ -294,6 +390,7 @@ export function Library() {
     // 多目录并集：Ctrl/Cmd 多选 ≥2 个目录时，列表 = 各目录前 PAGE 条拼接（配合框选批量操作）
     useEffect(() => {
         if (multiFolders.size < 2) return
+        const gen = listGenRef.current
         setItems(null)
         setHasMore(false)
         Promise.all(
@@ -305,7 +402,11 @@ export function Library() {
                 }),
             ),
         )
-            .then(lists => setItems(lists.flat()))
+            .then(lists => {
+                if (gen !== listGenRef.current) return
+                listGenRef.current++
+                setItems(dedupeById(lists.flat()))
+            })
             .catch(() => setItems([]))
     }, [multiFolders, statusFilter, cfg])
 
@@ -314,8 +415,9 @@ export function Library() {
         setChecked(new Set())
     }, [selected, statusFilter, multiFolders, searching])
 
-    /** 按当前视图刷新：多目录并集重新拉并集，单目录走 loadPage */
+    /** 按当前视图刷新（用户动作后）：递增 epoch 作废在途背景批次，手动加载接管 */
     const reloadView = () => {
+        epochRef.current++
         if (multiFolders.size >= 2) setMultiFolders(new Set(multiFolders))
         else void loadPage(selected, 0, false, statusFilter)
         loadTree()
@@ -337,11 +439,14 @@ export function Library() {
             selectFolder('all')
             return
         }
+        const gen = listGenRef.current
         setSearching(true)
         setReorgActive(false)
         setHistoryActive(false)
         setItems(null)
         const res = await fetchers.search(cfg, v).catch(() => ({ results: [] as Bookmark[] }))
+        if (gen !== listGenRef.current) return
+        listGenRef.current++
         setItems(res.results)
         setHasMore(false)
     }
@@ -521,30 +626,48 @@ export function Library() {
         window.addEventListener('mouseup', onUp)
     }
 
+    /** 关闭详情（含编辑态清理——防 editing 残留导致刷新永久阻塞） */
+    const closeDetail = () => {
+        setDetailId(null)
+        setDetail(null)
+        setEditing(false)
+        setEditConflict(null)
+        setExternalDetail(null)
+        editBaseRef.current = null
+    }
+
     /** 行内展开详情：再点同一行收起，点其他行切换 */
     const openDetail = async (b: Bookmark) => {
         if (detailId === b.id) {
-            setDetailId(null)
-            setDetail(null)
-            setEditing(false)
+            closeDetail()
             return
         }
         setDetailId(b.id)
         setDetail(null)
         setEditing(false)
+        setEditConflict(null)
+        setExternalDetail(null)
         setDetailLoading(true)
         const d = await fetchers.bookmarkDetail(cfg, b.id).catch(() => null)
         setDetail(d)
         setDetailLoading(false)
     }
 
-    // ---- D52 编辑 ----
+    // ---- D52 编辑（D82：草稿保护——外部删除/修改不覆盖输入，冲突显式标记） ----
     const startEdit = (b: { title: string; url_raw: string; description: string | null }) => {
+        editBaseRef.current = { title: b.title, url: b.url_raw, description: b.description ?? '' }
         setEditForm({ title: b.title, url: b.url_raw, description: b.description ?? '' })
+        setEditConflict(null)
+        setExternalDetail(null)
         setEditing(true)
     }
+    const copyDraft = () => {
+        const text = [editForm.title, editForm.url, editForm.description].filter(Boolean).join('\n')
+        void navigator.clipboard?.writeText(text)
+        toast.ok('草稿已复制')
+    }
     const saveEdit = async () => {
-        if (!detail || savingEdit) return
+        if (!detail || savingEdit || editConflict === 'deleted') return
         const body: Record<string, unknown> = {}
         const ttl = editForm.title.trim()
         const u = editForm.url.trim()
@@ -559,13 +682,14 @@ export function Library() {
         try {
             await apiCall(cfg, `/bookmarks/${detail.id}`, { method: 'PATCH', body: JSON.stringify(body) })
             toast.ok('已保存')
-            setEditing(false)
-            setDetailId(null)
-            setDetail(null)
+            closeDetail()
             reloadView()
             loadTree()
         } catch (e) {
-            if (e instanceof ApiError && e.message.includes('duplicate_url')) {
+            if (e instanceof ApiError && e.status === 404) {
+                // 编辑期间被外部删除：保留草稿，标记冲突，阻止无效保存（不得自动重建）
+                setEditConflict('deleted')
+            } else if (e instanceof ApiError && e.message.includes('duplicate_url')) {
                 toast.err('该 URL 与库内其他书签查重冲突（规范化后同一条），可直接打开那条')
             } else if (e instanceof ApiError && e.message.includes('invalid_url')) {
                 toast.err('URL 格式不合法')
@@ -626,8 +750,7 @@ export function Library() {
         try {
             await apiCall(cfg, `/bookmarks/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
             toast.ok(okText)
-            setDetailId(null)
-            setDetail(null)
+            closeDetail()
             reloadView()
             loadTree()
             refreshBadges()
@@ -640,8 +763,7 @@ export function Library() {
         try {
             await apiCall(cfg, `/bookmarks/${b.id}`, { method: 'DELETE' })
             setPendingDelete(null)
-            setDetailId(null)
-            setDetail(null)
+            closeDetail()
             toast.ok(`已删除「${b.title}」`)
             reloadView()
             refreshBadges()
@@ -691,16 +813,38 @@ export function Library() {
         }
     }
 
-    const deleteFolder = async (id: string) => {
+    const deleteFolder = async (folder: FolderTreeNode) => {
         try {
-            const r = await apiCall<{ ok?: boolean; error?: string }>(cfg, `/folders/${id}`, { method: 'DELETE' })
+            const r = await apiCall<{ ok?: boolean; error?: string }>(cfg, `/folders/${folder.id}`, { method: 'DELETE' })
             if (r?.error) {
-                toast.err('目录非空：先移走里面的书签或子目录')
+                toast.err('删除失败：系统目录不可删除')
                 return
             }
-            toast.ok('已删除空目录')
-            if (selected === id) selectFolder('all')
-            loadTree()
+            setFolderDeleteTarget(null)
+            toast.ok(
+                folder.totalCount > 0
+                    ? `已删除「${folder.name}」及其 ${folder.totalCount} 条书签`
+                    : `已删除目录「${folder.name}」`,
+            )
+            // 当前视图在被删子树内（含多选）→ 回全部；否则原位刷新
+            const removed = (id: string) => {
+                let cur = folderMap.get(id)
+                while (cur) {
+                    if (cur.id === folder.id) return true
+                    cur = cur.parent_id ? folderMap.get(cur.parent_id) : undefined
+                }
+                return false
+            }
+            const inside = (selected !== 'all' && removed(selected)) ||
+                [...multiFolders].some(id => removed(id))
+            if (inside) {
+                setMultiFolders(new Set())
+                setSelected('all')
+                loadTree()
+            } else {
+                reloadView()
+            }
+            refreshBadges()
         } catch (e) {
             toast.err(`删除失败：${e instanceof ApiError ? e.message : String(e)}`)
         }
@@ -718,6 +862,56 @@ export function Library() {
         }
     }
 
+    // D81 §3-A：目录搬家（reparent）——PATCH parentId，服务端校验父存在+禁止成环，
+    // 变更经同步引擎收敛到浏览器（folder.move 事件 → 节点搬运）
+    const moveFolderTo = async (id: string, parentId: string | null) => {
+        try {
+            // 真机非法搬家（父不存在/成环/系统目录）服务端回 400 抛 ApiError；mock 以 200+{error} 表达，两路都要拦
+            const r = await apiCall<{ error?: string; hint?: string }>(cfg, `/folders/${id}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ parentId }),
+            })
+            if (r?.error) {
+                toast.err(`目录移动失败：${r.hint ?? r.error}`)
+                return
+            }
+            toast.ok(parentId ? `目录已移到「${folderName(parentId)}」下` : '目录已移到根级')
+            loadTree()
+            refreshBadges()
+        } catch (e) {
+            toast.err(`目录移动失败：${e instanceof ApiError ? e.message : String(e)}`)
+        }
+    }
+
+    /**
+     * D89 目录级 AI 重新整理：范围=目录子树，目标限定子树内（可在该目录下新建子目录），
+     * 直接生效 + 写 organize_version（可撤销）。无确认流（D27）。
+     */
+    const reorgFolder = async (folder: FolderTreeNode) => {
+        if (reorgFolderId || processing) return
+        setReorgFolderId(folder.id)
+        try {
+            const r = await apiCall<{ status: 'applied' | 'answered'; answer: string; applied?: number }>(
+                cfg,
+                '/organize/folder',
+                { method: 'POST', body: JSON.stringify({ folderId: folder.id, includeSubfolders: true }) },
+            )
+            if (r.status === 'applied' && (r.applied ?? 0) > 0) {
+                toast.ok(`已重新整理「${folder.name}」的 ${r.applied} 项（版本历史可撤销）`)
+                window.dispatchEvent(new Event('mf:versions-changed'))
+                loadTree()
+                void loadPage(selected, 0, false, statusFilter)
+            } else {
+                toast.info(r.answer || '分类结果与现有目录一致，无需挪动')
+            }
+            refreshBadges()
+        } catch (e) {
+            toast.err(`整理失败：${e instanceof ApiError ? e.message : String(e)}`)
+        } finally {
+            setReorgFolderId(null)
+        }
+    }
+
       const loadPlaced = useCallback(() => {
           fetchers
               .inboxItems(cfg)
@@ -728,6 +922,234 @@ export function Library() {
       useEffect(() => {
           if (inboxNode && selected === inboxNode.id && !searching) loadPlaced()
       }, [selected, inboxNode, searching, loadPlaced])
+
+      // ---- D82 实时更新（《管理台书签实时更新》§4–§6）：通知后重新查询，SSE 只做门铃 ----
+
+      /** 记录可见首行锚点（背景刷新替换列表前调用；视图切换/首次加载不记） */
+      const captureAnchor = () => {
+          const wrap = listWrapRef.current
+          if (!wrap) { pendingAnchorRef.current = null; return }
+          const rows = [...wrap.querySelectorAll<HTMLElement>('[data-bid]')]
+          // 首条可见行 = 底边越过吸顶导航（约 120px）的第一行
+          const first = rows.find(el => el.getBoundingClientRect().bottom > 130)
+          if (!first) { pendingAnchorRef.current = null; return }
+          pendingAnchorRef.current = {
+              id: first.dataset.bid!,
+              top: first.getBoundingClientRect().top,
+              ids: rows.map(el => el.dataset.bid!),
+          }
+      }
+
+      // 列表替换后恢复锚点：锚点行仍在 → 保持视口偏移；被删 → 邻近仍存在的行（先下后上）
+      useLayoutEffect(() => {
+          const a = pendingAnchorRef.current
+          if (!a) return
+          pendingAnchorRef.current = null
+          const wrap = listWrapRef.current
+          if (!wrap) return
+          const find = (id: string) => wrap.querySelector<HTMLElement>(`[data-bid="${CSS.escape(id)}"]`)
+          let el = find(a.id)
+          if (!el) {
+              const idx = a.ids.indexOf(a.id)
+              for (let d = 1; d < a.ids.length && !el; d++) {
+                  if (idx + d < a.ids.length) el = find(a.ids[idx + d]!)
+                  if (!el && idx - d >= 0) el = find(a.ids[idx - d]!)
+              }
+          }
+          if (!el) return
+          const delta = el.getBoundingClientRect().top - a.top
+          if (Math.abs(delta) > 1) window.scrollBy({ top: delta })
+      }, [items])
+
+      /** 背景刷新统一落列表：替换数据 + 清理已不在可操作范围的选中项（不因单页缺席判删） */
+      const applyRefreshedItems = (next: Bookmark[], more: boolean) => {
+          listGenRef.current++ // 作废同视图在途的旧初始/手动响应
+          setItems(next)
+          setHasMore(more)
+          const ids = new Set(next.map(b => b.id))
+          setChecked(prev => {
+              const n = new Set([...prev].filter(id => ids.has(id)))
+              return n.size === prev.size ? prev : n
+          })
+      }
+
+      /** 当前视图的已加载窗口重查（不 setItems(null)，失败抛出由调度器退避重试、旧列表保留） */
+      const refreshList = async (epoch: number, signal: AbortSignal | undefined) => {
+          const s = live.current
+          const stale = () => epoch !== epochRef.current || Boolean(signal?.aborted)
+          const status = s.statusFilter
+          if (status === 'duplicate') return // 重复组视图由 DupSection 自行订阅门铃校准
+          captureAnchor()
+          if (s.multiFolders.size >= 2) {
+              // 多目录联合视图：按各目录已加载窗口重查并去重，保留联合排序语义（与并集 effect 同口径）
+              const lists = await Promise.all(
+                  [...s.multiFolders].map(id =>
+                      fetchers.bookmarks(cfg, {
+                          folderId: id,
+                          status: status === 'all' ? undefined : status, // duplicate 已在入口早退（DupSection 自校准）
+                          limit: PAGE,
+                      }, signal),
+                  ),
+              )
+              if (stale()) { pendingAnchorRef.current = null; return }
+              const seen = new Set<string>()
+              const next: Bookmark[] = []
+              for (const list of lists) for (const b of list) if (!seen.has(b.id)) { seen.add(b.id); next.push(b) }
+              applyRefreshedItems(next, false)
+              return
+          }
+          if (status === 'dead') {
+              // 失效视图 = 确认打不开 + 疑似合并（与 loadPage 同口径）
+              const folderId = s.selected === 'all' ? undefined : s.selected
+              const [deadList, suspectList] = await Promise.all([
+                  fetchers.bookmarks(cfg, { folderId, status: 'dead', limit: 200 }, signal),
+                  fetchers.bookmarks(cfg, { folderId, status: 'suspect', limit: 200 }, signal),
+              ])
+              if (stale()) { pendingAnchorRef.current = null; return }
+              applyRefreshedItems([...deadList, ...suspectList], false)
+              return
+          }
+          // 单目录普通列表：重取当前已加载窗口（不能只刷第一页）；遵守 API 单页上限 1000，必要时顺序分页
+          const windowSize = Math.max(PAGE, s.items?.length ?? PAGE)
+          const folderId = s.selected === 'all' ? undefined : s.selected
+          const out: Bookmark[] = []
+          let offset = 0
+          let full = true
+          while (offset < windowSize) {
+              const lim = Math.min(1000, windowSize - offset)
+              const batch = await fetchers.bookmarks(cfg, {
+                  folderId,
+                  status: status === 'all' ? undefined : status,
+                  limit: lim,
+                  offset,
+              }, signal)
+              if (stale()) { pendingAnchorRef.current = null; return }
+              out.push(...batch)
+              offset += batch.length
+              full = batch.length === lim
+              if (!full) break
+          }
+          applyRefreshedItems(out, full && out.length >= windowSize)
+      }
+
+      /** 一次刷新批次：树 → 选中回退 → 列表/搜索 → 失效标注 → 归位历史 → 详情存在性校验 */
+      const refreshBatch = async () => {
+          const epoch = epochRef.current
+          const signal = abortRef.current?.signal ?? undefined
+          const stale = () => epoch !== epochRef.current || Boolean(signal?.aborted)
+          const s = live.current
+
+          // ① 目录树：失败保留旧树、跳过回退（不得当作「全部目录已删除」）
+          let newTree: FolderTreeNode[] | null = null
+          try {
+              newTree = await fetchers.folderTree(cfg, signal)
+          } catch {
+              if (stale()) return
+          }
+          if (stale()) return
+          let viewChanged = false
+          if (newTree) {
+              const ids = new Set(newTree.map(f => f.id))
+              if (s.multiFolders.size >= 2) {
+                  // 联合视图优先剔除不存在目录：≥2 保持联合 / 1 切单目录 / 0 回全部
+                  const remain = [...s.multiFolders].filter(id => ids.has(id))
+                  if (remain.length < s.multiFolders.size) {
+                      if (remain.length >= 2) {
+                          setMultiFolders(new Set(remain))
+                          if (!remain.includes(s.selected)) setSelected(remain[0]!)
+                      } else {
+                          setSelected(remain[0] ?? 'all')
+                          setMultiFolders(new Set())
+                      }
+                      viewChanged = true
+                  }
+              } else if (s.selected !== 'all' && !ids.has(s.selected)) {
+                  // 当前目录被删：用刷新前的树记录祖先链，在新树中找最近仍存在的祖先；全不存在回「全部」
+                  const chain: string[] = []
+                  let cur = s.tree.find(f => f.id === s.selected)
+                  while (cur?.parent_id) {
+                      chain.push(cur.parent_id)
+                      const pid = cur.parent_id
+                      cur = s.tree.find(f => f.id === pid)
+                  }
+                  setSelected(chain.find(id => ids.has(id)) ?? 'all')
+                  viewChanged = true
+              }
+              setTree(newTree)
+          }
+
+          // ② 列表校准：回退改变了查询范围 → 旧范围响应作废，交给视图加载 effect（新视图允许重置位置）
+          if (!viewChanged) {
+              if (s.searching) {
+                  // 搜索视图：保留关键词重查（失败保留旧结果）
+                  const res = await fetchers.search(cfg, s.q, undefined, signal)
+                  if (stale()) return
+                  captureAnchor()
+                  applyRefreshedItems(res.results, false)
+              } else if (!s.reorgActive && !s.historyActive) {
+                  await refreshList(epoch, signal)
+              }
+              // 失效标注（行内失败原因）随批校准；失败保留旧标注
+              fetchers.linkReport(cfg, signal)
+                  .then(r => { if (!stale()) setLinkReport(r) })
+                  .catch(() => {})
+          }
+
+          // ③ 收纳盒归位历史（盒视图且非搜索）
+          const inbox = (newTree ?? s.tree).find(f => f.is_system_inbox === 1)
+          if (inbox && s.selected === inbox.id && !s.searching && !viewChanged) {
+              fetchers.inboxItems(cfg, signal)
+                  .then(r => { if (!stale()) setPlacedRows(r.placed) })
+                  .catch(() => {})
+          }
+
+          // ④ 非编辑态详情：安静跟随外部更新；已被删除 → 关闭失效详情 + 轻提示一次
+          if (s.detailId && !s.editing) {
+              try {
+                  const d = await fetchers.bookmarkDetail(cfg, s.detailId, signal)
+                  if (stale()) return
+                  setDetail(d)
+              } catch (e) {
+                  if (stale()) return
+                  if (e instanceof ApiError && e.status === 404) {
+                      setDetailId(null)
+                      setDetail(null)
+                      toast.err('该书签已被外部删除')
+                  }
+                  // 其他失败保留旧详情
+              }
+          }
+      }
+
+      // 编辑中的实体单独做存在性/版本校验（设计 §4.1）：不受阻塞暂停影响，
+      // 只更新冲突提示，绝不修改草稿/列表——否则冲突要等编辑结束才可见，保护形同虚设
+      useServerChanges(() => {
+          const s = live.current
+          if (!s.editing || !s.detailId) return
+          const id = s.detailId
+          fetchers.bookmarkDetail(cfg, id)
+              .then(d => {
+                  if (live.current.detailId !== id || !live.current.editing) return
+                  const base = editBaseRef.current
+                  if (base && (d.title !== base.title || d.url_raw !== base.url || (d.description ?? '') !== base.description)) {
+                      setExternalDetail(d)
+                      setEditConflict('modified')
+                  } else if (base) {
+                      setEditConflict(c => (c === 'modified' ? null : c)) // 外部改动回退到基线 → 冲突自愈
+                  }
+              })
+              .catch(e => {
+                  if (live.current.detailId !== id || !live.current.editing) return
+                  if (e instanceof ApiError && e.status === 404) setEditConflict('deleted')
+              })
+      })
+
+      // 阻塞判定：编辑/新建/改名/右键菜单/各弹窗打开时暂停数据替换（dirty 保留，关闭后立即补刷）
+      const blocked = editing || creating !== null || renaming !== null || ctxMenu !== null
+          || folderCtx !== null || folderMoveTarget !== null || folderDeleteTarget !== null
+          || scanTarget !== null || reorgFolderId !== null
+          || addOpen || batchMoveOpen || batchDeleteOpen || pendingDelete !== null || moveDialogs > 0 || processing
+      const { error: refreshError, retry: retryRefresh } = useLiveRefresh({ refresh: refreshBatch, blocked })
 
       const processInbox = async (folderId: string) => {
         setProcessing(true)
@@ -744,6 +1166,47 @@ export function Library() {
         } finally {
             setProcessing(false)
         }
+    }
+
+    /** D89 目录右键动作：收纳盒行只保留「打开 / AI 归位」；真实目录给全量管理动作 */
+    const folderCtxActions = (folder: FolderTreeNode): MenuAction[] => {
+        if (folder.is_system_inbox === 1) {
+            return [
+                { label: '打开收纳盒', icon: <ChevronRight className="size-3.5" />, run: () => selectFolder(folder.id) },
+                {
+                    label: 'AI 归位',
+                    icon: <Sparkles className="size-3.5" />,
+                    disabled: processing,
+                    run: () => void processInbox(folder.id),
+                },
+            ]
+        }
+        const busy = reorgFolderId === folder.id
+        return [
+            { label: '打开目录', icon: <ChevronRight className="size-3.5" />, run: () => selectFolder(folder.id) },
+            {
+                label: '新建子目录',
+                icon: <FolderPlus className="size-3.5" />,
+                run: () => {
+                    setCreating({ parentId: folder.id })
+                    updateExpanded(new Set([...expanded, folder.id]))
+                },
+            },
+            { label: '重命名', icon: <Pencil className="size-3.5" />, run: () => setRenaming({ id: folder.id, name: folder.name }) },
+            { label: '移动到…', icon: <FolderInput className="size-3.5" />, run: () => setFolderMoveTarget(folder) },
+            {
+                label: busy ? '正在重新整理…' : 'AI 重新整理此目录',
+                icon: busy ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />,
+                disabled: reorgFolderId !== null || processing,
+                run: () => void reorgFolder(folder),
+            },
+            {
+                label: '提取资料',
+                icon: <BookMarked className="size-3.5" />,
+                disabled: folder.totalCount === 0,
+                run: () => setScanTarget(folder),
+            },
+        ]
     }
 
     const statusLabel =
@@ -783,6 +1246,12 @@ export function Library() {
         return (
             <div key={folder.id}>
                 <div
+                    onContextMenu={e => {
+                        if (e.ctrlKey) return // 保留 Mac 原生菜单
+                        if (renaming?.id === folder.id) return // 行内改名时让输入框自己处理
+                        e.preventDefault()
+                        setFolderCtx({ x: e.clientX, y: e.clientY, folder })
+                    }}
                     onDragOver={e => {
                         if (!dragId) return
                         e.preventDefault()
@@ -844,6 +1313,9 @@ export function Library() {
                                     <Folder className="size-3.5 shrink-0 text-foreground/60" />
                                 )}
                                 <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+                                {reorgFolderId === folder.id && (
+                                    <Loader2 className="text-primary size-3 shrink-0 animate-spin" />
+                                )}
                                 <span className="tabular text-[11px] text-muted-foreground/50">
                                     {folder.totalCount}
                                 </span>
@@ -868,11 +1340,19 @@ export function Library() {
                                         <Pencil className="size-3" />
                                     </button>
                                 )}
+                                {!folder.is_system_inbox && (
+                                    <FolderMoveIcon
+                                        tree={tree}
+                                        folder={folder}
+                                        onOpenChange={open => setMoveDialogs(n => Math.max(0, n + (open ? 1 : -1)))}
+                                        onMove={target => void moveFolderTo(folder.id, target)}
+                                    />
+                                )}
                                 {folder.totalCount === 0 && (
                                     <button
                                         className="text-destructive rounded p-0.5"
                                         title="删除空目录"
-                                        onClick={() => void deleteFolder(folder.id)}
+                                        onClick={() => void deleteFolder(folder)}
                                     >
                                         <Trash2 className="size-3" />
                                     </button>
@@ -910,6 +1390,16 @@ export function Library() {
                                       ? `${items.length}${hasMore ? '+' : ''} 条`
                                       : '…'
                             }`}
+                        {/* D82：刷新失败安静提示（退避自动重试 + 手动重试入口）；正常更新不弹 toast */}
+                        {refreshError && (
+                            <button
+                                className="ml-2 text-[11px] text-amber-600 underline-offset-2 hover:underline dark:text-amber-400"
+                                title={refreshError}
+                                onClick={retryRefresh}
+                            >
+                                更新失败，正在重试 · 手动重试
+                            </button>
+                        )}
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -933,7 +1423,42 @@ export function Library() {
                         }}
                     />
                 </div>
-                {inboxView && inboxNode ? (
+                {checked.size > 0 ? (
+                    /* 多选时批量操作条顶替状态 chips（多选下筛选无意义）——与搜索框同高 h-9，按钮 ≥28px 可点；行高由搜索框决定，列表不位移 */
+                    <div className="bg-muted/60 flex h-9 items-center gap-x-1 rounded-full pr-1 pl-3">
+                        <span className="mr-1 text-[13px] font-medium tabular">已选 {checked.size} 条</span>
+                        <button
+                            className="text-muted-foreground hover:bg-card hover:text-foreground flex h-7 shrink-0 items-center rounded-full px-3 text-[13px] transition-colors"
+                            onClick={toggleAllPage}
+                        >
+                            {allPageChecked ? '取消全选' : '全选本页'}
+                        </button>
+                        <button
+                            className="text-muted-foreground hover:bg-card hover:text-foreground flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-[13px] transition-colors"
+                            onClick={() => { setBatchTarget(''); setBatchMoveOpen(true) }}
+                        >
+                            <FolderInput className="size-3.5" /> 移动到…
+                        </button>
+                        <button
+                            className="text-muted-foreground hover:bg-card hover:text-foreground flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-[13px] transition-colors"
+                            onClick={() => void batchPatch({ status: 'archived' }, n => `已归档 ${n} 条（软归档可恢复）`)}
+                        >
+                            <Archive className="size-3.5" /> 归档
+                        </button>
+                        <button
+                            className="text-destructive hover:bg-destructive/10 flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition-colors"
+                            onClick={() => setBatchDeleteOpen(true)}
+                        >
+                            <Trash2 className="size-3.5" /> 删除
+                        </button>
+                        <button
+                            className="text-muted-foreground hover:text-foreground flex h-7 shrink-0 items-center rounded-full px-2.5 text-[13px] transition-colors"
+                            onClick={() => setChecked(new Set())}
+                        >
+                            取消
+                        </button>
+                    </div>
+                ) : inboxView && inboxNode ? (
                     <div className="bg-muted/60 flex items-center gap-3 rounded-full py-1 pr-1 pl-3">
                         <p className="text-muted-foreground text-xs">
                             随手丢进来的增量。点「AI 归位」自动分拣到各目录——只移动，不删除。
@@ -1034,6 +1559,11 @@ export function Library() {
                                     selected === inboxNode.id && !searching && !reorgActive && 'bg-primary/10 font-medium',
                                 )}
                                 onClick={() => selectFolder(inboxNode.id)}
+                                onContextMenu={e => {
+                                    if (e.ctrlKey) return
+                                    e.preventDefault()
+                                    setFolderCtx({ x: e.clientX, y: e.clientY, folder: inboxNode })
+                                }}
                                 onDragOver={e => {
                                     if (!dragId) return
                                     e.preventDefault()
@@ -1138,36 +1668,6 @@ export function Library() {
                         </div>
                     ) : (
                         <div ref={listWrapRef} className="relative cursor-crosshair" onMouseDown={startMarquee}>
-                            {checked.size > 0 && (
-                                <div className="bg-muted/60 mb-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl px-3 py-2">
-                                    <span className="text-[13px] font-medium tabular">已选 {checked.size} 条</span>
-                                    <button
-                                        className="text-muted-foreground hover:text-foreground text-xs transition-colors"
-                                        onClick={toggleAllPage}
-                                    >
-                                        {allPageChecked ? '取消全选' : '全选本页'}
-                                    </button>
-                                    <span className="flex-1" />
-                                    <Btn onClick={() => { setBatchTarget(''); setBatchMoveOpen(true) }}>
-                                        <FolderInput /> 移动到…
-                                    </Btn>
-                                    <Btn onClick={() => void batchPatch({ status: 'archived' }, n => `已归档 ${n} 条（软归档可恢复）`)}>
-                                        <Archive /> 归档
-                                    </Btn>
-                                    <button
-                                        className="text-destructive hover:bg-destructive/10 flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-sm font-medium transition-colors"
-                                        onClick={() => setBatchDeleteOpen(true)}
-                                    >
-                                        <Trash2 className="size-3.5" /> 删除
-                                    </button>
-                                    <button
-                                        className="text-muted-foreground hover:text-foreground text-xs transition-colors"
-                                        onClick={() => setChecked(new Set())}
-                                    >
-                                        取消
-                                    </button>
-                                </div>
-                            )}
                             <div
                                 data-marquee-overlay
                                 className="border-primary/60 bg-primary/10 pointer-events-none absolute z-10 hidden rounded border"
@@ -1185,6 +1685,9 @@ export function Library() {
                                     return items.map((b, i) => {
                                     const f = failById.get(b.id)
                                     const suspectRow = f?.verdict === 'suspect' || b.status === 'suspect'
+                                    // D89：正常状态收敛为图标左上角绿点（满屏「正常」文字是噪音）；
+                                    // 失效/疑似/已归档仍保留行尾文字徽章（那才是需要被看见的信号）
+                                    const isNormal = !suspectRow && b.status === 'normal'
                                     const showFail = f !== undefined && (b.status === 'dead' || suspectRow)
                                     return (
                                         <Fragment key={b.id}>
@@ -1260,7 +1763,17 @@ export function Library() {
                                                 >
                                                     {checked.has(b.id) && <Check className="size-3" strokeWidth={3} />}
                                                 </button>
-                                                <SiteIcon title={b.title} url={b.url_canonical} size="md" />
+                                                <span className="relative shrink-0">
+                                                    <SiteIcon title={b.title} url={b.url_canonical} size="md" />
+                                                    {isNormal && (
+                                                        <span
+                                                            role="img"
+                                                            title="正常（可访问）"
+                                                            aria-label="正常"
+                                                            className="bg-emerald-500 ring-background absolute -top-0.5 -left-0.5 size-2 rounded-full ring-2"
+                                                        />
+                                                    )}
+                                                </span>
                                                 <div className="min-w-0 flex-1">
                                                     <div className="flex items-center gap-1.5">
                                                         {b.is_private === 1 && (
@@ -1295,7 +1808,7 @@ export function Library() {
                                                         {showFail && f ? f.detail : hostOf(b.url_canonical)}
                                                     </div>
                                                 </div>
-                                                <StatusBadge status={suspectRow ? 'suspect' : b.status} />
+                                                {!isNormal && <StatusBadge status={suspectRow ? 'suspect' : b.status} />}
                                                 <span
                                                     className="text-muted-foreground/60 hidden shrink-0 text-xs tabular xl:block"
                                                     title={`入库于 ${fmtDate(b.added_at)}`}
@@ -1333,10 +1846,7 @@ export function Library() {
                                                     <button
                                                         className="text-muted-foreground hover:bg-accent hover:text-foreground absolute top-2 right-2 rounded-lg p-1 transition-colors"
                                                         title="收起"
-                                                        onClick={() => {
-                                                            setDetailId(null)
-                                                            setDetail(null)
-                                                        }}
+                                                        onClick={closeDetail}
                                                     >
                                                         <X className="size-3.5" />
                                                     </button>
@@ -1367,6 +1877,18 @@ export function Library() {
                                                             <div className="mt-2 max-w-[560px] pr-7">
                                                                 {editing ? (
                                                                     <div className="space-y-1.5">
+                                                                        {/* D82 编辑冲突：外部删除 → 草稿保留但禁止保存；外部修改 → 显式覆盖确认，不静默 */}
+                                                                        {editConflict === 'deleted' && (
+                                                                            <div className="bg-destructive/10 text-destructive flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg px-3 py-2 text-xs" data-conflict="deleted">
+                                                                                <span>该书签已被外部删除——草稿已保留，无法保存。</span>
+                                                                                <button className="underline underline-offset-2 hover:opacity-80" onClick={copyDraft}>复制草稿</button>
+                                                                            </div>
+                                                                        )}
+                                                                        {editConflict === 'modified' && (
+                                                                            <div className="rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400" data-conflict="modified">
+                                                                                编辑期间该书签被外部修改{externalDetail ? `（现标题：${externalDetail.title}）` : ''}——你的输入未被覆盖，保存将覆盖外部改动。
+                                                                            </div>
+                                                                        )}
                                                                         <Input
                                                                             value={editForm.title}
                                                                             onChange={e => setEditForm(sf => ({ ...sf, title: e.target.value }))}
@@ -1387,11 +1909,11 @@ export function Library() {
                                                                             className="h-8 bg-background text-[13px]"
                                                                         />
                                                                         <div className="flex items-center gap-2 pt-0.5">
-                                                                            <Btn primary onClick={() => void saveEdit()} disabled={savingEdit}>
+                                                                            <Btn primary onClick={() => void saveEdit()} disabled={savingEdit || editConflict === 'deleted'}>
                                                                                 {savingEdit ? <Loader2 className="animate-spin" /> : <Check />}
-                                                                                <span>保存</span>
+                                                                                <span>{editConflict === 'modified' ? '仍要保存（覆盖外部改动）' : '保存'}</span>
                                                                             </Btn>
-                                                                            <Btn onClick={() => setEditing(false)}>取消</Btn>
+                                                                            <Btn onClick={() => { setEditing(false); setEditConflict(null); setExternalDetail(null) }}>取消</Btn>
                                                                             <span className="text-muted-foreground ml-1 text-[11px]">
                                                                                 改动将同步到浏览器收藏夹（若已开启双向同步）
                                                                             </span>
@@ -1455,6 +1977,7 @@ export function Library() {
                                                                 <MoveButton
                                                                     tree={tree}
                                                                     current={detail.folder_id}
+                                                                    onOpenChange={open => setMoveDialogs(n => Math.max(0, n + (open ? 1 : -1)))}
                                                                     onMove={folderId =>
                                                                         void patch(detail.id, { folderId }, `已移动到「${folderName(folderId)}」`)
                                                                     }
@@ -1623,6 +2146,59 @@ export function Library() {
                 </div>
             )}
 
+            {/* D89 目录右键菜单：与书签行同款轻量浮层；收纳盒行仅「打开 / AI 归位」 */}
+            {folderCtx && (
+                <div
+                    role="menu"
+                    aria-label="目录操作"
+                    className="bg-popover text-popover-foreground shadow-lg z-50 fixed min-w-[184px] rounded-xl border p-1"
+                    style={{
+                        left: Math.min(folderCtx.x, window.innerWidth - 202),
+                        top: Math.min(folderCtx.y, window.innerHeight - (folderCtx.folder.is_system_inbox === 1 ? 130 : 320)),
+                    }}
+                    onMouseDown={e => {
+                        // 同 D52：阻止冒泡到 window 的关闭监听，否则菜单先卸载、点击落空
+                        e.preventDefault()
+                        e.stopPropagation()
+                    }}
+                    onContextMenu={e => e.preventDefault()}
+                >
+                    {folderCtxActions(folderCtx.folder).map(a => (
+                        <button
+                            key={a.label}
+                            role="menuitem"
+                            disabled={a.disabled}
+                            className={cn(
+                                'hover:bg-accent flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] transition-colors',
+                                a.disabled && 'pointer-events-none opacity-40',
+                            )}
+                            onClick={() => {
+                                setFolderCtx(null)
+                                a.run()
+                            }}
+                        >
+                            <span className="text-muted-foreground">{a.icon}</span> {a.label}
+                        </button>
+                    ))}
+                    {folderCtx.folder.is_system_inbox !== 1 && (
+                        <>
+                            <div className="border-border/50 my-1 border-t" />
+                            <button
+                                role="menuitem"
+                                className="text-destructive hover:bg-destructive/10 flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] transition-colors"
+                                onClick={() => {
+                                    const target = folderCtx.folder
+                                    setFolderCtx(null)
+                                    setFolderDeleteTarget(target)
+                                }}
+                            >
+                                <Trash2 className="size-3.5" /> 删除目录…
+                            </button>
+                        </>
+                    )}
+                </div>
+            )}
+
             {/* 删除确认（不可逆操作显式二次确认；删除只由用户手动发起） */}
             <Dialog open={pendingDelete !== null} onOpenChange={open => !open && setPendingDelete(null)}>
                 <DialogContent className="sm:max-w-md">
@@ -1711,6 +2287,66 @@ export function Library() {
             </Dialog>
 
 
+            {/* D81 目录搬家（右键菜单入口；与树行 hover 图标共用同一弹窗） */}
+            <FolderMoveDialog
+                tree={tree}
+                folder={folderMoveTarget}
+                open={folderMoveTarget !== null}
+                onOpenChange={open => {
+                    if (!open) setFolderMoveTarget(null)
+                }}
+                onMove={parentId => {
+                    const target = folderMoveTarget
+                    setFolderMoveTarget(null)
+                    if (target) void moveFolderTo(target.id, parentId)
+                }}
+            />
+
+            {/* D89 删除目录（二次确认；服务端为树删 D73） */}
+            <Dialog open={folderDeleteTarget !== null} onOpenChange={open => !open && setFolderDeleteTarget(null)}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            <Trash2 className="text-destructive size-5" />
+                            删除目录
+                        </DialogTitle>
+                        <DialogDescription>
+                            确定删除「{folderDeleteTarget?.name}」？
+                            {folderDeleteTarget && folderDeleteTarget.totalCount > 0
+                                ? `该目录及其子目录下的 ${folderDeleteTarget.totalCount} 条书签会一并删除，`
+                                : '该目录当前为空，'}
+                            操作不可恢复；若已开启「与浏览器收藏夹同步」，浏览器侧也会同步删除。
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <DialogClose asChild>
+                            <Btn>取消</Btn>
+                        </DialogClose>
+                        <Button
+                            variant="destructive"
+                            size="sm"
+                            onClick={() => folderDeleteTarget && void deleteFolder(folderDeleteTarget)}
+                        >
+                            <Trash2 /> 删除
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* D89 内容页转资料（SSE 进度 + 抓取失败的建议丢弃清单） */}
+            <MaterialScanDialog
+                folder={scanTarget}
+                open={scanTarget !== null}
+                onOpenChange={open => {
+                    if (!open) setScanTarget(null)
+                }}
+                onChanged={() => {
+                    loadTree()
+                    refreshBadges()
+                    void loadPage(selected, 0, false, statusFilter)
+                }}
+            />
+
             <AddBookmarkDialog
                 open={addOpen}
                 onOpenChange={setAddOpen}
@@ -1775,17 +2411,23 @@ function MobileChip({ active, label, onClick }: { active: boolean; label: string
     )
 }
 
-/** 移动到…（目录下拉 + 确认） */
+/** 移动到…（目录下拉 + 确认）；onOpenChange 上报开合供页面阻塞判定（D82） */
 function MoveButton({
     tree,
     current,
     onMove,
+    onOpenChange,
 }: {
     tree: FolderTreeNode[]
     current: string
     onMove: (folderId: string) => void
+    onOpenChange?: (open: boolean) => void
 }) {
-    const [open, setOpen] = useState(false)
+    const [open, setOpenState] = useState(false)
+    const setOpen = (v: boolean) => {
+        setOpenState(v)
+        onOpenChange?.(v)
+    }
     const [target, setTarget] = useState<string>(current)
     const flat = useMemo(() => {
         const out: Array<{ id: string; path: string }> = []
@@ -1844,6 +2486,473 @@ function MoveButton({
                 </DialogContent>
             </Dialog>
         </>
+    )
+}
+
+/** D81 §3-A / D89：目录搬家弹窗（右键菜单与树行 hover 图标共用）。目标排除自身与子孙（防成环 UI 前置） */
+function FolderMoveDialog({
+    tree,
+    folder,
+    open,
+    onOpenChange,
+    onMove,
+}: {
+    tree: FolderTreeNode[]
+    folder: FolderTreeNode | null
+    open: boolean
+    onOpenChange: (open: boolean) => void
+    onMove: (parentId: string | null) => void
+}) {
+    const [target, setTarget] = useState<string>('__root__')
+    useEffect(() => {
+        if (open && folder) setTarget(folder.parent_id ?? '__root__')
+    }, [open, folder])
+    const flat = useMemo(() => {
+        if (!folder) return []
+        const banned = new Set<string>([folder.id])
+        let grew = true
+        while (grew) {
+            grew = false
+            for (const f of tree) {
+                if (f.parent_id && banned.has(f.parent_id) && !banned.has(f.id)) {
+                    banned.add(f.id)
+                    grew = true
+                }
+            }
+        }
+        const byId = new Map(tree.map(f => [f.id, f]))
+        const pathOf = (f: FolderTreeNode): string => {
+            const parts: string[] = [f.name]
+            let p = f.parent_id ? byId.get(f.parent_id) : undefined
+            while (p) {
+                parts.unshift(p.name)
+                p = p.parent_id ? byId.get(p.parent_id) : undefined
+            }
+            return parts.join(' / ')
+        }
+        return tree.filter(f => !banned.has(f.id) && f.is_system_inbox !== 1).map(f => ({ id: f.id, path: pathOf(f) }))
+    }, [tree, folder])
+    return (
+        <Dialog open={open} onOpenChange={onOpenChange}>
+            <DialogContent className="sm:max-w-sm">
+                <DialogHeader>
+                    <DialogTitle>移动目录「{folder?.name ?? ''}」</DialogTitle>
+                    <DialogDescription>目录搬家直接生效，并同步到浏览器收藏夹。</DialogDescription>
+                </DialogHeader>
+                <Select value={target} onValueChange={setTarget}>
+                    <SelectTrigger className="w-full">
+                        <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-72">
+                        <SelectItem value="__root__">根级（顶层）</SelectItem>
+                        {flat.map(f => (
+                            <SelectItem key={f.id} value={f.id}>
+                                {f.path}
+                            </SelectItem>
+                        ))}
+                    </SelectContent>
+                </Select>
+                <DialogFooter>
+                    <DialogClose asChild>
+                        <Btn>取消</Btn>
+                    </DialogClose>
+                    <Btn
+                        primary
+                        onClick={() => {
+                            onOpenChange(false)
+                            onMove(target === '__root__' ? null : target)
+                        }}
+                    >
+                        <ChevronRight /> 移动
+                    </Btn>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+    )
+}
+
+/** 树行 hover 的目录搬家入口（图标 + 共用弹窗）；onOpenChange 上报开合供页面阻塞判定（D82） */
+function FolderMoveIcon({
+    tree,
+    folder,
+    onMove,
+    onOpenChange,
+}: {
+    tree: FolderTreeNode[]
+    folder: FolderTreeNode
+    onMove: (parentId: string | null) => void
+    onOpenChange?: (open: boolean) => void
+}) {
+    const [open, setOpenState] = useState(false)
+    const setOpen = (v: boolean) => {
+        setOpenState(v)
+        onOpenChange?.(v)
+    }
+    return (
+        <>
+            <button
+                className="text-muted-foreground hover:text-foreground rounded p-0.5"
+                title="移动到…（目录搬家，同步到浏览器）"
+                onClick={() => setOpen(true)}
+            >
+                <FolderInput className="size-3" />
+            </button>
+            <FolderMoveDialog tree={tree} folder={folder} open={open} onOpenChange={setOpen} onMove={onMove} />
+        </>
+    )
+}
+
+/** D89 目录资料扫描的单条失败项（建议丢弃清单来源） */
+interface ScanFailure {
+    id: string
+    title: string
+    url: string
+    reason: string
+}
+
+/** 抓取失败原因 → 人话（界面不裸露 cache.fail_reason 原始串） */
+function scanReasonLabel(reason: string): string {
+    const r = reason || 'crawl_failed'
+    if (r.startsWith('privacy')) return '隐私域名：不抓取'
+    if (/HTTP 404|\b404\b/.test(r)) return '页面打不开（404）'
+    if (/HTTP 403|\b403\b/.test(r)) return '访问被拒绝（403）'
+    if (/timeout|timed out/i.test(r)) return '抓取超时'
+    if (/ENOTFOUND|ECONN|EHOSTUNREACH/i.test(r)) return '域名无法解析 / 连接失败'
+    if (r.startsWith('crawl_failed:')) return `抓取失败：${r.slice('crawl_failed:'.length).slice(0, 60)}`
+    if (r === 'content_too_thin') return '正文过少（不像内容页）'
+    if (r === 'not_content_page') return '判定为非内容页'
+    return r
+}
+
+/**
+ * D89 内容页转资料：SSE 逐条进度 + 可随时停止；抓取失败的条目进入「建议丢弃」清单，
+ * 归档 / 删除都由用户确认（红线③：系统永不自动删除）。?mock 走模拟流。
+ */
+function MaterialScanDialog({
+    folder,
+    open,
+    onOpenChange,
+    onChanged,
+}: {
+    folder: FolderTreeNode | null
+    open: boolean
+    onOpenChange: (open: boolean) => void
+    onChanged: () => void
+}) {
+    const { cfg } = useShell()
+    const [running, setRunning] = useState(false)
+    const [done, setDone] = useState(false)
+    const [progress, setProgress] = useState({ done: 0, total: 0, created: 0, notContent: 0, skipped: 0 })
+    const [current, setCurrent] = useState('')
+    const [failed, setFailed] = useState<ScanFailure[]>([])
+    const [selected, setSelected] = useState<Set<string>>(new Set())
+    const [remaining, setRemaining] = useState(0)
+    const [err, setErr] = useState<string | null>(null)
+    const [stopped, setStopped] = useState(false)
+    const [confirmDelete, setConfirmDelete] = useState(false)
+    const [busyAction, setBusyAction] = useState(false)
+    const abortRef = useRef<AbortController | null>(null)
+    // 本运行次计数（供中止时估算剩余——服务端 done 事件未到也能露出「继续扫描」）
+    const countsRef = useRef({ done: 0, total: 0 })
+    const folderId = folder?.id ?? null
+
+    // 关闭即中止在途扫描（D62：用户发起的显式长任务必须可中止），并按目录重置状态
+    useEffect(() => {
+        if (open) return
+        abortRef.current?.abort()
+        abortRef.current = null
+        setRunning(false)
+        setDone(false)
+        setProgress({ done: 0, total: 0, created: 0, notContent: 0, skipped: 0 })
+        setCurrent('')
+        setFailed([])
+        setSelected(new Set())
+        setRemaining(0)
+        setErr(null)
+        setStopped(false)
+        setConfirmDelete(false)
+    }, [open])
+
+    const mergeFailed = (rows: ScanFailure[]) => {
+        if (rows.length === 0) return
+        setFailed(prev => {
+            const seen = new Set(prev.map(f => f.id))
+            return [...prev, ...rows.filter(r => !seen.has(r.id))]
+        })
+        setSelected(prev => {
+            const next = new Set(prev)
+            for (const r of rows) next.add(r.id)
+            return next
+        })
+    }
+
+    const start = async () => {
+        if (!folderId || running) return
+        setRunning(true)
+        setDone(false)
+        setErr(null)
+        setStopped(false)
+        setConfirmDelete(false)
+        setRemaining(0)
+        countsRef.current = { done: 0, total: 0 }
+        const controller = new AbortController()
+        abortRef.current = controller
+        const onEvent = (event: string, payload: Record<string, unknown>) => {
+            if (event === 'item') {
+                const it = payload as unknown as {
+                    id: string
+                    title: string
+                    url?: string
+                    status: 'created' | 'not_content' | 'failed'
+                    reason?: string
+                    done: number
+                    total: number
+                }
+                setCurrent(it.title)
+                countsRef.current = { done: it.done, total: it.total }
+                setProgress(p => ({
+                    done: it.done,
+                    total: it.total,
+                    created: p.created + (it.status === 'created' ? 1 : 0),
+                    notContent: p.notContent + (it.status === 'not_content' ? 1 : 0),
+                    skipped: p.skipped,
+                }))
+                if (it.status === 'failed') {
+                    mergeFailed([{ id: it.id, title: it.title, url: it.url ?? '', reason: it.reason ?? 'crawl_failed' }])
+                }
+            } else if (event === 'done') {
+                const d = payload as unknown as { skipped?: number; failed?: ScanFailure[]; remaining?: number }
+                setRemaining(Number(d.remaining ?? 0))
+                setProgress(p => ({ ...p, skipped: Math.max(p.skipped, Number(d.skipped ?? 0)) }))
+                mergeFailed(d.failed ?? [])
+                onChanged()
+            } else if (event === 'error') {
+                throw new Error(String(payload.error ?? '扫描失败'))
+            }
+        }
+        try {
+            if (isMock()) {
+                for await (const ev of mockMaterialScanStream(folderId, 30)) {
+                    if (controller.signal.aborted) break
+                    onEvent(ev.event, ev.data)
+                }
+                // mock 无 fetch 异常，手动对齐真实模式的中止语义（停止态 + remaining 估算 + 提示）
+                if (controller.signal.aborted) {
+                    setStopped(true)
+                    setRemaining(prev => Math.max(prev, countsRef.current.total - countsRef.current.done))
+                    toast.info('已停止提取：已完成的结果已入库')
+                }
+            } else {
+                const base = cfg.serverUrl.replace(/\/+$/, '')
+                const res = await fetch(
+                    `${base}/api/v1/materials/scan/stream?folderId=${encodeURIComponent(folderId)}&includeSubfolders=1&limit=30`,
+                    {
+                        headers: cfg.token ? { authorization: `Bearer ${cfg.token}` } : {},
+                        signal: controller.signal,
+                    },
+                )
+                await consumeSse(res, onEvent)
+            }
+        } catch (e) {
+            if (controller.signal.aborted) {
+                setStopped(true)
+                // 服务端 done 事件未到，用本运行次计数估算剩余，保证「继续扫描」仍可见
+                setRemaining(prev => Math.max(prev, countsRef.current.total - countsRef.current.done))
+                toast.info('已停止提取：已完成的结果已入库')
+            } else setErr(e instanceof Error ? e.message : String(e))
+        } finally {
+            if (abortRef.current === controller) abortRef.current = null
+            setRunning(false)
+            setDone(true)
+        }
+    }
+
+    const archiveSelected = async () => {
+        if (selected.size === 0 || busyAction) return
+        setBusyAction(true)
+        let ok = 0
+        for (const id of selected) {
+            try {
+                await apiCall(cfg, `/bookmarks/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'archived' }) })
+                ok += 1
+            } catch {
+                /* 单条失败不中断批量；最后统一汇报 */
+            }
+        }
+        setBusyAction(false)
+        toast.ok(`已归档 ${ok} 条（软归档可恢复，可随时取消归档）`)
+        const ids = selected
+        setFailed(prev => prev.filter(f => !ids.has(f.id)))
+        setSelected(new Set())
+        onChanged()
+    }
+
+    const deleteSelected = async () => {
+        if (selected.size === 0 || busyAction) return
+        setBusyAction(true)
+        let ok = 0
+        for (const id of selected) {
+            try {
+                await apiCall(cfg, `/bookmarks/${id}`, { method: 'DELETE' })
+                ok += 1
+            } catch {
+                /* 同上 */
+            }
+        }
+        setBusyAction(false)
+        setConfirmDelete(false)
+        toast.ok(`已删除 ${ok} 条书签`)
+        const ids = selected
+        setFailed(prev => prev.filter(f => !ids.has(f.id)))
+        setSelected(new Set())
+        onChanged()
+    }
+
+    const allSelected = failed.length > 0 && selected.size === failed.length
+    const toggleAll = () => {
+        if (allSelected) setSelected(new Set())
+        else setSelected(new Set(failed.map(f => f.id)))
+    }
+    const toggleOne = (id: string) =>
+        setSelected(prev => {
+            const next = new Set(prev)
+            if (next.has(id)) next.delete(id)
+            else next.add(id)
+            return next
+        })
+
+    return (
+        <Dialog open={open} onOpenChange={onOpenChange}>
+            <DialogContent className="sm:max-w-lg">
+                <DialogHeader>
+                    <DialogTitle className="flex items-center gap-2">
+                        <BookMarked className="text-primary size-5" />
+                        提取资料
+                    </DialogTitle>
+                    <DialogDescription>
+                        把「{folder?.name ?? ''}」里的内容页书签抓成资料；抓取失败的书签会列出来建议丢弃，系统不会自动删除。
+                    </DialogDescription>
+                </DialogHeader>
+
+                <div className="space-y-3">
+                    {(running || done || progress.done > 0) && (
+                        <div className="bg-muted/50 rounded-xl px-4 py-3">
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="text-[13px] font-medium">
+                                    {running ? '正在提取…' : err ? '提取中断' : stopped ? '已停止提取' : '本次提取完成'}
+                                </span>
+                                <span className="text-muted-foreground tabular text-xs">
+                                    {progress.done}
+                                    {progress.total > 0 ? ` / ${progress.total}` : ''}
+                                </span>
+                            </div>
+                            <p className="text-muted-foreground mt-1 text-xs">
+                                新增资料 {progress.created} · 非内容页 {progress.notContent} · 隐私跳过 {progress.skipped}
+                                {failed.length > 0 && (
+                                    <span className="text-amber-600 dark:text-amber-400"> · 失败 {failed.length}</span>
+                                )}
+                            </p>
+                            {running && current && (
+                                <p className="text-muted-foreground/70 mt-1 truncate text-[11px]">当前：{current}</p>
+                            )}
+                        </div>
+                    )}
+
+                    {err && <p className="text-sm text-red-500">{err}</p>}
+
+                    {done && !running && failed.length > 0 && (
+                        <div className="rounded-xl bg-amber-500/10 px-3 py-2.5" data-scan-failures>
+                            <div className="flex items-center justify-between gap-2">
+                                <p className="text-[13px] font-medium text-amber-700 dark:text-amber-400">
+                                    建议丢弃（{failed.length} 条 · 抓取失败，可能已失效）
+                                </p>
+                                <button
+                                    className="text-muted-foreground hover:text-foreground text-[11px] underline-offset-2 hover:underline"
+                                    onClick={toggleAll}
+                                >
+                                    {allSelected ? '取消全选' : '全选'}
+                                </button>
+                            </div>
+                            <ul className="scroll-slim divide-border/40 mt-1 max-h-48 divide-y overflow-y-auto">
+                                {failed.map(f => (
+                                    <li key={f.id} className="flex items-start gap-2 py-1.5 text-[13px]">
+                                        <input
+                                            type="checkbox"
+                                            className="accent-primary mt-1 size-3.5"
+                                            checked={selected.has(f.id)}
+                                            onChange={() => toggleOne(f.id)}
+                                            aria-label={`选择「${f.title}」`}
+                                        />
+                                        <div className="min-w-0 flex-1">
+                                            <p className="truncate">{f.title}</p>
+                                            <p className="text-muted-foreground truncate text-[11px]">
+                                                {scanReasonLabel(f.reason)}
+                                            </p>
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <Btn onClick={() => void archiveSelected()} disabled={selected.size === 0 || busyAction}>
+                                    <Archive /> 归档所选（推荐）
+                                </Btn>
+                                {confirmDelete ? (
+                                    <>
+                                        <span className="text-destructive text-xs">删除不可恢复，确定？</span>
+                                        <Button
+                                            variant="destructive"
+                                            size="sm"
+                                            onClick={() => void deleteSelected()}
+                                            disabled={busyAction}
+                                        >
+                                            <Trash2 /> 确认删除
+                                        </Button>
+                                        <Btn onClick={() => setConfirmDelete(false)}>取消</Btn>
+                                    </>
+                                ) : (
+                                    <button
+                                        className="text-destructive hover:bg-destructive/10 flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-40"
+                                        onClick={() => setConfirmDelete(true)}
+                                        disabled={selected.size === 0 || busyAction}
+                                    >
+                                        <Trash2 className="size-3.5" /> 删除所选…
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {done && !running && failed.length === 0 && progress.created > 0 && (
+                        <p className="text-muted-foreground text-xs">没有提取失败的书签，内容页已全部入资料库。</p>
+                    )}
+                    {done && !running && failed.length === 0 && progress.created === 0 && progress.notContent === 0 && !err && (
+                        <p className="text-muted-foreground text-xs">本次没有需要继续处理的书签（可能都已是资料或已扫描过）。</p>
+                    )}
+                </div>
+
+                <DialogFooter>
+                    {running ? (
+                        <Btn onClick={() => abortRef.current?.abort()}>停止</Btn>
+                    ) : (
+                        <>
+                            {done && remaining > 0 && (
+                                <Btn primary onClick={() => void start()}>
+                                    继续扫描剩余 {remaining} 条
+                                </Btn>
+                            )}
+                            {!done && (
+                                <Btn primary onClick={() => void start()} disabled={!folderId}>
+                                    <Sparkles /> 开始提取
+                                </Btn>
+                            )}
+                            <DialogClose asChild>
+                                <Btn>关闭</Btn>
+                            </DialogClose>
+                        </>
+                    )}
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
     )
 }
 

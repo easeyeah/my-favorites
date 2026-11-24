@@ -28,6 +28,7 @@ import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Btn, EmptyState, SiteIcon, hostOf, tidyNotify, timeAgo, toast } from '@/components/shared'
 import { useShell } from '@/components/layout'
+import { useServerChanges } from '@/lib/events'
 import {
   ApiError,
   apiCall,
@@ -38,6 +39,7 @@ import {
   type VersionRow,
 } from '@/lib/api'
 import { isMock, mockLinkCheckStream } from '@/lib/mock'
+import { consumeSse } from '@/lib/sse'
 import { cn } from '@/lib/utils'
 
 interface LinkProgress {
@@ -131,30 +133,7 @@ export function CheckupSection({ onChecked }: { onChecked?: () => void }) {
         const res = await fetch(`${cfg.serverUrl.replace(/\/+$/, '')}/api/v1/maintenance/links/run/stream?limit=20`, {
           headers: cfg.token ? { authorization: `Bearer ${cfg.token}` } : {},
         })
-        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let buf = ''
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buf += decoder.decode(value, { stream: true })
-          let sep: number
-          while ((sep = buf.indexOf('\n\n')) >= 0) {
-            const frame = buf.slice(0, sep)
-            buf = buf.slice(sep + 2)
-            const dataLines = frame.split('\n').filter((l) => l.startsWith('data:'))
-            if (dataLines.length === 0) continue
-            const event = frame.match(/^event:\s*(\S+)/m)?.[1]
-            let payload: Record<string, unknown>
-            try {
-              payload = JSON.parse(dataLines.map((l) => l.slice(5).replace(/^ /, '')).join('\n')) as Record<string, unknown>
-            } catch {
-              continue
-            }
-            if (event) onEvent(event, payload)
-          }
-        }
+        await consumeSse(res, onEvent)
       }
     } catch (e) {
       toast.err(`检测失败：${e instanceof Error ? e.message : String(e)}`)
@@ -282,6 +261,10 @@ export function DupSection() {
     fetchers.dupReport(cfg).then(setDupReport).catch(() => setDupReport(null))
   }, [cfg])
   useEffect(load, [load])
+  // D82：重复视图随门铃校准（外部删除/归档改变重复组）；失败保留旧报告，不回退加载态
+  useServerChanges(() => {
+    fetchers.dupReport(cfg).then(setDupReport).catch(() => {})
+  })
 
   const groups = dupReport?.findings.suggestions ?? []
 

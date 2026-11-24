@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { Skeleton, greeting, PageScroll, SiteIcon, tidyNotify, timeAgo, todayLabel, toast } from "@/components/shared";
 import { useRoute, useShell } from "@/components/layout";
+import { useServerChanges } from "@/lib/events";
 import { ApiError, apiCall, fetchers, type Bookmark, type HealthReport, type LinkCheckReport, type Stats, type VersionRow } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -39,6 +40,8 @@ export function Overview() {
       .catch(() => setRecent([]));
   }, [cfg]);
   useEffect(load, [load]);
+  // D81：服务端变更门铃 → 首页统计/动态实时刷新（自动化承诺条随动作更新）
+  useServerChanges(load);
 
   /** 撤销某次自动整理（回滚 = 逆放 diff 生成新版本） */
   const rollback = async (v: VersionRow) => {

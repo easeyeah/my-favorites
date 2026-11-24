@@ -17,6 +17,7 @@ export function Btn({
   disabled,
   title,
   className,
+  size = "sm",
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -25,12 +26,38 @@ export function Btn({
   disabled?: boolean;
   title?: string;
   className?: string;
+  size?: "xs" | "sm";
 }) {
   const variant = danger ? "destructive" : primary ? "default" : "outline";
   return (
-    <Button variant={variant} size="sm" onClick={onClick} disabled={disabled} title={title} className={className}>
+    <Button variant={variant} size={size} onClick={onClick} disabled={disabled} title={title} className={className}>
       {children}
     </Button>
+  );
+}
+
+/** 管理列表统一页码分页：首尾直达 + 当前页窗口。 */
+export function NumberedPagination({ page, total, pageSize, onPageChange, disabled = false, label = "列表分页" }: {
+  page: number; total: number; pageSize: number; onPageChange: (page: number) => void; disabled?: boolean; label?: string;
+}) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const current = Math.max(1, Math.min(page, pages));
+  const numbers = Array.from(new Set([1, pages, ...Array.from({ length: 5 }, (_, i) => current + i - 2)]))
+    .filter((n) => n >= 1 && n <= pages).sort((a, b) => a - b);
+  return (
+    <nav aria-label={label} className="mt-4 flex flex-wrap items-center justify-between gap-3">
+      <span className="text-muted-foreground text-xs" aria-live="polite">共 {total} 条 · 第 {current} / {pages} 页 · 每页 {pageSize} 条</span>
+      <div className="flex flex-wrap items-center gap-1">
+        <Button variant="outline" size="xs" disabled={disabled || current <= 1} onClick={() => onPageChange(current - 1)}>上一页</Button>
+        {numbers.map((n, index) => (
+          <span key={n} className="contents">
+            {index > 0 && n - numbers[index - 1]! > 1 && <span aria-hidden="true" className="text-muted-foreground px-1">…</span>}
+            <Button variant={n === current ? "default" : "ghost"} size="xs" aria-label={`第 ${n} 页`} aria-current={n === current ? "page" : undefined} disabled={disabled} onClick={() => onPageChange(n)}>{n}</Button>
+          </span>
+        ))}
+        <Button variant="outline" size="xs" disabled={disabled || current >= pages} onClick={() => onPageChange(current + 1)}>下一页</Button>
+      </div>
+    </nav>
   );
 }
 
@@ -351,26 +378,30 @@ export function Switch({
   checked,
   onChange,
   label,
+  disabled,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label?: string;
+  disabled?: boolean;
 }) {
   return (
     <button
+      type="button"
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        "relative h-5 w-9 shrink-0 rounded-full transition-colors",
+        "relative h-6 w-10 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50",
         checked ? "bg-primary" : "bg-muted",
       )}
     >
       <span
         className={cn(
-          "absolute top-0.5 size-4 rounded-full bg-card shadow-xs transition-all",
-          checked ? "left-[18px]" : "left-0.5",
+          "absolute top-1 size-4 rounded-full bg-card shadow-xs transition-all",
+          checked ? "left-[22px]" : "left-1",
         )}
       />
     </button>

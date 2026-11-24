@@ -15,6 +15,7 @@ import type {
   NavSiteDetail,
   ProviderConfigRow,
   Stats,
+  SystemUser,
   TokenRow,
   VersionRow,
 } from "./api";
@@ -80,6 +81,8 @@ interface MockDb {
   siteDetail: Record<string, NavSiteDetail>;
   providers: ProviderConfigRow[];
   tokens: TokenRow[];
+  registrationOpen: boolean;
+  users: SystemUser[];
   /** D28 整理通知方式（管理台侧演示态） */
   notifyStyle: "toast" | "card" | "silent";
   /** 原型 12 整理偏好规则（演示态） */
@@ -321,6 +324,12 @@ function seed(): MockDb {
       { token_id: "tok-9f8e7d6c", label: "本机 Chrome 扩展", created_at: d(17), expires_at: null, revoked_at: null, last_used_at: h(1) },
       { token_id: "tok-1a2b3c4d", label: "web-admin", created_at: d(9), expires_at: null, revoked_at: null, last_used_at: h(4) },
     ],
+    registrationOpen: true,
+    users: [
+      { id: "self", username: "demo", display_name: "演示管理员", role: "admin", disabled_at: null, created_at: d(30) },
+      { id: "u-family", username: "family", display_name: "家庭成员", role: "user", disabled_at: null, created_at: d(12) },
+      { id: "u-paused", username: "paused", display_name: null, role: "user", disabled_at: d(2), created_at: d(20) },
+    ],
     notifyStyle: "toast",
     organizeRules: ["同一文档的多个版本共存时不合并"],
     privacy: ["*.12306.cn", "*.alipay.com", "*.icbc.com.cn", "*.gov.cn", "*.dianping.com", "*.bank-of-china.com"],
@@ -328,6 +337,7 @@ function seed(): MockDb {
       { id: "wh-1", url: "https://hooks.example.com/mf", events: ["bookmark.added"], enabled: true },
     ],
     audit: [
+      { id: 10, kind: "system.registration_changed", detail: "关闭公开注册", source: "192.168.1.8", created_at: h(0.5) },
       { id: 9, kind: "auth.login", detail: "登录成功（web-admin）", source: "192.168.1.8", created_at: h(1) },
       { id: 8, kind: "settings.changed", detail: "更新偏好：通知方式", source: "192.168.1.8", created_at: h(3) },
       { id: 7, kind: "nav.published", detail: "发布导航站 /s/k7x2m9（公开 12 项）", source: "192.168.1.8", created_at: h(6) },
@@ -377,7 +387,48 @@ const now = () => new Date().toISOString();
 /** 网络层拦截时统一加一点拟真延迟，骨架屏/转场可见 */
 export async function mockRequestAsync(method: string, rawPath: string, ctx: MockCtx): Promise<unknown> {
   await sleep(140 + Math.random() * 240);
-  return mockRequest(method, rawPath, ctx);
+  const data = mockRequest(method, rawPath, ctx);
+  // D82：演示态与真实 SSE 同口径——写操作生效后派发模拟门铃，已打开的页面实时校准。
+  // 事件名与 lib/events.ts 的 MOCK_CHANGE_EVENT 一致（不反向 import，避免 mock↔events 循环）
+  if (method !== "GET" && data !== undefined && typeof window !== "undefined") {
+    window.dispatchEvent(new Event("mf:mock-change"));
+  }
+  return data;
+}
+
+/** D82 演示/自检用：模拟「浏览器侧外部变更」（真实链路是扩展同步 → 服务端 → SSE）。
+ *  仅 ?mock 生效；直接改内存库后门铃通知页面，用于验证编辑冲突/删除失效等交互。 */
+export function installMockSimulator(): void {
+  if (typeof window === "undefined" || !isMock()) return;
+  (window as unknown as Record<string, unknown>).__mfMockSimulate = {
+    emit: () => window.dispatchEvent(new Event("mf:mock-change")),
+    deleteBookmark: (id: string) => {
+      const i = db.bookmarks.findIndex((b) => b.id === id);
+      if (i >= 0) db.bookmarks.splice(i, 1);
+      window.dispatchEvent(new Event("mf:mock-change"));
+    },
+    renameBookmark: (id: string, title: string) => {
+      const b = db.bookmarks.find((x) => x.id === id);
+      if (b) b.title = title;
+      window.dispatchEvent(new Event("mf:mock-change"));
+    },
+    deleteFolder: (id: string) => {
+      const ids = new Set<string>([id]);
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const f of db.folders) {
+          if (f.parent_id && ids.has(f.parent_id) && !ids.has(f.id)) {
+            ids.add(f.id);
+            grew = true;
+          }
+        }
+      }
+      db.folders = db.folders.filter((f) => !ids.has(f.id));
+      db.bookmarks = db.bookmarks.filter((b) => !ids.has(b.folder_id));
+      window.dispatchEvent(new Event("mf:mock-change"));
+    },
+  };
 }
 
 // ---------- 派生数据 ----------
@@ -727,7 +778,52 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
     return { models: ["deepseek-chat", "deepseek-reasoner", "deepseek-v3-0324", "deepseek-r1-0528", "deepseek-coder"] };
   }
   if (method === "GET" && path === "/auth/tokens") return { tokens: db.tokens };
-  if (method === "GET" && path === "/audit") return { events: db.audit };
+  if (method === "GET" && path === "/auth/me")
+    return {
+      userId: "self",
+      username: "demo",
+      displayName: "演示账号",
+      role: "admin",
+      isAdmin: true,
+      registrationOpen: db.registrationOpen,
+      deployMode: "unified",
+    };
+  if (method === "GET" && path === "/admin/system") {
+    return { registrationOpen: db.registrationOpen, users: db.users };
+  }
+  if (method === "PATCH" && path === "/admin/system") {
+    const body = (ctx.body ?? {}) as { registrationOpen?: boolean };
+    if (typeof body.registrationOpen === "boolean") db.registrationOpen = body.registrationOpen;
+    return { registrationOpen: db.registrationOpen };
+  }
+  if (method === "POST" && path === "/admin/users") {
+    const body = (ctx.body ?? {}) as { username?: string; role?: "admin" | "user" };
+    const user: SystemUser = {
+      id: nid("user"),
+      username: body.username ?? "new-user",
+      display_name: null,
+      role: body.role ?? "user",
+      disabled_at: null,
+      created_at: now(),
+    };
+    db.users.push(user);
+    return { user };
+  }
+  if (method === "PATCH" && seg[0] === "admin" && seg[1] === "users" && seg.length === 3) {
+    const user = db.users.find((item) => item.id === seg[2]);
+    if (!user) return undefined;
+    const body = (ctx.body ?? {}) as { disabled?: boolean; role?: "admin" | "user"; newPassword?: string };
+    if (body.role) user.role = body.role;
+    if (body.disabled !== undefined) user.disabled_at = body.disabled ? now() : null;
+    return { user, revokedTokens: body.newPassword || body.disabled ? 1 : 0 };
+  }
+  if (method === "GET" && path === "/audit") {
+    const pageSize = Math.min(500, Math.max(1, Number(ctx.query.get("limit")) || 25));
+    const total = db.audit.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(totalPages, Math.max(1, Number(ctx.query.get("page")) || 1));
+    return { events: db.audit.slice((page - 1) * pageSize, page * pageSize).map((e) => ({ ...e, eventId: `registry:${e.id}` })), total, page, pageSize, totalPages };
+  }
   if (method === "GET" && path === "/privacy/rules") return { patterns: [...db.privacy], revision: 7 };
   if (method === "GET" && path === "/stats/storage") {
     const marks = db.bookmarks.length
@@ -820,20 +916,32 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
     return { ok: true };
   }
   if (method === "PATCH" && seg[0] === "folders" && seg.length === 2) {
-    const body = (ctx.body ?? {}) as { name?: string };
-    const f = db.folders.find((x) => x.id === seg[1]);
-    if (!f || f.is_system_inbox === 1 || !body.name?.trim()) return { error: "not_found_or_system" };
-    f.name = body.name.trim();
-    return f;
+    const body = (ctx.body ?? {}) as { name?: string; parentId?: string | null }
+    const f = db.folders.find((x) => x.id === seg[1])
+    if (!f || f.is_system_inbox === 1) return { error: "not_found_or_system" }
+    if (body.parentId !== undefined) {
+      const parentId = body.parentId || null
+      if (parentId && !db.folders.some((x) => x.id === parentId)) return { error: "invalid_move" }
+      // 防成环：目标不能是自身或自身后代（与服务端 moveFolder 同口径）
+      if (parentId && subtreeIds(f.id).has(parentId)) return { error: "invalid_move" }
+      f.parent_id = parentId
+    }
+    if (body.name?.trim()) f.name = body.name.trim()
+    if (body.parentId === undefined && !body.name?.trim()) return { error: "name_or_parentId_required" }
+    return f
   }
   if (method === "DELETE" && seg[0] === "folders" && seg.length === 2) {
-    const f = db.folders.find((x) => x.id === seg[1]);
-    if (!f) return undefined;
-    const hasChildren = db.folders.some((x) => x.parent_id === f.id);
-    const hasMarks = db.bookmarks.some((b) => b.folder_id === f.id);
-    if (f.is_system_inbox === 1 || hasChildren || hasMarks) return { error: "folder_not_empty" };
-    db.folders = db.folders.filter((x) => x.id !== f.id);
-    return { ok: true };
+    const f = db.folders.find((x) => x.id === seg[1])
+    if (!f) return undefined
+    if (f.is_system_inbox === 1) return { error: "system_folder" }
+    // D73/D89 演示态同口径：树删（目录 + 子目录 + 书签 + 关联资料）
+    const ids = subtreeIds(f.id)
+    const removedBookmarks = db.bookmarks.filter((b) => ids.has(b.folder_id))
+    db.folders = db.folders.filter((x) => !ids.has(x.id))
+    db.bookmarks = db.bookmarks.filter((b) => !ids.has(b.folder_id))
+    const alive = new Set(db.bookmarks.map((b) => b.id))
+    db.materials = db.materials.filter((m) => alive.has(m.bookmark_id))
+    return { ok: true, folders: ids.size - 1, bookmarks: removedBookmarks.length }
   }
 
   // ---------- 收纳盒 / 整理 / 回滚 ----------
@@ -929,6 +1037,44 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
     );
     const items = targets.map(({ b, to }) => ({ title: b.title, to: fname(to) }));
     return { moved: items.length, items };
+  }
+  // D89 目录级重新整理（演示态）：子树内前 3 条归入该目录下的「AI 精选」子目录
+  if (method === "POST" && path === "/organize/folder") {
+    const body = (ctx.body ?? {}) as { folderId?: string; includeSubfolders?: boolean }
+    const root = db.folders.find((f) => f.id === body.folderId)
+    if (!root) return { error: "folder_not_found" }
+    const ids = body.includeSubfolders === false ? new Set([root.id]) : subtreeIds(root.id)
+    const marks = db.bookmarks.filter(
+      (b) => ids.has(b.folder_id) && b.status !== "dead" && b.is_private !== 1,
+    )
+    const subName = "AI 精选"
+    const createdFolders: string[] = []
+    let sub = db.folders.find((f) => f.parent_id === root.id && f.name === subName)
+    if (!sub) {
+      sub = { id: nid("f"), name: subName, parent_id: root.id, is_system_inbox: 0 }
+      db.folders.push(sub)
+      createdFolders.push(sub.id)
+    }
+    const moved = marks.slice(0, 3)
+    const version = moved.length > 0
+      ? applyMoves(moved.map((b) => ({ id: b.id, to: sub!.id })), `整理目录「${root.name}」`, createdFolders)
+      : null
+    return {
+      sessionId: nid("ses"),
+      status: moved.length > 0 ? "applied" : "answered",
+      answer:
+        moved.length > 0
+          ? `目录「${root.name}」及其子目录共扫描 ${marks.length} 条，已直接归位 ${moved.length} 项变更（版本历史可撤销）。`
+          : `目录「${root.name}」共扫描 ${marks.length} 条，分类结果与现有目录一致，无需挪动。`,
+      actions: moved.map((b) => ({
+        type: "move",
+        bookmarkTitle: b.title,
+        fromFolder: fname(b.folder_id),
+        toFolder: subName,
+      })),
+      versionId: version?.id,
+      applied: moved.length,
+    }
   }
   if (method === "POST" && path === "/organize/sessions") {
     // D27 act + undo：一次调用 = 计划 + 直接生效；actions 只作事后只读明细
@@ -1178,6 +1324,12 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
 
   // ---------- 认证 / 导入 ----------
   if (method === "POST" && path === "/auth/logout") return { ok: true };
+  if (method === "POST" && path === "/auth/password") {
+    const body = (ctx.body ?? {}) as { oldPassword?: string; newPassword?: string };
+    if (!body.oldPassword || !body.newPassword) return { error: "old_new_password_required" };
+    if (body.newPassword.length < 8) return { error: "password_too_short_min_8" };
+    return { changed: true };
+  }
   if (method === "DELETE" && seg[0] === "auth" && seg[1] === "tokens" && seg.length === 3) {
     db.tokens = db.tokens.filter((t) => t.token_id !== seg[2]);
     return { ok: true };
@@ -1204,6 +1356,13 @@ export function mockRootPost(path: string, body: unknown): unknown {
     const password = (body as { password?: string })?.password ?? "";
     if (!password) return { error: "密码不能为空" };
     return { token: "mock-token-demo", tokenId: "tok-demo" };
+  }
+  if (path === "/auth/register") {
+    if (!db.registrationOpen) return { error: "register_closed" };
+    const b = (body as { username?: string; password?: string }) ?? {};
+    if (!b.username || !b.password) return { error: "用户名与密码必填" };
+    if (b.password.length < 8) return { error: "password_too_short_min_8" };
+    return { token: "mock-token-demo", tokenId: "tok-demo", username: b.username, displayName: null };
   }
   if (path === "/api/v1/admin/setup") return { token: "mock-token-demo" };
   return { error: "未知的演示路由" };
@@ -1251,8 +1410,19 @@ export function mockBlob(path: string): Blob {
     ].join("\n");
     return new Blob([md], { type: "text/markdown" });
   }
-  if (p.endsWith("/export/json")) {
-    const payload = { exported_at: now(), version: "mock", folders: db.folders, bookmarks: db.bookmarks };
+  const adminExport = p.match(/^\/admin\/users\/([\w-]+)\/export$/);
+  if (adminExport || p.endsWith("/export/user") || p.endsWith("/export/json")) {
+    const account = adminExport ? db.users.find((user) => user.id === adminExport[1]) ?? null : null;
+    const payload = {
+      format: "my-favorites-user-data",
+      format_version: 1,
+      exported_at: now(),
+      account,
+      folders: db.folders,
+      bookmarks: db.bookmarks,
+      caches: [],
+      materials: db.materials,
+    };
     return new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   }
   const rows = db.bookmarks.map((b) => `<DT><A HREF="${b.url_canonical}">${b.title}</A>`).join("\n");
@@ -1285,6 +1455,82 @@ export async function* mockLinkCheckStream(
   yield { event: "done", data: { checked: targets.length, dead, suspect, normal } };
 }
 
+/** D89 目录资料扫描 SSE 的演示版：子树候选按索引确定性给出 新增 / 非内容页 / 失败 */
+export async function* mockMaterialScanStream(
+  folderId: string,
+  limit: number,
+): AsyncGenerator<{ event: "start" | "item" | "done" | "error"; data: Record<string, unknown> }> {
+  const ids = subtreeIds(folderId)
+  const existing = new Set(db.materials.map((m) => m.bookmark_id))
+  const candidates = db.bookmarks.filter(
+    (b) => ids.has(b.folder_id) && b.is_private !== 1 && !existing.has(b.id),
+  )
+  const take = candidates.slice(0, Math.min(limit, 12))
+  await sleep(350)
+  yield { event: "start", data: { limit } }
+  let created = 0
+  let notContent = 0
+  const failed: Array<{ id: string; title: string; url: string; reason: string }> = []
+  for (let i = 0; i < take.length; i++) {
+    const b = take[i]!
+    await sleep(150 + Math.random() * 250)
+    let status: "created" | "not_content" | "failed" = "created"
+    let reason: string | undefined
+    if (b.status === "dead" || i % 7 === 3) {
+      status = "failed"
+      reason = b.status === "dead" ? "crawl_failed:Error: HTTP 404" : "crawl_failed:Error: timeout of 10000ms exceeded"
+    } else if (i % 4 === 2) {
+      status = "not_content"
+      reason = "not_content_page"
+    }
+    if (status === "created") {
+      created += 1
+      const path = (() => {
+        try {
+          return new URL(b.url_canonical).pathname
+        } catch {
+          return ""
+        }
+      })()
+      const type: MockMaterial["type"] = /\.(jpe?g|png|webp|gif)(\?|#|$)/i.test(path)
+        ? "image"
+        : /bilibili\.com\/video|youtube\.com\/watch|youtu\.be|b23\.tv/i.test(b.url_canonical)
+          ? "video"
+          : "article"
+      db.materials.push({
+        id: nid("mat"),
+        bookmark_id: b.id,
+        type,
+        category: mockCategory(b),
+        created_at: now(),
+        signals: [],
+        textLen: type === "article" ? 1200 + (b.id.length % 5) * 200 : 0,
+        cover: type !== "article",
+      })
+    } else if (status === "not_content") {
+      notContent += 1
+    } else {
+      failed.push({ id: b.id, title: b.title, url: b.url_canonical, reason: reason ?? "crawl_failed" })
+    }
+    yield {
+      event: "item",
+      data: { id: b.id, title: b.title, url: b.url_canonical, status, reason, done: i + 1, total: take.length },
+    }
+  }
+  yield {
+    event: "done",
+    data: {
+      total: take.length,
+      processed: take.length,
+      created,
+      notContent,
+      skipped: 0,
+      failed,
+      remaining: Math.max(0, candidates.length - take.length),
+    },
+  }
+}
+
 function hostOf(url: string): string {
   try {
     return new URL(url).host;
@@ -1294,4 +1540,10 @@ function hostOf(url: string): string {
 }
 
 /** 供连接状态展示 */
-export const MOCK_SERVER_INFO = { ok: true, form: "demo", version: "0.3.2-mock" };
+export const MOCK_SERVER_INFO = {
+  ok: true,
+  form: "demo",
+  version: "0.3.2-mock",
+  deployMode: "unified" as const,
+  registrationOpen: true,
+};

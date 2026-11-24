@@ -13,6 +13,33 @@ export interface AdminConfig {
   token: string;
 }
 
+export interface HealthInfo {
+  ok: boolean;
+  form: string;
+  version: string;
+  deployMode?: "unified" | "self" | "cloud";
+  registrationOpen?: boolean;
+}
+
+export interface AuthIdentity {
+  userId: string;
+  username: string | null;
+  displayName: string | null;
+  role: "admin" | "user";
+  isAdmin: boolean;
+  registrationOpen: boolean;
+  deployMode: "unified" | "self" | "cloud";
+}
+
+export interface SystemUser {
+  id: string;
+  username: string;
+  display_name: string | null;
+  role: "admin" | "user";
+  disabled_at: string | null;
+  created_at: string;
+}
+
 /** 由页面托管方式推断默认服务端：同源即服务端（生产由服务端静态托管；dev 由 vite 代理到 3000） */
 export function defaultServerUrl(): string {
   if (typeof location === "undefined") return "http://127.0.0.1:3000";
@@ -147,10 +174,12 @@ async function api<T>(cfg: AdminConfig, path: string, init?: RequestInit, timeou
   }
   let res: Response;
   try {
+    // D82：调用方信号（视图切换取消旧请求）与长兜底超时合并——任一触发即中止。
+    // 长兜底：维护任务（死链探测）是同步长任务，可达数分钟
+    const timeout = AbortSignal.timeout(timeoutMs);
     res = await fetch(apiUrl(cfg, `/api/v1${path}`), {
       ...init,
-      // 长兜底：维护任务（死链探测）是同步长任务，可达数分钟
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
       headers: {
         "content-type": "application/json",
         ...(cfg.token ? { authorization: `Bearer ${cfg.token}` } : {}),
@@ -158,6 +187,8 @@ async function api<T>(cfg: AdminConfig, path: string, init?: RequestInit, timeou
       },
     });
   } catch (err) {
+    // 调用方主动取消（视图切换）原样抛出，与网络失败区分——刷新批次据此静默丢弃
+    if (init?.signal?.aborted) throw err;
     throw new ApiError(0, path, err instanceof Error ? err.message : String(err));
   }
   if (!res.ok) {
@@ -204,16 +235,14 @@ async function apiRawText(cfg: AdminConfig, path: string, body: string): Promise
 }
 
 /** 不带鉴权探活：返回 null 表示不可达 */
-export async function probeHealth(
-  serverUrl: string,
-): Promise<{ ok: boolean; form: string; version: string } | null> {
+export async function probeHealth(serverUrl: string): Promise<HealthInfo | null> {
   if (isMock()) return MOCK_SERVER_INFO;
   try {
     const res = await fetch(`${serverUrl.replace(/\/$/, "")}/healthz`, {
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return null;
-    return (await res.json()) as { ok: boolean; form: string; version: string };
+    return (await res.json()) as HealthInfo;
   } catch {
     return null;
   }
@@ -251,8 +280,31 @@ async function rootPost<T>(
 }
 
 export const auth = {
+  /** 兼容旧客户端：留空用户名，仅使用旧管理员密码登录 owner。 */
   login: (cfg: AdminConfig, password: string, label: string) =>
     rootPost<{ token: string; tokenId: string }>(cfg, "/auth/login", { password, label }),
+  /** D73：所有部署统一的用户名 + 密码登录。 */
+  loginAccount: (cfg: AdminConfig, username: string, password: string, label: string) =>
+    rootPost<{ token: string; tokenId: string; username?: string; displayName?: string | null }>(
+      cfg,
+      "/auth/login",
+      { username, password, label },
+    ),
+  /** 注册是否可用仅由目标实例管理员的注册开关决定。 */
+  register: (cfg: AdminConfig, username: string, password: string, label: string) =>
+    rootPost<{ token: string; tokenId: string; username?: string; displayName?: string | null }>(
+      cfg,
+      "/auth/register",
+      { username, password, label },
+    ),
+  /** 当前身份与系统管理权限（所有部署同一契约）。 */
+  me: (cfg: AdminConfig) => api<AuthIdentity>(cfg, "/auth/me"),
+  /** 修改当前账号密码；owner 的 env 密码由部署配置管理。 */
+  changePassword: (cfg: AdminConfig, oldPassword: string, newPassword: string) =>
+    api<{ changed: boolean }>(cfg, "/auth/password", {
+      method: "POST",
+      body: JSON.stringify({ oldPassword, newPassword }),
+    }),
   /** 首启设置：生产语义要求部署引导凭据（MF_SETUP_TOKEN env / dataDir 引导文件），走请求头下发 */
   setup: (cfg: AdminConfig, password: string, setupToken: string) =>
     rootPost<{ token?: string }>(cfg, "/api/v1/admin/setup", { password }, { "x-mf-setup-token": setupToken }),
@@ -469,6 +521,7 @@ export interface ProviderConfigRow {
 }
 
 export interface TokenRow {
+  current?: boolean;
   token_id: string;
   label: string | null;
   created_at: string;
@@ -525,8 +578,8 @@ export interface MaterialFacets {
 export const fetchers = {
   stats: (cfg: AdminConfig) => api<Stats>(cfg, "/stats"),
   healthReport: (cfg: AdminConfig) => api<HealthReport>(cfg, "/health-report"),
-  folderTree: (cfg: AdminConfig) =>
-    api<FolderTreeNode[]>(cfg, "/folders/tree", { headers: privateHeaders() }),
+  folderTree: (cfg: AdminConfig, signal?: AbortSignal) =>
+    api<FolderTreeNode[]>(cfg, "/folders/tree", { headers: privateHeaders(), signal }),
   bookmarks: (
     cfg: AdminConfig,
     q: {
@@ -537,6 +590,7 @@ export const fetchers = {
       limit?: number;
       offset?: number;
     },
+    signal?: AbortSignal,
   ) => {
     const p = new URLSearchParams();
     if (q.folderId) p.set("folderId", q.folderId);
@@ -545,30 +599,55 @@ export const fetchers = {
     if (q.hasSnapshot) p.set("hasSnapshot", "1");
     if (q.limit !== undefined) p.set("limit", String(q.limit));
     if (q.offset !== undefined) p.set("offset", String(q.offset));
-    return api<Bookmark[]>(cfg, `/bookmarks?${p}`, { headers: privateHeaders() });
+    return api<Bookmark[]>(cfg, `/bookmarks?${p}`, { headers: privateHeaders(), signal });
   },
-  bookmarkDetail: (cfg: AdminConfig, id: string) => api<BookmarkDetail>(cfg, `/bookmarks/${id}`),
-  inboxItems: (cfg: AdminConfig) =>
-    api<{ items: unknown[]; placed: InboxPlaced[]; ambiguousCount: number }>(cfg, "/inbox/items"),
+  bookmarkDetail: (cfg: AdminConfig, id: string, signal?: AbortSignal) =>
+    api<BookmarkDetail>(cfg, `/bookmarks/${id}`, { signal }),
+  inboxItems: (cfg: AdminConfig, signal?: AbortSignal) =>
+    api<{ items: unknown[]; placed: InboxPlaced[]; ambiguousCount: number }>(cfg, "/inbox/items", { signal }),
   snapshots: (cfg: AdminConfig, bookmarkId: string) =>
     api<{ snapshots: Array<{ id: string; created_at: string; size: number; via: string }> }>(
       cfg,
       `/snapshots?bookmarkId=${encodeURIComponent(bookmarkId)}`,
     ),
   snapshotViewUrl: (cfg: AdminConfig) => `${cfg.serverUrl}/api/v1/snapshots`,
-  search: (cfg: AdminConfig, q: string, semantic?: 1) =>
+  search: (cfg: AdminConfig, q: string, semantic?: 1, signal?: AbortSignal) =>
     api<{ results: Bookmark[]; mode?: string }>(
       cfg,
       `/search?q=${encodeURIComponent(q)}${semantic ? "&semantic=1" : ""}`,
-      { headers: privateHeaders() },
+      { headers: privateHeaders(), signal },
     ),
   versions: (cfg: AdminConfig) => api<{ versions: VersionRow[] }>(cfg, "/organize/versions"),
-  linkReport: (cfg: AdminConfig) => api<LinkCheckReport>(cfg, "/maintenance/report/latest?type=link_check"),
+  linkReport: (cfg: AdminConfig, signal?: AbortSignal) =>
+    api<LinkCheckReport>(cfg, "/maintenance/report/latest?type=link_check", { signal }),
   dupReport: (cfg: AdminConfig) => api<DupScanReport>(cfg, "/maintenance/report/latest?type=duplicate_scan"),
   navSites: (cfg: AdminConfig) => api<NavSite[]>(cfg, "/nav/sites"),
   navSiteDetail: (cfg: AdminConfig, slug: string) => api<NavSiteDetail>(cfg, `/nav/sites/${slug}`),
   providers: (cfg: AdminConfig) => api<ProviderConfigRow[]>(cfg, "/settings/providers"),
   tokens: (cfg: AdminConfig) => api<{ tokens: TokenRow[] }>(cfg, "/auth/tokens"),
+  system: (cfg: AdminConfig) =>
+    api<{ registrationOpen: boolean; users: SystemUser[] }>(cfg, "/admin/system"),
+  setRegistrationOpen: (cfg: AdminConfig, registrationOpen: boolean) =>
+    api<{ registrationOpen: boolean }>(cfg, "/admin/system", {
+      method: "PATCH",
+      body: JSON.stringify({ registrationOpen }),
+    }),
+  createUser: (cfg: AdminConfig, input: { username: string; password: string; role: "admin" | "user" }) =>
+    api<{ user: SystemUser }>(cfg, "/admin/users", { method: "POST", body: JSON.stringify(input) }),
+  updateUser: (
+    cfg: AdminConfig,
+    id: string,
+    input: { disabled?: boolean; role?: "admin" | "user"; newPassword?: string },
+  ) =>
+    api<{ user: SystemUser; revokedTokens: number }>(cfg, `/admin/users/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  exportUser: (cfg: AdminConfig, id: string) =>
+    apiDownload(cfg, `/admin/users/${encodeURIComponent(id)}/export`),
+  /** D67 账号与安全：按非密 ID 撤销令牌 */
+  revokeToken: (cfg: AdminConfig, tokenId: string) =>
+    api<{ revoked: boolean }>(cfg, `/auth/tokens/${tokenId}`, { method: "DELETE" }),
   privacyRules: (cfg: AdminConfig) => api<{ patterns: string[]; revision: number }>(cfg, "/privacy/rules"),
   // ---------- D61 资料库 ----------
   materials: (

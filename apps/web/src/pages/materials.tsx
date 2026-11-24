@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { EmptyState, PageScroll, PageHeader, toast } from "@/components/shared";
 import { useShell } from "@/components/layout";
+import { useServerChanges } from "@/lib/events";
 import { fetchers, type MaterialCounts, type MaterialFacets, type MaterialRow } from "@/lib/api";
 import { categoryEmoji, tagEmoji } from "@/lib/tag-emoji";
 import { cn } from "@/lib/utils";
@@ -54,8 +55,8 @@ export function Materials() {
   const [uncategorized, setUncategorized] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(() => {
-    setLoading(true);
+  const load = useCallback((silent = false) => {
+    if (!silent) setLoading(true);
     fetchers
       .materials(cfg, {
         type: filter || undefined,
@@ -72,7 +73,9 @@ export function Materials() {
       .finally(() => setLoading(false));
   }, [cfg, filter, q, catFilter, uncategorized]);
 
-  useEffect(load, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   // 分面统计：仅随配置变化（全局计数），移出资料库后手动刷新
   const loadFacets = useCallback(() => {
@@ -82,6 +85,12 @@ export function Materials() {
       .catch(() => setFacets(null));
   }, [cfg]);
   useEffect(loadFacets, [loadFacets]);
+
+  // D81：服务端变更门铃 → 列表 + 分类树合并刷新（资料入库/移出随扩展动作实时可见；静默不闪骨架）
+  useServerChanges(() => {
+    load(true);
+    loadFacets();
+  });
 
   // 分类树：category 路径（"一级/二级"）→ 两层结构，一级计数 = 子树聚合
   const catTree = useMemo(() => {

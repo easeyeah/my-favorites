@@ -17,12 +17,16 @@ import { cn } from "@/lib/utils";
 import { syncNotifyStyle, Toaster } from "@/components/shared";
 import { CommandPalette } from "@/components/command-palette";
 import { isMock } from "@/lib/mock";
+import { startEventStream, stopEventStream, useServerChanges } from "@/lib/events";
 import { loadModules, saveModules, type ModuleId, type ModuleState } from "@/lib/modules";
 import {
+  auth,
   fetchers,
   probeHealth,
   type AdminConfig,
+  type AuthIdentity,
   type FolderTreeNode,
+  type HealthInfo,
 } from "@/lib/api";
 
 export const TAB_KEYS = ["overview", "bookmarks", "materials", "inbox", "nav", "settings"] as const;
@@ -61,7 +65,8 @@ export interface Badges {
 interface ShellState {
   cfg: AdminConfig;
   setCfg: (c: AdminConfig) => void;
-  serverInfo: { ok: boolean; form: string; version: string } | null;
+  serverInfo: HealthInfo | null;
+  currentUser: AuthIdentity | null;
   connected: boolean;
   badges: Badges;
   refreshBadges: () => void;
@@ -73,6 +78,7 @@ export const ShellContext = createContext<ShellState>({
   cfg: { serverUrl: "", token: "" },
   setCfg: () => {},
   serverInfo: null,
+  currentUser: null,
   connected: false,
   badges: { inbox: 0 },
   refreshBadges: () => {},
@@ -102,6 +108,7 @@ export function Shell({
 }) {
   const [route, setRoute] = useState<Route>(readRoute);
   const [serverInfo, setServerInfo] = useState<ShellState["serverInfo"]>(null);
+  const [currentUser, setCurrentUser] = useState<AuthIdentity | null>(null);
   const [connected, setConnected] = useState(false);
   const [badges, setBadges] = useState<Badges>({ inbox: 0 });
   const [modules, setModulesState] = useState<ModuleState>(loadModules);
@@ -156,7 +163,25 @@ export function Shell({
       setConnected(Boolean(info?.ok));
     });
   }, [cfg.serverUrl]);
+  useEffect(() => {
+    let active = true;
+    auth.me(cfg).then((me) => {
+      if (active) setCurrentUser(me);
+    }).catch(() => {
+      if (active) setCurrentUser(null);
+    });
+    return () => {
+      active = false;
+    };
+  }, [cfg]);
   useEffect(refreshBadges, [refreshBadges]);
+  // D81：管理台实时刷新——订阅服务端变更门铃（SSE），角标随浏览器/扩展动作秒级更新。
+  // 页面级列表/树刷新由各页 useServerChanges 自行订阅（编辑中表单守卫在页面侧）。
+  useEffect(() => {
+    if (connected) startEventStream(cfg);
+    return () => stopEventStream();
+  }, [cfg, connected]);
+  useServerChanges(refreshBadges, connected);
   // D28：boot 同步通知方式进缓存（整理成功提示按档位过滤）
   useEffect(() => {
     void syncNotifyStyle(cfg);
@@ -201,7 +226,7 @@ export function Shell({
 
   return (
     <RouteContext.Provider value={{ ...route, go }}>
-      <ShellContext.Provider value={{ cfg, setCfg, serverInfo, connected, badges, refreshBadges, modules, setModules }}>
+      <ShellContext.Provider value={{ cfg, setCfg, serverInfo, currentUser, connected, badges, refreshBadges, modules, setModules }}>
         <div className="min-h-screen">
           {/* 顶部轻导航：logo 在上，导航在下 */}
           <header className="bg-background/85 sticky top-0 z-40 border-b border-border/60 backdrop-blur">

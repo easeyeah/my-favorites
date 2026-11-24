@@ -7,6 +7,16 @@
  * 正常=绿）不变，彩色除主色与语义外一律不用。 */
 @custom-variant dark (&:is(.dark *));
 
+/* 所有数据表/行式数据列表复用；表头与顶部工具栏不放进 data-row。 */
+@layer components {
+  .data-row {
+    @apply rounded-lg transition-colors hover:bg-muted/60 focus-within:bg-muted/60;
+  }
+  tbody > tr, [role="rowgroup"] > [role="row"] {
+    @apply transition-colors hover:bg-muted/60 focus-within:bg-muted/60;
+  }
+}
+
 @layer base {
   /* Tailwind v4 裸 `border` 默认是 currentColor（近黑）——统一为 zinc 浅灰，
      修复弹窗/浮层只写 border 未写色值时的黑边问题（shadcn v4 模板标准配置） */

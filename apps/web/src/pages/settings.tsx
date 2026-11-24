@@ -1,10 +1,11 @@
 /**
- * 设置：一级入口列表 + 二级页面（#settings/connection 等）。
- * 首页只放入口行，具体配置都封装进二级页；安全说明并入连接页，规划中内容压成一行。
+ * 设置：一级入口列表 + 二级页面（#settings/<sub>）。
+ * D67：连接类配置收敛到插件 options「服务」分区——管理台是服务端托管的页面，
+ * 天然"已在服务端"，只保留账号安全（改密码/令牌/退出）与运行时偏好。
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { Bell, Bot, Check, ChevronRight, Cloud, Copy, Database, Download, FileUp, HardDrive, Loader2, Plug, Plus, ScrollText, Settings as SettingsIcon, ShieldCheck, Sparkles, Trash2, Upload, Webhook } from "lucide-react";
+import { Bell, Bot, Check, ChevronRight, Copy, Database, Download, FileUp, KeyRound, Loader2, Plug, Plus, ScrollText, Settings as SettingsIcon, ShieldCheck, Sparkles, Trash2, Upload, UsersRound, Webhook } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,43 +19,44 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Btn, EmptyHint, PageScroll, Switch, downloadBlob, setNotifyStyle, timeAgo, toast } from "@/components/shared";
+import { Btn, EmptyHint, NumberedPagination, PageScroll, Switch, downloadBlob, setNotifyStyle, timeAgo, toast } from "@/components/shared";
 import { useRoute, useShell } from "@/components/layout";
 import { PROVIDERS } from "@mf/ai";
 import { MODULES } from "@/lib/modules";
 import { isMock } from "@/lib/mock";
+import { SystemAdminCard } from "@/pages/system-admin";
 import {
   ApiError,
   apiCall,
   apiDownloadBlob,
-  OFFICIAL_CLOUD_URL,
   apiPostHtml,
   auth,
   fetchers,
-  rememberTokenFor,
   storeToken,
-  tokenFor,
   type ProviderConfigRow,
+  type TokenRow,
 } from "@/lib/api";
 
-const SECTIONS: Array<{ sub: string; icon: ReactNode; title: string; desc: string; content: () => ReactNode }> = [
+const SECTIONS: Array<{ sub: string; icon: ReactNode; title: string; desc: string; content: () => ReactNode; adminOnly?: boolean }> = [
+  { sub: "system", icon: <UsersRound className="size-4" />, title: "系统管理", desc: "开放注册 / 用户与权限 / 按用户导出", content: () => <SystemAdminCard />, adminOnly: true },
   { sub: "modules", icon: <Sparkles className="size-4" />, title: "功能模块", desc: "导航站 / AI 接入的开关（收纳盒与整理随书签库内置）", content: () => <ModulesCard /> },
-  { sub: "notify", icon: <Bell className="size-4" />, title: "通知偏好", desc: "整理完成后怎么告诉你（D28 三档）", content: () => <NotifyCard /> },
+  { sub: "notify", icon: <Bell className="size-4" />, title: "通知偏好", desc: "统一设置管理台整理提示与扩展归位角标", content: () => <NotifyCard /> },
   { sub: "organize-rules", icon: <Sparkles className="size-4" />, title: "整理偏好", desc: "AI 记住的整理规则，可查看 / 删除（原型 12）", content: () => <OrganizeRulesCard /> },
-  { sub: "connection", icon: <Plug className="size-4" />, title: "连接与安全", desc: "服务端地址与登录", content: () => <ConnectionCard /> },
+  { sub: "account", icon: <KeyRound className="size-4" />, title: "账号与安全", desc: "修改密码 / 令牌管理 / 退出登录（D67）", content: () => <AccountCard /> },
   { sub: "ai", icon: <Database className="size-4" />, title: "AI 模型", desc: "BYOK 供应商，驱动整理与摘要", content: () => <ProvidersCard /> },
   { sub: "mcp", icon: <Bot className="size-4" />, title: "MCP 接入", desc: "资料库对 AI 工具开放：Claude / Cursor 检索与阅读全文（D64）", content: () => <McpCard /> },
   { sub: "privacy", icon: <ShieldCheck className="size-4" />, title: "隐私保护", desc: "域名清单：不抓取、不送 AI、不出站", content: () => <PrivacyCard /> },
   { sub: "data", icon: <Download className="size-4" />, title: "数据", desc: "JSON / HTML 导入导出，随时带走", content: () => <DataCard /> },
   { sub: "webhooks", icon: <Webhook className="size-4" />, title: "集成与自动化", desc: "出站 Webhook：收藏动作触发外部工具", content: () => <WebhooksCard /> },
-  { sub: "audit", icon: <ScrollText className="size-4" />, title: "操作日志", desc: "登录 / 令牌 / 配置 / 发布的审计记录（只读，D58）", content: () => <AuditCard /> },
+  { sub: "audit", icon: <ScrollText className="size-4" />, title: "操作日志", desc: "账号安全、配置、发布与系统管理记录", content: () => <AuditCard /> },
 ];
 
 export function Settings() {
   const { sub, go } = useRoute();
-  const { cfg, serverInfo } = useShell();
-  const active = SECTIONS.some((s) => s.sub === sub) ? (sub as string) : SECTIONS[0]!.sub;
-  const activeDef = SECTIONS.find((s) => s.sub === active)!;
+  const { cfg, serverInfo, currentUser } = useShell();
+  const sections = SECTIONS.filter((s) => !s.adminOnly || currentUser?.isAdmin);
+  const active = sections.some((s) => s.sub === sub) ? (sub as string) : sections[0]!.sub;
+  const activeDef = sections.find((s) => s.sub === active)!;
 
   useEffect(() => {
     window.scrollTo(0, 0);
@@ -75,7 +77,7 @@ export function Settings() {
         {/* 左：分区子导航 */}
         <aside className="hidden md:block">
           <div className="md:sticky md:top-24 space-y-0.5">
-            {SECTIONS.map((s) => (
+            {sections.map((s) => (
               <button
                 key={s.sub}
                 onClick={() => go("settings", undefined, s.sub)}
@@ -93,7 +95,7 @@ export function Settings() {
 
         {/* 移动端分区 chips */}
         <div className="flex flex-wrap items-center gap-1.5 md:hidden">
-          {SECTIONS.map((s) => (
+          {sections.map((s) => (
             <button
               key={s.sub}
               onClick={() => go("settings", undefined, s.sub)}
@@ -220,13 +222,13 @@ function OrganizeRulesCard() {
   );
 }
 
-// ---------- 通知偏好（D28 三档：管理台侧；扩展端在其 options 端侧自行设置） ----------
+// ---------- 通知偏好（统一服务端用户偏好；管理台提示与扩展归位角标共用） ----------
 
 type NotifyStyle = "toast" | "card" | "silent";
 
 const NOTIFY_OPTIONS: Array<{ key: NotifyStyle; title: string; desc: string }> = [
-  { key: "toast", title: "轻提示", desc: "完成后右下角一条轻提示，几秒自动消失（默认）" },
-  { key: "card", title: "通知卡", desc: "在原地展示变更摘要卡，含撤销与「看看改了什么」明细" },
+  { key: "toast", title: "轻提示", desc: "整理完成后短暂提示；扩展显示工具栏归位角标（默认）" },
+  { key: "card", title: "通知卡", desc: "目前与轻提示相同，独立通知卡尚未实现" },
   { key: "silent", title: "静默", desc: "不打扰——变更只记入版本历史，随时可去版本历史撤销" },
 ];
 
@@ -293,7 +295,7 @@ function NotifyCard() {
         ))}
       </ul>
       <p className="text-muted-foreground mt-2 text-[11px]">
-        每次整理都会完成并记入版本历史（可撤销）；这里只决定「怎么告诉你」。扩展端的通知方式在扩展设置里单独调整。
+        通知方式统一在管理台设置，应用于当前服务账号的管理台整理提示与扩展归位角标；整理记录仍可在版本历史撤销。
       </p>
     </div>
   );
@@ -301,196 +303,210 @@ function NotifyCard() {
 
 // ---------- 连接与令牌 ----------
 
-function ConnectionCard() {
-  const { cfg, setCfg, serverInfo, refreshBadges, connected } = useShell();
-  const [serverType, setServerType] = useState<'cloud' | 'self'>(
-    cfg.serverUrl === OFFICIAL_CLOUD_URL ? 'cloud' : 'self',
-  )
-  const [selfUrl, setSelfUrl] = useState(cfg.serverUrl === OFFICIAL_CLOUD_URL ? '' : cfg.serverUrl)
-  const [password, setPassword] = useState('')
-  const [connecting, setConnecting] = useState(false)
-  const [urlErr, setUrlErr] = useState('')
-  const [pwdErr, setPwdErr] = useState('')
+/**
+ * D67 账号与安全：修改密码 / 令牌管理（补 §10⑥ UI）/ 退出登录。
+ * 连接类配置（服务形态/地址/账号登录）已收敛到插件 options「服务」分区——
+ * 管理台是服务端托管页面，只管"当前会话的身份与凭据"。
+ */
+function AccountCard() {
+  const { cfg, setCfg, serverInfo, refreshBadges, connected, currentUser } = useShell();
+  const me = currentUser;
+  const [oldPw, setOldPw] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [pwErr, setPwErr] = useState('');
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwOk, setPwOk] = useState(false);
+  const [tokens, setTokens] = useState<TokenRow[] | null>(null);
+  const [revoking, setRevoking] = useState<string | null>(null);
+  const [tokenPage, setTokenPage] = useState(1);
+  const tokenPages = Math.max(1, Math.ceil((tokens?.length ?? 0) / 10));
+  const visibleTokenPage = Math.min(tokenPage, tokenPages);
 
-  /** 服务端地址格式校验（空值只在提交时拦，输入中不打扰） */
-  const validateUrl = (silentOnEmpty = true): boolean => {
-    const v = selfUrl.trim()
-    if (!v) {
-      if (!silentOnEmpty) setUrlErr('请填写服务端地址')
-      return silentOnEmpty
+  useEffect(() => {
+    if (isMock()) {
+      setTokens([
+        { token_id: 'tok-demo', current: true, label: '本机浏览器（演示）', created_at: new Date().toISOString(), expires_at: null, revoked_at: null, last_used_at: new Date().toISOString() },
+        { token_id: 'tok-ext', label: '扩展 · Chrome（演示）', created_at: new Date(Date.now() - 86400_000 * 3).toISOString(), expires_at: null, revoked_at: null, last_used_at: new Date(Date.now() - 3600_000).toISOString() },
+      ]);
+      return;
     }
-    if (!/^https?:\/\/[^\s/]+/.test(v)) {
-      setUrlErr('地址需以 http:// 或 https:// 开头（如 http://nas-home.local:3000）')
-      return false
-    }
-    setUrlErr('')
-    return true
-  }
+    void refreshTokens();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  /** 连接 = 记住地址 + 设为当前；填了密码就顺带登录换令牌 */
-  const connect = async () => {
-    setPwdErr('')
-    if (serverType === 'self' && !validateUrl(false)) return
-    const url = serverType === 'cloud' ? OFFICIAL_CLOUD_URL : selfUrl.trim().replace(/\/+$/, '')
-    setConnecting(true)
+  const refreshTokens = async () => {
     try {
-      if (!password) {
-        setCfg({ serverUrl: url, token: tokenFor(url) })
-        toast.ok(serverType === 'cloud' ? '已连接官方云（未登录）' : `已连接 ${url}（未登录）`)
-        return
-      }
-      const res = await auth.login({ serverUrl: url, token: '' }, password, 'web-admin')
-      storeToken(res.token, true, url)
-      rememberTokenFor(url, res.token)
-      setCfg({ serverUrl: url, token: res.token })
-      toast.ok('已连接并登录')
-      setPassword('')
-      refreshBadges()
-    } catch (e) {
-      const m = e instanceof ApiError ? e.message : String(e)
-      setPwdErr(m === 'rate_limited' ? '失败次数过多，已限速 15 分钟，稍后再试' : `登录失败：${m}`)
-    } finally {
-      setConnecting(false)
+      const r = await fetchers.tokens(cfg);
+      setTokens(r.tokens.filter((t) => !t.revoked_at && (!t.expires_at || new Date(t.expires_at).getTime() > Date.now()))
+        .sort((a, b) => Number(!!b.current) - Number(!!a.current) || (b.last_used_at ?? b.created_at).localeCompare(a.last_used_at ?? a.created_at)));
+    } catch {
+      setTokens(null);
     }
-  }
+  };
+
+  /** 错误码 → 一行可行动文案 */
+  const pwErrText = (msg: string): string => {
+    if (msg === 'invalid_password') return '当前密码不对，再想想？';
+    if (msg === 'password_too_short_min_8') return '新密码至少 8 位';
+    if (msg === 'rate_limited') return '尝试过于频繁，已被限速，稍后再试';
+    if (msg === 'env_password_managed_externally') return '密码由部署环境变量 ADMIN_PASSWORD 管理，请在部署配置中修改';
+    if (msg === 'unauthorized') return '登录态已过期，请重新登录';
+    return `修改失败：${msg}`;
+  };
+
+  const changePassword = async () => {
+    setPwErr('');
+    setPwOk(false);
+    if (!oldPw || !newPw) {
+      setPwErr('请填写当前密码与新密码');
+      return;
+    }
+    if (newPw.length < 8) {
+      setPwErr('新密码至少 8 位');
+      return;
+    }
+    if (newPw !== confirmPw) {
+      setPwErr('两次输入的新密码不一致');
+      return;
+    }
+    setPwBusy(true);
+    try {
+      await auth.changePassword(cfg, oldPw, newPw);
+      setPwOk(true);
+      setOldPw('');
+      setNewPw('');
+      setConfirmPw('');
+      toast.ok('密码已更新，其他设备无需重新登录（令牌仍有效）');
+    } catch (e) {
+      setPwErr(pwErrText(e instanceof ApiError ? e.message : String(e)));
+    } finally {
+      setPwBusy(false);
+    }
+  };
+
+  const revoke = async (tokenId: string, label: string | null) => {
+    setRevoking(tokenId);
+    try {
+      await fetchers.revokeToken(cfg, tokenId);
+      toast.ok(`已撤销「${label ?? tokenId.slice(0, 8)}」，该设备下次请求需重新登录`);
+      await refreshTokens();
+    } catch (e) {
+      toast.err(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setRevoking(null);
+    }
+  };
 
   const logout = async () => {
     try {
-      await apiCall(cfg, '/auth/logout', { method: 'POST' })
+      await apiCall(cfg, '/auth/logout', { method: 'POST' });
     } catch {
       /* 离线也照常清除本地 */
     }
-    rememberTokenFor(cfg.serverUrl, '')
-    storeToken('', true)
-    setCfg({ serverUrl: cfg.serverUrl, token: '' })
-    toast.ok('已退出登录')
-  }
-
-  const activeUrl = serverType === 'cloud' ? OFFICIAL_CLOUD_URL : selfUrl.trim().replace(/\/+$/, '')
+    // D68 修复「退出不干净」：退出=本设备忘记全部已记忆凭据。mf-tokens 里可能存在
+    // 历史变体键（localhost/带斜杠等——指向同一物理服务器的不同 URL 字符串），精确清
+    // cfg.serverUrl 命中不了它们，之后切地址/reload 会经 loadConfig 的 tokenFor 兜底链
+    // 免登录复活会话。语义取舍：全量清除 > 切换免重登的便利（信任优先）。
+    localStorage.removeItem('mf-tokens');
+    storeToken('', true);
+    sessionStorage.clear();
+    toast.ok('已退出登录');
+    setTimeout(() => {
+      window.location.replace('/');
+    }, 400);
+  };
 
   return (
     <div className="space-y-6 text-sm">
-      {/* 当前连接状态条 */}
-      <div className="bg-muted/40 flex items-center gap-2 rounded-xl p-4 text-sm">
+      {/* 当前身份条 */}
+      <div className="bg-muted/40 flex flex-wrap items-center gap-2 rounded-xl p-4">
         <span className={cn('size-1.5 rounded-full', connected ? 'bg-emerald-500' : 'bg-red-400')} />
-        <span className="font-medium">{cfg.serverUrl}</span>
-        {cfg.token ? (
-          <Badge variant="success">已登录</Badge>
-        ) : (
-          <Badge variant="secondary">未登录</Badge>
-        )}
-        {serverInfo && <span className="text-muted-foreground text-xs">{serverInfo.form} · v{serverInfo.version}</span>}
-        {cfg.token && (
-          <button className="text-destructive ml-auto text-xs hover:underline" onClick={() => void logout()}>
-            退出登录
-          </button>
-        )}
+        <span className="font-medium">{me?.username ?? '本机管理员'}</span>
+        <Badge variant="secondary">{me ? (me.isAdmin ? '系统管理员' : '普通用户') : '当前会话'}</Badge>
+        <span className="text-muted-foreground text-xs">{cfg.serverUrl}</span>
+        {serverInfo && <span className="text-muted-foreground text-xs">v{serverInfo.version}</span>}
+        <button className="text-destructive ml-auto text-xs hover:underline" onClick={() => void logout()}>
+          退出登录
+        </button>
       </div>
 
-      {/* 接入方式：官方云 / 自建 */}
-      <div className="space-y-1">
-        <SectionTitle>接入方式</SectionTitle>
-        <div className="grid grid-cols-2 gap-2.5">
-          <TypeCard
-            active={serverType === 'cloud'}
-            icon={<Cloud className="size-4" />}
-            title="官方云服务"
-            desc="无需部署，开箱即用"
-            onClick={() => setServerType('cloud')}
-          />
-          <TypeCard
-            active={serverType === 'self'}
-            icon={<HardDrive className="size-4" />}
-            title="自建 / NAS"
-            desc="数据完全在自己手里"
-            onClick={() => setServerType('self')}
-          />
+      {/* 修改密码 */}
+      <div>
+        <SectionTitle>修改密码</SectionTitle>
+        <p className="text-muted-foreground mb-2 text-[11px]">
+          当前账号密码；修改后重新登录用新密码，其他已登录设备不受影响
+        </p>
+        <div className="grid gap-2 sm:grid-cols-3">
+          <Input type="password" placeholder="当前密码" aria-invalid={!!pwErr} value={oldPw} onChange={(e) => { setOldPw(e.target.value); if (pwErr) setPwErr(''); }} />
+          <Input type="password" placeholder="新密码（≥8 位）" aria-invalid={!!pwErr} value={newPw} onChange={(e) => { setNewPw(e.target.value); if (pwErr) setPwErr(''); }} />
+          <Input type="password" placeholder="确认新密码" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} />
         </div>
-        {serverType === 'self' && (
-          <div className="space-y-1.5 pt-1">
-            <label className="text-muted-foreground block text-xs">服务端地址</label>
-            <Input
-              className="font-mono text-xs"
-              aria-invalid={!!urlErr}
-              value={selfUrl}
-              onChange={(e) => {
-                setSelfUrl(e.target.value)
-                if (urlErr) setUrlErr('')
-              }}
-              onBlur={() => validateUrl(true)}
-              placeholder="http://nas-home.local:3000"
-            />
-            {urlErr ? (
-              <p className="text-destructive text-[11px]">{urlErr}</p>
-            ) : (
-              <p className="text-muted-foreground text-[11px]">支持 NAS / 局域网 / 公网自建地址</p>
-            )}
+        {pwErr && <p className="text-destructive mt-2 text-[11px]">{pwErr}</p>}
+        <div className="mt-3">
+          <Btn primary onClick={() => void changePassword()} disabled={pwBusy || pwOk}>
+            {pwBusy ? <Loader2 className="animate-spin" /> : <KeyRound />} {pwOk ? '已更新' : '更新密码'}
+          </Btn>
+        </div>
+      </div>
+
+      {/* 令牌管理（补 §10⑥：签发端点早已齐备，此前无 UI） */}
+      <div>
+        <SectionTitle right={<Btn disabled={!tokens || !tokens.some((t) => t.current) || tokens.length < 2 || revoking !== null} onClick={async () => {
+          if (!window.confirm('撤销其他所有登录会话？其他浏览器、扩展及使用这些令牌的工具需要重新登录，当前会话保留。')) return;
+          setRevoking('others');
+          try {
+            if (isMock()) {
+              setTokens((items) => items?.filter((t) => t.current) ?? null);
+              setTokenPage(1);
+              toast.ok('已撤销其他会话（演示）');
+              return;
+            }
+            const r = await apiCall<{ revoked: number }>(cfg, '/auth/tokens/revoke-others', { method: 'POST' });
+            toast.ok(`已撤销 ${r.revoked} 个其他会话`);
+            setTokenPage(1);
+            await refreshTokens();
+          } catch { toast.err('撤销失败，请重试'); }
+          finally { setRevoking(null); }
+        }}>撤销其他会话</Btn>}>登录会话 / 访问令牌</SectionTitle>
+        <p className="text-muted-foreground mb-2 text-[11px]">仅显示有效会话；每次登录独立签发，有效期通常为 30 天，多条记录不代表多台设备。</p>
+        {tokens === null ? (
+          <EmptyHint>令牌列表不可用（未登录或离线）</EmptyHint>
+        ) : tokens.length === 0 ? (
+          <EmptyHint>暂无活跃令牌</EmptyHint>
+        ) : (
+          <div>
+            {tokens.slice((visibleTokenPage - 1) * 10, visibleTokenPage * 10).map((t, index) => (
+              <div key={t.token_id}>
+                {index > 0 && <div className="bg-border/60 h-px" aria-hidden="true" />}
+              <div className="data-row flex items-center gap-3 px-2 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <p className="flex items-center gap-2 text-[13px] font-medium"><span className="truncate">{t.label === 'device' ? '未命名客户端' : t.label === 'extension' ? '浏览器扩展' : t.label === 'web-admin' ? '管理台浏览器' : t.label ?? '未命名客户端'}</span>{t.current && <Badge variant="secondary">当前会话</Badge>}</p>
+                  <p className="text-muted-foreground text-[11px]">
+                    签发 {timeAgo(t.created_at)}
+                    {t.last_used_at ? ` · 最近使用 ${timeAgo(t.last_used_at)}` : ' · 尚未使用'}
+                    {t.expires_at ? ` · ${new Date(t.expires_at) > new Date() ? `${new Date(t.expires_at).toLocaleDateString()} 到期` : '已过期'}` : ' · 长期有效'}
+                  </p>
+                </div>
+                {t.token_id === 'tok-demo' && isMock() ? null : (
+                  <Button variant="ghost" size="xs"
+                    disabled={revoking === t.token_id}
+                    onClick={() => void revoke(t.token_id, t.label)}
+                  >
+                    {revoking === t.token_id ? '撤销中…' : '撤销'}
+                  </Button>
+                )}
+              </div>
+              </div>
+            ))}
+            <NumberedPagination label="登录会话分页" page={visibleTokenPage} total={tokens.length} pageSize={10} onPageChange={setTokenPage} />
           </div>
         )}
       </div>
-
-      {/* 登录 */}
-      <div>
-        <SectionTitle>登录</SectionTitle>
-        <label className="text-muted-foreground block text-xs">管理员密码</label>
-        <Input
-          className="mt-1.5 w-72"
-          type="password"
-          aria-invalid={!!pwdErr}
-          value={password}
-          onChange={(e) => {
-            setPassword(e.target.value)
-            if (pwdErr) setPwdErr('')
-          }}
-          onKeyDown={(e) => e.key === 'Enter' && void connect()}
-          placeholder="••••••••"
-        />
-        {pwdErr && <p className="text-destructive mt-1.5 text-[11px]">{pwdErr}</p>}
-        <div className="mt-3">
-          <Btn primary onClick={() => void connect()} disabled={connecting}>
-            {connecting ? <Loader2 className="animate-spin" /> : <ShieldCheck />} 连接
-          </Btn>
-        </div>
-        <p className="text-muted-foreground mt-3 text-[11px]">
-          连接成功后本设备自动记住登录；首次使用先在服务端完成管理员密码初始化
-        </p>
-      </div>
-
-      {/* 已保存的服务端：只在真的存在其他可切换项时才出现 */}
     </div>
   );
 }
 
-/** 接入方式选择卡 */
-function TypeCard({
-  active,
-  icon,
-  title,
-  desc,
-  onClick,
-}: {
-  active: boolean
-  icon: React.ReactNode
-  title: string
-  desc: string
-  onClick: () => void
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        'rounded-xl p-3 text-left transition-colors',
-        active ? 'bg-primary/5 ring-1 ring-primary/40' : 'bg-muted/40 hover:bg-accent/50',
-      )}
-    >
-      <p className="flex items-center gap-2 text-sm font-medium">
-        {icon}
-        {title}
-      </p>
-      <p className="text-muted-foreground mt-0.5 text-xs">{desc}</p>
-    </button>
-  );
-}
 // ---------- AI 供应商（BYOK · D31） ----------
 
 const PURPOSES: Array<{ key: "organize" | "summarize" | "embedding"; label: string; short: string; desc: string; hint?: string }> = [
@@ -762,7 +778,7 @@ function ProvidersCard() {
                     </p>
                   )}
                 </div>
-                <Btn onClick={() => startEdit(r)}>编辑</Btn>
+                <Btn size="xs" onClick={() => startEdit(r)}>编辑</Btn>
               </li>
             ))}
           </ul>
@@ -1023,7 +1039,7 @@ function WebhooksCard() {
             <div className="flex items-center gap-2">
               <Switch checked={wh.enabled} onChange={() => void toggle(wh)} label={wh.url} />
               <span className="min-w-0 flex-1 truncate font-mono text-xs">{wh.url}</span>
-              <Btn onClick={() => void testOne(wh)} disabled={testing === wh.id}>测试</Btn>
+              <Btn size="xs" onClick={() => void testOne(wh)} disabled={testing === wh.id}>测试</Btn>
               <button
                 className="text-destructive hover:bg-destructive/10 rounded-lg p-1.5 transition-colors"
                 title="删除"
@@ -1352,9 +1368,9 @@ function DataCard() {
 
   const exportJson = async () => {
     try {
-      const blob = await apiDownloadBlob(cfg, "/export/json");
+      const blob = await apiDownloadBlob(cfg, "/export/user");
       downloadBlob(blob, `my-favorites-export-${new Date().toISOString().slice(0, 10)}.json`);
-      toast.ok("JSON 全量备份已下载（云端 ↔ 自建迁移走同一格式）");
+      toast.ok("当前账号数据 JSON 已下载（不含凭据与二进制附件）");
     } catch (e) {
       toast.err(`导出失败：${e instanceof ApiError ? e.message : String(e)}`);
     }
@@ -1409,7 +1425,7 @@ function DataCard() {
           </Btn>
         </div>
         <p className="text-muted-foreground mt-2.5 text-xs leading-relaxed">
-          数据随时可以完整带走：JSON 全量备份用于云端 ↔ 自建迁移；Netscape HTML 可直接导入任何浏览器。
+          JSON 导出当前账号的结构化内容（含私密，不含凭据与快照/封面二进制附件）；Netscape HTML 可直接导入任何浏览器。
         </p>
       </div>
       <div aria-hidden className="border-border/50 my-7 border-t" />
@@ -1496,6 +1512,7 @@ function ImportDialog({
 
 interface AuditEvent {
   id: number;
+  eventId: string;
   kind: string;
   detail: string | null;
   source: string | null;
@@ -1515,62 +1532,89 @@ const AUDIT_KINDS: Record<string, { label: string; badge: "destructive" | "warni
   "webhook.removed": { label: "Webhook", badge: "outline" },
   "nav.published": { label: "发布", badge: "outline" },
   "nav.unpublished": { label: "下线", badge: "outline" },
+  "system.registration_changed": { label: "注册设置", badge: "secondary" },
+  "user.created": { label: "添加用户", badge: "secondary" },
+  "user.updated": { label: "更新用户", badge: "secondary" },
+  "user.registered": { label: "账号注册", badge: "secondary" },
+  "user.exported": { label: "导出用户", badge: "secondary" },
+  "data.exported": { label: "导出数据", badge: "secondary" },
+  "password.changed": { label: "修改密码", badge: "secondary" },
 };
 
 function AuditCard() {
   const { cfg } = useShell();
-  const [events, setEvents] = useState<AuditEvent[] | null>(null);
+  const [result, setResult] = useState<{ events: AuditEvent[]; total: number; page: number; totalPages: number } | null>(null);
+  const [page, setPage] = useState(1);
+  const [revision, setRevision] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
-  const load = useCallback(() => {
-    apiCall<{ events: AuditEvent[] }>(cfg, "/audit?limit=200")
-      .then((r) => setEvents(r.events))
-      .catch(() => setEvents([]));
-  }, [cfg]);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(false);
+    apiCall<NonNullable<typeof result>>(cfg, `/audit?page=${page}&limit=25`)
+      .then((r) => { if (!cancelled) setResult(r); })
+      .catch(() => { if (!cancelled) setError(true); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [cfg, page, revision]);
 
-  useEffect(load, [load]);
+  const refresh = () => { setPage(1); setRevision((r) => r + 1); };
 
   return (
     <div className="text-sm">
       <SectionTitle
         right={
-          <Btn onClick={load} disabled={events === null}>
-            刷新
+          <Btn onClick={refresh} disabled={loading}>
+            {loading ? "加载中…" : "刷新"}
           </Btn>
         }
       >
         最近动作 · 只读
       </SectionTitle>
-      {events === null ? (
+      {error ? (
+        <div role="alert" className="flex items-center justify-between gap-3 py-4">
+          <span className="text-muted-foreground">操作日志加载失败，请重试。</span>
+          <Btn onClick={() => setRevision((r) => r + 1)}>重试</Btn>
+        </div>
+      ) : result === null ? (
         <EmptyHint>加载中…</EmptyHint>
-      ) : events.length === 0 ? (
+      ) : result.events.length === 0 ? (
         <EmptyHint>暂无记录</EmptyHint>
       ) : (
-        <ul className="divide-border/60 divide-y">
-          {events.map((e) => {
-            const k = AUDIT_KINDS[e.kind] ?? { label: e.kind, badge: "outline" as const };
+        <ul aria-label="操作日志列表" aria-busy={loading}>
+          {result.events.map((e, index) => {
+            const k = AUDIT_KINDS[e.kind] ?? { label: "其他操作", badge: "secondary" as const };
             return (
-              <li key={e.id} className="flex items-center gap-3 py-2.5">
-                <Badge variant={k.badge} className="w-[64px] shrink-0 justify-center px-1.5 py-0 text-[10px] font-normal">
+              <li key={e.eventId}>
+                {index > 0 && <div className="bg-border/60 h-px" aria-hidden="true" />}
+                <div className="data-row flex items-start gap-3 px-2 py-2.5">
+                <Badge variant={k.badge} title={`动作标识：${e.kind}`} className="w-[72px] shrink-0 justify-center">
                   {k.label}
                 </Badge>
-                <span className="min-w-0 flex-1 truncate" title={e.detail ?? undefined}>
-                  {e.detail ?? e.kind}
+                <span className="min-w-0 flex-1 break-words">
+                  {e.detail || k.label}
                 </span>
                 <span className="text-muted-foreground hidden shrink-0 text-xs sm:inline">{e.source ?? ""}</span>
                 <time
                   className="text-muted-foreground w-[76px] shrink-0 text-right text-xs"
-                  title={e.created_at}
+                  title={new Date(e.created_at).toLocaleString("zh-CN", { hour12: false })}
                   dateTime={e.created_at}
                 >
                   {timeAgo(e.created_at)}
                 </time>
+                </div>
               </li>
             );
           })}
         </ul>
       )}
+      {result && !error && (
+        <NumberedPagination label="操作日志分页" page={result.page} total={result.total} pageSize={25} disabled={loading} onPageChange={setPage} />
+      )}
       <p className="text-muted-foreground mt-2 text-[11px]">
-        服务端记录登录、令牌、配置与发布动作；不含书签内容，绝不落密码与令牌，保留最近 1000 条。
+        记录账号安全、配置、发布与系统管理操作；各日志库保留最近 1000 条，不记录密码或令牌内容。
       </p>
     </div>
   );
@@ -1640,8 +1684,8 @@ function McpCard() {
             <>
               <p>
                 服务端设置了管理员密码（或已完成首启设置）时，MCP 需要 Bearer
-                令牌——与管理台登录同源，无需单独的 API Key。先到「连接与安全」登录签发令牌，再复制下方示例并替换
-                <code className="font-mono"> &lt;令牌&gt;</code> 占位符。
+                令牌——与管理台登录同源，无需单独的 API Key。登录管理台后复制下方示例并替换
+                <code className="font-mono"> &lt;令牌&gt;</code> 占位符（扩展端可在插件设置页登录后获取）。
               </p>
               <p className="text-muted-foreground mt-1.5">
                 服务端未设置密码（纯内网本地使用）时无需鉴权，直接连接；公网暴露务必设置密码。

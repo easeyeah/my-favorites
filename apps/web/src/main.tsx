@@ -2,7 +2,10 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "@/App";
+import { installMockSimulator } from "@/lib/mock";
 import "./index.css";
+
+installMockSimulator(); // D82：?mock 演示态外部变更模拟入口（真实模式无操作）
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
