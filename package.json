@@ -9,6 +9,10 @@
     "test": "turbo run test",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
+    "changeset": "changeset",
+    "changeset:status": "changeset status --since=origin/main",
+    "check:changeset": "node scripts/check-changeset.mjs",
+    "version": "changeset version",
     "seed": "pnpm --filter @mf/shared seed",
     "prepare": "husky || true"
   },

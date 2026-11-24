@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changeset 门禁要与 base 分支做完整 diff
       - uses: pnpm/action-setup@v4
         with:
           version: 12.18.0
@@ -19,8 +21,24 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm commitlint --from HEAD~1 --to HEAD
-        if: github.event_name == 'push'
+      - name: 功能改动必须附 changeset
+        if: github.event_name == 'pull_request'
+        run: pnpm check:changeset
+      - name: 提交信息规范（commitlint，PR 全量 / push 多提交）
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "${EVENT}" = "pull_request" ]; then
+            FROM="$(git merge-base "origin/${BASE_REF}" HEAD)"
+          elif [ -n "${BEFORE}" ] && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            FROM="${BEFORE}"
+          else
+            FROM="HEAD~1"
+          fi
+          echo "commitlint range: ${FROM}..HEAD"
+          pnpm commitlint --from "${FROM}" --to HEAD
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm --filter @mf/extension build

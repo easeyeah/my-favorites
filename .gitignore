@@ -13,6 +13,8 @@ out/
 coverage/
 .vitest/
 .playwright/
+# e2e 排障用的临时脚本（.tmp-*.mjs）只在本地跑，不入库
+apps/e2e/.tmp-*
 
 # ZCode Mimosa 安全扫描插件的本地状态（报告/台账/hook 状态）
 .mimosa/
