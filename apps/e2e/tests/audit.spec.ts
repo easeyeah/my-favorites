@@ -1,8 +1,12 @@
 /** 操作日志：演示模式中文动作；浏览器分页/错误恢复，不写入真实业务数据。 */
 import { test, expect } from "@playwright/test";
+import { BASE, startServer, stopServer } from "./fixtures";
+
+test.beforeAll(() => startServer());
+test.afterAll(() => stopServer());
 
 test("操作日志：中文说明、分页、失败重试与刷新回首页", async ({ page }) => {
-  await page.goto("http://127.0.0.1:3000/?mock#settings/audit");
+  await page.goto(`${BASE}/?mock#settings/audit`);
   await expect(page.getByText("关闭公开注册", { exact: true })).toBeVisible();
   await expect(page.getByText("注册设置", { exact: true })).toBeVisible();
   await expect(page.getByText("system.registration_changed", { exact: true })).toHaveCount(0);

@@ -1,7 +1,11 @@
 import { test, expect } from '@playwright/test';
+import { BASE, startServer, stopServer } from './fixtures';
+
+test.beforeAll(() => startServer());
+test.afterAll(() => stopServer());
 
 test('会话管理：中文语义、当前会话、确认撤销其他会话', async ({ page }) => {
-  await page.goto('http://127.0.0.1:3000/?mock#settings/account');
+  await page.goto(`${BASE}/?mock#settings/account`);
   await expect(page.getByText('登录会话 / 访问令牌', { exact: true })).toBeVisible();
   await expect(page.getByText('当前会话', { exact: true }).last()).toBeVisible();
   await expect(page.getByText('共 2 条 · 第 1 / 1 页 · 每页 10 条')).toBeVisible();

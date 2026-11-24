@@ -1,7 +1,11 @@
 import { test, expect } from '@playwright/test';
+import { BASE, startServer, stopServer } from './fixtures';
+
+test.beforeAll(() => startServer());
+test.afterAll(() => stopServer());
 
 test('用户列表：行高亮、小按钮与页码分页', async ({ page }) => {
-  await page.goto('http://127.0.0.1:3000/?mock#settings/system');
+  await page.goto(`${BASE}/?mock#settings/system`);
   const list = page.getByRole('list', { name: '用户与权限列表' });
   await expect(list).toBeVisible();
   const roleBadge = list.locator('[data-slot="badge"]').first();
