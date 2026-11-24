@@ -1,9 +1,10 @@
-@import "tailwindcss" source("../../");
+/* Tailwind v4 默认扫描 Vite root（本包 apps/extension），无需 source()；该参数非标准，编辑器会误报「需要冒号」 */
+@import 'tailwindcss';
 
 /* 明暗双主题显式声明：原生表单控件（下拉/复选框/输入框/滚动条）与画布跟随浏览器当前主题
  * ——「与浏览器融为一体」的最后一环（Chrome 不让扩展读浏览器主题色，但 color-scheme 有效） */
 :root {
-  color-scheme: light dark;
+    color-scheme: light dark;
 }
 
 /* popup 融合策略（2026-11-20 定稿，替换同日「内层卡片」方案——外框既然不可定制，自绘窗体两头不靠）：
@@ -11,9 +12,18 @@
  * 分层只用浅底填充 + 细分隔线，边框仅保留功能件（输入框/下拉/kbd）。 */
 
 /* 定高面板内容区细滚动条（与管理台 .scroll-slim 同款：固定高度区允许内部滚动） */
-.scroll-slim::-webkit-scrollbar { width: 6px; }
-.scroll-slim::-webkit-scrollbar-track { background: transparent; }
-.scroll-slim::-webkit-scrollbar-thumb { background: rgb(212 212 216); border-radius: 3px; }
-.scroll-slim::-webkit-scrollbar-thumb:hover { background: rgb(161 161 170); }
+.scroll-slim::-webkit-scrollbar {
+    width: 6px;
+}
+.scroll-slim::-webkit-scrollbar-track {
+    background: transparent;
+}
+.scroll-slim::-webkit-scrollbar-thumb {
+    background: rgb(212 212 216);
+    border-radius: 3px;
+}
+.scroll-slim::-webkit-scrollbar-thumb:hover {
+    background: rgb(161 161 170);
+}
 
 /* 页签制已取消（2026-11-20 单面化）：.ptabs/.ptab 样式随之删除 */

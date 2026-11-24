@@ -1,1 +1,8 @@
-@import "tailwindcss" source("../../");
+/* Tailwind v4 默认扫描 Vite root（本包 apps/extension），无需 source()；该参数非标准，编辑器会误报「需要冒号」 */
+@import 'tailwindcss';
+
+/* 明暗双主题显式声明：原生滚动条/输入框与回弹画布跟随浏览器当前主题
+ * ——同 popup.css / newtab 约定；没有这行，整页 dark: 配色下滚动条与回弹区仍是亮色 */
+:root {
+    color-scheme: light dark;
+}
