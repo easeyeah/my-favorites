@@ -1,6 +1,0 @@
----
-"@mf/server": minor
-"@mf/extension": minor
----
-
-D45 · 浏览器书签按管理台顺序重排（2026-11-20）：浏览器收藏夹是物理位置序（归位镜像 move 只把节点追加到目标文件夹末尾），管理台列表是确定性排序（pinned DESC, added_at DESC, id）——两边天然越用越漂，用户反馈「收藏夹排序和管理台不一致」。新增第三类镜像操作 `reorder`：① `apps/server`：`POST /browser/reorder`（可限 deviceId）按管理台列表口径为每个**含身份映射书签**的目录生成浏览器节点顺序快照（payload.order 只收录该设备有映射的节点，同设备+目录重复排队以最新快照为准——旧 pending 终结 `superseded_by_requeue`）；`pending_browser_ops.op` 联合新增 `reorder`（TEXT 列无 CHECK，零迁移）。② `apps/extension`：`runMirrorOps` reorder 分支**就地分组排序**——节点按实际所在父文件夹分组（导入场景在浏览器原生文件夹，归位场景在 mf-整理 镜像文件夹），组内按管理台顺序移到连续位次，未映射书签顺延其后；一律「不搬家」、不预建文件夹；`pruneEmptyMirrorFolders` 清理历史空跑误建的 mf-整理 空壳；background 消息 `reorder-browser` = 排队→执行→清理→回报**实际移动数**；options「数据迁移」区按钮「↕ 按管理台顺序重排浏览器书签」点了就跑；埋点事件 `browser_reordered`（moved/pruned 计数）。走查插曲：首版只重排 mf-整理 镜像文件夹内节点，导入场景（书签仍在原生文件夹）15 个操作全部空跑却回执「成功」，且 ensureMirrorFolder 误建 15 个空壳文件夹——用户实测反馈后改为就地分组排序，并补 E2E 回归（导入建映射→置顶制造分歧→重排后浏览器顺序逐位==管理台）。同日补充（用户反馈书签栏出现 mf-整理 / my-favorites 同步 两个「哪来的」文件夹）：`pruneEmptyMirrorFolders` 扩为两类空壳一起清（mf-整理 空子目录/空根 + 空的「my-favorites 同步」根，只删真空文件夹、有内容不动）；`syncMirror` 同步根改**懒建**——0 条可补不再凭空建文件夹；反向同步提示文案改为可懂表述（0 条=「浏览器已覆盖应用库全部书签，无需补充」）。验证：server 集成 155（新增 3）+ shared 87 + E2E 22 过 1 跳（新增重排回归）+ typecheck 全绿 + 真实 dev 服务端 curl 端到端（合成设备排队→order 快照正确→数据清理）。
