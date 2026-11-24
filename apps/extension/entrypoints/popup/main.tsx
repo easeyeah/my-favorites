@@ -11,7 +11,7 @@
  * 收藏语义不变（D37/D27）：A=缓存命中「收藏到「X」」；B=未命中「交给 AI 归位」先落收纳盒异步分类；
  * 隐私域名仅存 URL 手动选目录；D42 起无聊天面，歧义处理在收纳盒条目内。
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { browser } from 'wxt/browser'
 import {
@@ -48,6 +48,8 @@ function Popup() {
     const [note, setNote] = useState('')
     const [status, setStatus] = useState('')
     const [busy, setBusy] = useState(false)
+    const [rollingBack, setRollingBack] = useState(false)
+    const rollbackBusy = useRef(false)
 
     const [inboxItems, setInboxItems] = useState<InboxItemDto[]>([])
     const [placed, setPlaced] = useState<InboxPlacedDto[]>([])
@@ -160,14 +162,21 @@ function Popup() {
             .catch((err: unknown) => flash(`❌ 重试失败：${String(err).slice(0, 60)}`))
     }
 
-    const rollback = (versionId: string, word: string) => {
-        void api<{ reversed: number }>(`/organize/rollback/${versionId}`, { method: 'POST' })
-            .then(r => {
-                flash(`↩️ ${word} ${r.reversed} 项`)
-                loadInbox()
-                refreshVersions()
-            })
-            .catch((err: unknown) => flash(`❌ ${word}失败：${String(err).slice(0, 60)}`))
+    const rollback = async (versionId: string, word: string) => {
+        if (rollbackBusy.current) return
+        rollbackBusy.current = true
+        setRollingBack(true)
+        try {
+            const r = await api<{ reversed: number }>(`/organize/rollback/${versionId}`, { method: 'POST' })
+            flash(r.reversed > 0 ? `↩️ ${word} ${r.reversed} 项` : '条目已有其他改动，本次没有覆盖')
+            loadInbox()
+            refreshVersions()
+        } catch (err) {
+            flash(`❌ 撤销失败：${String(err).slice(0, 60)}`)
+        } finally {
+            rollbackBusy.current = false
+            setRollingBack(false)
+        }
     }
 
     const folderOptions = folders.filter(f => f.is_system_inbox !== 1)
@@ -334,20 +343,39 @@ function Popup() {
                                     title={p.reason ?? undefined}
                                 >
                                     <span className="min-w-0 flex-1 truncate">{p.title}</span>
-                                    {p.folder_name && (
+                                    {p.materialized === 1 ? (
                                         <span className="shrink-0 text-[10px] text-neutral-500 dark:text-neutral-300">
-                                            →「{p.folder_name}」
+                                            →「资料库」
                                         </span>
+                                    ) : (
+                                        p.folder_name && (
+                                            <span className="shrink-0 text-[10px] text-neutral-500 dark:text-neutral-300">
+                                                →「{p.folder_name}」
+                                            </span>
+                                        )
                                     )}
-                                    <span className="shrink-0 text-[10px] text-neutral-400">{p.reason}</span>
-                                    {p.version_id && (
+                                    {p.materialized !== 1 && (
+                                        <span className="shrink-0 text-[10px] text-neutral-400">{p.reason}</span>
+                                    )}
+                                    {p.materialized === 1 && p.convert_version_id ? (
                                         <button
                                             className="shrink-0 rounded-md bg-white px-1.5 py-0.5 text-[10px] hover:bg-neutral-50 dark:bg-neutral-600 dark:hover:bg-neutral-500"
-                                            onClick={() => rollback(p.version_id!, '已撤销')}
+                                            title="恢复为书签（资料保留；启用同步的设备会重建节点）"
+                                            aria-label={`撤销自动转资料：${p.title}`}
+                                            disabled={rollingBack}
+                                            onClick={() => void rollback(p.convert_version_id!, '已恢复为书签')}
                                         >
                                             撤销
                                         </button>
-                                    )}
+                                    ) : p.version_id ? (
+                                        <button
+                                            className="shrink-0 rounded-md bg-white px-1.5 py-0.5 text-[10px] hover:bg-neutral-50 dark:bg-neutral-600 dark:hover:bg-neutral-500"
+                                            disabled={rollingBack}
+                                            onClick={() => void rollback(p.version_id!, '已撤销')}
+                                        >
+                                            撤销
+                                        </button>
+                                    ) : null}
                                 </li>
                             ))}
                         </ul>
@@ -361,13 +389,14 @@ function Popup() {
                             {versions.slice(0, 3).map(v => (
                                 <li key={v.id} className="flex items-center gap-2">
                                     <span className="min-w-0 flex-1 truncate">
-                                        {v.kind === 'undo' ? '撤销' : v.session_id ? '整理' : '自动归位'} ·{' '}
+                                        {v.label === 'material_convert' ? '收入资料库' : v.kind === 'undo' ? '撤销' : v.session_id ? '整理' : '自动归位'} ·{' '}
                                         {v.actionCount} 项 · {v.created_at.slice(5, 16).replace('T', ' ')}
                                     </span>
                                     {v.reverted === 0 && (
                                         <button
                                             className="shrink-0 rounded-md px-1.5 py-0.5 hover:bg-neutral-100 dark:hover:bg-neutral-800"
-                                            onClick={() => rollback(v.id, '已回滚')}
+                                            disabled={rollingBack}
+                                            onClick={() => void rollback(v.id, '已回滚')}
                                         >
                                             回滚
                                         </button>

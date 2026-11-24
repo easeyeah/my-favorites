@@ -17,6 +17,7 @@ import {
   runMirrorOps,
 } from "../src/lib/device";
 import { getSyncInfo, markSyncError, runSyncTick, scheduleSyncTick, setFavoritesSync, startEventStream } from "../src/lib/sync";
+import { reconcileInboxMaterials } from "../src/lib/inbox-material";
 
 const MENU_SAVE_ID = "mf-save";
 const MENU_INBOX_ID = "mf-save-inbox";
@@ -121,7 +122,7 @@ async function saveFromTab(
     }
   }
 
-  const created = await api<BookmarkDto & { suggest?: { folderPath?: string[] } }>("/bookmarks", {
+  const created = await api<BookmarkDto & { suggest?: { folderPath?: string[] }; materialized?: boolean }>("/bookmarks", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -152,10 +153,12 @@ async function saveFromTab(
     }
   }
 
-  // 原型 02：收藏完成后的页内轻提示（含撤销）
-  const folderName = opts.folderId
-    ? (await api<Array<{ id: string; name: string }>>("/folders", {}).catch(() => [])).find((f) => f.id === opts.folderId)?.name ?? "收藏夹"
-    : (created as { suggest?: { folderPath?: string[] } }).suggest?.folderPath?.join(" / ") ?? "智能归类";
+  // 原型 02：收藏完成后的页内轻提示（含撤销）。D91：命中已转资料的隐藏行 → 提示已在资料库
+  const folderName = (created as { materialized?: boolean }).materialized
+    ? "已在资料库"
+    : opts.folderId
+      ? (await api<Array<{ id: string; name: string }>>("/folders", {}).catch(() => [])).find((f) => f.id === opts.folderId)?.name ?? "收藏夹"
+      : (created as { suggest?: { folderPath?: string[] } }).suggest?.folderPath?.join(" / ") ?? "智能归类";
   try {
     await browser.scripting.executeScript({
       target: { tabId: tab.id },
@@ -371,6 +374,7 @@ async function flushInboxInner(): Promise<void> {
     }
     // A2-5：无论是否有移动，顺带执行可能积压的镜像操作
     await runMirrorOps();
+    await reconcileInboxMaterials();
     // D71：成功即清失败痕迹（角标/记录）
     await browser.action.setBadgeText({ text: "" });
     await browser.storage.local.set({ mfInboxLastError: null });
@@ -402,6 +406,9 @@ async function maybeSweepInbox(): Promise<void> {
     if (count > 0 || pending > 0) await flushInbox();
   } catch {
     // 服务端不可达：下个周期再试
+  } finally {
+    // D91：转换后服务端盒计数已归零，仍须收敛浏览器投递口，不能沿用 count>0 门控。
+    await reconcileInboxMaterials();
   }
 }
 
