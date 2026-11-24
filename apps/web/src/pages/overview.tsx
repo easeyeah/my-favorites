@@ -3,8 +3,9 @@
  * 哲学：产品了解用户、自动处理（D27 收纳盒默认全自动 + 直接生效可撤销）；
  * 首页只汇报自动处理的动态（可撤销）与内容（最近添加），绝不给用户派任务。
  */
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { RotateCcw } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Skeleton, greeting, PageScroll, SiteIcon, tidyNotify, timeAgo, todayLabel, toast } from "@/components/shared";
 import { useRoute, useShell } from "@/components/layout";
 import { useServerChanges } from "@/lib/events";
@@ -28,6 +29,7 @@ export function Overview() {
   const [versions, setVersions] = useState<VersionRow[] | null>(null);
   const [recent, setRecent] = useState<Bookmark[]>([]);
   const [undoing, setUndoing] = useState<string | null>(null);
+  const undoingRef = useRef(false);
 
   const load = useCallback(() => {
     fetchers.stats(cfg).then(setStats).catch(() => setStats(null));
@@ -45,15 +47,19 @@ export function Overview() {
 
   /** 撤销某次自动整理（回滚 = 逆放 diff 生成新版本） */
   const rollback = async (v: VersionRow) => {
+    if (undoingRef.current) return;
+    undoingRef.current = true;
     setUndoing(v.id);
     try {
       const r = await apiCall<{ reversed: number }>(cfg, `/organize/rollback/${v.id}`, { method: "POST" });
-      tidyNotify.ok(`已撤销 ${r.reversed} 项（生成新版本，历史未删除）`);
+      if (r.reversed > 0) tidyNotify.ok(`已撤销 ${r.reversed} 项（生成新版本，历史未删除）`);
+      else toast.info("条目已有其他改动，本次没有覆盖");
       load();
       refreshBadges();
     } catch (e) {
       toast.err(`撤销失败：${e instanceof ApiError ? e.message : String(e)}`);
     } finally {
+      undoingRef.current = false;
       setUndoing(null);
     }
   };
@@ -68,7 +74,11 @@ export function Overview() {
     feed.push({
       key: v.id,
       time: timeAgo(v.created_at),
-      text: `${v.kind || "整理"}，${v.actionCount} 项变更`,
+      // D91：收纳盒自动转资料批次单独出文案，其余沿用「整理/撤销，N 项变更」
+      text:
+        v.label === "material_convert"
+          ? `${v.kind === "undo" ? "重新收入资料库" : "自动收入资料库"}，${v.actionCount} 项`
+          : `${v.kind === "undo" ? "撤销操作" : v.kind === "apply" ? "自动整理" : v.kind || "整理"}，${v.actionCount} 项变更`,
       undo: v.reverted === 0 ? v : undefined,
     });
   }
@@ -122,6 +132,10 @@ export function Overview() {
           <span className="bg-emerald-500 size-1.5 rounded-full" />
           隐私域名强制保护
         </span>
+        <span className="flex items-center gap-1.5">
+          <span className="bg-emerald-500 size-1.5 rounded-full" />
+          内容自动入资料库
+        </span>
         <button
           className="hover:text-foreground inline-flex items-center gap-1 hover:underline"
           onClick={() => go("bookmarks")}
@@ -149,9 +163,10 @@ export function Overview() {
             ✨ 一切正常。AI 会在后台自动归位收纳盒、合并重复、定期体检——每一次自动处理都会出现在这里，随时可撤销。
           </p>
         ) : (
-          <ul className="divide-border/60 divide-y">
-            {feedSlice.map((item) => (
-              <li key={item.key} className="flex items-center gap-3 py-2.5 text-sm">
+          <ul>
+            {feedSlice.map((item, index) => (
+              <Fragment key={item.key}>
+              <li className="data-row flex items-center gap-3 rounded-lg px-1 py-2.5 text-sm">
                 <span className="text-muted-foreground/60 w-16 shrink-0 text-xs">{item.time}</span>
                 <span className="min-w-0 flex-1">{item.text}</span>
                 {item.tag && (
@@ -160,16 +175,21 @@ export function Overview() {
                   </span>
                 )}
                 {item.undo && (
-                  <button
-                    className="text-muted-foreground hover:bg-accent hover:text-foreground shrink-0 rounded-md px-1.5 py-1 text-xs transition-colors"
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="size-7 shrink-0 p-0"
                     disabled={undoing !== null}
                     onClick={() => void rollback(item.undo!)}
+                    aria-label={`撤销：${item.text}`}
                     title="撤销这次自动处理（逆放 diff 生成新版本）"
                   >
-                    <RotateCcw className={cn("size-3", undoing === item.undo.id && "animate-spin")} />
-                  </button>
+                    <RotateCcw className={cn(undoing === item.undo.id && "animate-spin")} aria-hidden="true" />
+                  </Button>
                 )}
               </li>
+              {index < feedSlice.length - 1 && <li aria-hidden="true" className="border-border/40 mx-1 border-t" />}
+              </Fragment>
             ))}
           </ul>
         )}

@@ -39,6 +39,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import {
     Btn,
     EmptyState,
+    NumberedPagination,
     PageScroll,
     SiteIcon,
     StatusBadge,
@@ -49,9 +50,11 @@ import {
     toast,
 } from '@/components/shared'
 import { CheckupSection, DupSection, HistorySection, HistoryTrigger, ReorgButton, ReorgSection } from '@/components/TidyPanel'
+import { OrganizeTaskDialog, OrganizeTaskEntry, type OrganizeTaskTarget } from '@/components/OrganizeTaskDialog'
 import { useRoute, useShell } from '@/components/layout'
 import { useServerChanges } from '@/lib/events'
 import { useLiveRefresh } from '@/lib/live-refresh'
+import { isTaskActive } from '@/lib/organize-task'
 import { isMock, mockMaterialScanStream } from '@/lib/mock'
 import { consumeSse } from '@/lib/sse'
 import {
@@ -67,6 +70,7 @@ import {
 import { cn } from '@/lib/utils'
 
 const PAGE = 100
+const PLACED_PAGE_SIZE = 10
 
 // 收纳盒显示名唯一出口（E2E inbox-label.spec 回归锁死）：数据层目录名已固化「📥 收纳盒」（D36），
 // mock 演示数据为裸「收纳盒」——先剥前导图标（含历史脏数据的多层重复），再统一补恰好一个。
@@ -106,6 +110,7 @@ const fetchViaLabel = (v: string) => FETCH_VIA_LABEL[v] ?? v
 
 export function Library() {
     const { cfg, refreshBadges } = useShell()
+    const { go } = useRoute()
     const routeQ = useRoute().params.get('q') ?? ''
     const [tree, setTree] = useState<FolderTreeNode[]>([])
     const [items, setItems] = useState<Bookmark[] | null>(null)
@@ -157,10 +162,20 @@ export function Library() {
     const [folderMoveTarget, setFolderMoveTarget] = useState<FolderTreeNode | null>(null)
     const [folderDeleteTarget, setFolderDeleteTarget] = useState<FolderTreeNode | null>(null)
     const [scanTarget, setScanTarget] = useState<FolderTreeNode | null>(null)
-    // 目录重整理执行中（菜单项与树行显示加载态）
-    const [reorgFolderId, setReorgFolderId] = useState<string | null>(null)
+    // ---- D92 目录整理任务：持久任务（收起/刷新不中断），可从目录树底部「整理记录」找回 ----
+    const [organizeTarget, setOrganizeTarget] = useState<OrganizeTaskTarget>(null)
+    // 进行中的任务（含撤销）：入口按钮变为「查看整理进度」，不再并行创建
+    const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
+    const organizeSettledAt = useRef(0)
     // D54：收纳盒「最近自动归位」区（去向可见 + 可撤销）
     const [placedRows, setPlacedRows] = useState<InboxPlaced[] | null>(null)
+    const [placedPage, setPlacedPage] = useState(1)
+    const [placedTotal, setPlacedTotal] = useState(0)
+    const [placedLoading, setPlacedLoading] = useState(false)
+    const [placedError, setPlacedError] = useState('')
+    const placedAbortRef = useRef<AbortController | null>(null)
+    const [undoingConvert, setUndoingConvert] = useState(false)
+    const undoConvertBusy = useRef(false)
 
     // ---- D82 实时更新：视图竞态防护 + 编辑冲突 + 滚动锚点 ----
     // epoch：视图/账号/服务端身份变化即递增并作废旧请求——旧响应无权写入新视图
@@ -884,44 +899,81 @@ export function Library() {
     }
 
     /**
-     * D89 目录级 AI 重新整理：范围=目录子树，目标限定子树内（可在该目录下新建子目录），
-     * 直接生效 + 写 organize_version（可撤销）。无确认流（D27）。
+     * D92 目录整理：一次整理 = 一个持久任务（范围=目录及全部子目录；去向=目录内的书签分类或资料分类）。
+     * 点击即创建并打开任务详情，不设确认流；关闭对话框任务继续，停止/撤销在详情里。
+     * requestId 由本次点击生成——创建请求失败重试时复用同一个，服务端按它幂等。
      */
-    const reorgFolder = async (folder: FolderTreeNode) => {
-        if (reorgFolderId || processing) return
-        setReorgFolderId(folder.id)
-        try {
-            const r = await apiCall<{ status: 'applied' | 'answered'; answer: string; applied?: number }>(
-                cfg,
-                '/organize/folder',
-                { method: 'POST', body: JSON.stringify({ folderId: folder.id, includeSubfolders: true }) },
-            )
-            if (r.status === 'applied' && (r.applied ?? 0) > 0) {
-                toast.ok(`已重新整理「${folder.name}」的 ${r.applied} 项（版本历史可撤销）`)
-                window.dispatchEvent(new Event('mf:versions-changed'))
-                loadTree()
-                void loadPage(selected, 0, false, statusFilter)
-            } else {
-                toast.info(r.answer || '分类结果与现有目录一致，无需挪动')
-            }
-            refreshBadges()
-        } catch (e) {
-            toast.err(`整理失败：${e instanceof ApiError ? e.message : String(e)}`)
-        } finally {
-            setReorgFolderId(null)
+    const startOrganize = (folderId: string, name: string) => {
+        setOrganizeTarget({ mode: 'start', folderId, folderName: name, requestId: crypto.randomUUID() })
+    }
+    const activeOrganize = activeTaskId !== null || organizeTarget?.mode === 'start'
+    const clearActiveTask = useCallback(() => setActiveTaskId(null), [])
+
+    /** 任务落定（完成/停止/失败/撤销完成）后刷新目录树、当前列表与角标 */
+    const onOrganizeChanged = useCallback(() => {
+        // 对话框与树底入口各自观察到同一次落定：短时间内只刷一遍
+        const now = Date.now()
+        if (now - organizeSettledAt.current < 800) return
+        organizeSettledAt.current = now
+        reloadView()
+        refreshBadges()
+    }, [reloadView, refreshBadges])
+
+    // 页面加载/刷新时找回仍在进行的任务（任务真相在服务端，刷新不打断）
+    useEffect(() => {
+        const controller = new AbortController()
+        fetchers.organizeTasks(cfg, 0, controller.signal).then(r => {
+            if (!controller.signal.aborted) setActiveTaskId(r.active?.id ?? null)
+        }).catch(() => undefined)
+        return () => controller.abort()
+    }, [cfg])
+
+    /** 打开某个目录并展开其祖先（任务结果里的「打开」直达目标） */
+    const revealFolder = (id: string) => {
+        const ancestors: string[] = []
+        let cur = folderMap.get(id)
+        while (cur?.parent_id) {
+            ancestors.push(cur.parent_id)
+            cur = folderMap.get(cur.parent_id)
         }
+        if (ancestors.length > 0) updateExpanded(new Set([...expanded, ...ancestors]))
+        selectFolder(id)
     }
 
-      const loadPlaced = useCallback(() => {
-          fetchers
-              .inboxItems(cfg)
-              .then((r) => setPlacedRows(r.placed))
-              .catch(() => setPlacedRows([]))
-      }, [cfg])
+    const loadPlaced = useCallback(() => {
+        placedAbortRef.current?.abort()
+        const controller = new AbortController()
+        placedAbortRef.current = controller
+        setPlacedLoading(true)
+        void fetchers.inboxItems(cfg, controller.signal, {
+            placedLimit: PLACED_PAGE_SIZE,
+            placedOffset: (placedPage - 1) * PLACED_PAGE_SIZE,
+        }).then(r => {
+            if (controller.signal.aborted) return
+            const total = r.placedTotal ?? r.placed.length
+            setPlacedTotal(total)
+            const lastPage = Math.max(1, Math.ceil(total / PLACED_PAGE_SIZE))
+            if (placedPage > lastPage) {
+                setPlacedPage(lastPage)
+                return
+            }
+            setPlacedRows(r.placed)
+            setPlacedError('')
+        }).catch(e => {
+            if (!controller.signal.aborted) setPlacedError(`归位记录暂时未更新：${e instanceof Error ? e.message : String(e)}`)
+        }).finally(() => {
+            if (placedAbortRef.current === controller) setPlacedLoading(false)
+        })
+    }, [cfg, placedPage])
 
-      useEffect(() => {
-          if (inboxNode && selected === inboxNode.id && !searching) loadPlaced()
-      }, [selected, inboxNode, searching, loadPlaced])
+    useEffect(() => {
+        setPlacedPage(1)
+    }, [selected, searching])
+
+    useEffect(() => {
+        if (inboxNode && selected === inboxNode.id && !searching) loadPlaced()
+        return () => placedAbortRef.current?.abort()
+    }, [selected, inboxNode, searching, loadPlaced])
 
       // ---- D82 实时更新（《管理台书签实时更新》§4–§6）：通知后重新查询，SSE 只做门铃 ----
 
@@ -1098,9 +1150,7 @@ export function Library() {
           // ③ 收纳盒归位历史（盒视图且非搜索）
           const inbox = (newTree ?? s.tree).find(f => f.is_system_inbox === 1)
           if (inbox && s.selected === inbox.id && !s.searching && !viewChanged) {
-              fetchers.inboxItems(cfg, signal)
-                  .then(r => { if (!stale()) setPlacedRows(r.placed) })
-                  .catch(() => {})
+              loadPlaced()
           }
 
           // ④ 非编辑态详情：安静跟随外部更新；已被删除 → 关闭失效详情 + 轻提示一次
@@ -1147,15 +1197,40 @@ export function Library() {
       // 阻塞判定：编辑/新建/改名/右键菜单/各弹窗打开时暂停数据替换（dirty 保留，关闭后立即补刷）
       const blocked = editing || creating !== null || renaming !== null || ctxMenu !== null
           || folderCtx !== null || folderMoveTarget !== null || folderDeleteTarget !== null
-          || scanTarget !== null || reorgFolderId !== null
+          || scanTarget !== null || organizeTarget !== null
           || addOpen || batchMoveOpen || batchDeleteOpen || pendingDelete !== null || moveDialogs > 0 || processing
       const { error: refreshError, retry: retryRefresh } = useLiveRefresh({ refresh: refreshBatch, blocked })
+
+    // D91：转换版本撤销只恢复仍属该版本的条目；已有手动改动的条目不覆盖、不虚报成功。
+    const undoConvert = async (versionId: string) => {
+        if (undoConvertBusy.current) return
+        undoConvertBusy.current = true
+        setUndoingConvert(true)
+        try {
+            const result = await apiCall<{ reversed: number }>(cfg, `/organize/rollback/${versionId}`, { method: 'POST' })
+            if (result.reversed > 0) toast.ok(`已恢复 ${result.reversed} 条书签（启用同步的设备随后恢复收藏夹节点）`)
+            else toast.info('条目已有其他改动，本次没有覆盖；可在资料页恢复为书签')
+            window.dispatchEvent(new Event('mf:versions-changed'))
+            loadPlaced()
+            reloadView()
+            refreshBadges()
+        } catch (e) {
+            toast.err(`撤销失败：${e instanceof ApiError ? e.message : String(e)}`)
+        } finally {
+            undoConvertBusy.current = false
+            setUndoingConvert(false)
+        }
+    }
 
       const processInbox = async (folderId: string) => {
         setProcessing(true)
         try {
-            const r = await apiCall<{ moved?: number }>(cfg, '/inbox/process', { method: 'POST', body: '{}' })
-            toast.ok(`已归位 ${r.moved ?? 0} 条（记入版本历史，可撤销）`)
+            const r = await apiCall<{ moved: unknown[]; queued?: string[]; left: unknown[] }>(cfg, '/inbox/process', { method: 'POST', body: '{}' })
+            const moved = r.moved.length
+            const queued = r.queued?.length ?? 0
+            if (queued > 0) toast.info(`已归位 ${moved} 条，另有 ${queued} 条正在识别资料；结果将在下方显示`)
+            else if (moved > 0) toast.ok(`已归位 ${moved} 条（记入版本历史，可撤销）`)
+            else toast.info(r.left.length > 0 ? '暂未能确定去向，条目仍保留在收纳盒' : '当前没有需要归位的条目')
             window.dispatchEvent(new Event('mf:versions-changed'))
             loadPlaced()
             loadTree()
@@ -1181,7 +1256,6 @@ export function Library() {
                 },
             ]
         }
-        const busy = reorgFolderId === folder.id
         return [
             { label: '打开目录', icon: <ChevronRight className="size-3.5" />, run: () => selectFolder(folder.id) },
             {
@@ -1195,10 +1269,14 @@ export function Library() {
             { label: '重命名', icon: <Pencil className="size-3.5" />, run: () => setRenaming({ id: folder.id, name: folder.name }) },
             { label: '移动到…', icon: <FolderInput className="size-3.5" />, run: () => setFolderMoveTarget(folder) },
             {
-                label: busy ? '正在重新整理…' : 'AI 重新整理此目录',
-                icon: busy ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />,
-                disabled: reorgFolderId !== null || processing,
-                run: () => void reorgFolder(folder),
+                // D92：与目录标题旁的主入口同一任务——内容页会收入资料分类，均可撤销
+                label: activeTaskId ? '查看整理进度' : '整理此目录',
+                icon: activeTaskId ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />,
+                disabled: processing,
+                run: () =>
+                    activeTaskId
+                        ? setOrganizeTarget({ mode: 'task', taskId: activeTaskId })
+                        : startOrganize(folder.id, folder.name),
             },
             {
                 label: '提取资料',
@@ -1226,6 +1304,11 @@ export function Library() {
     // 收纳盒视图：失效/重复/已归档筛选无意义，右上角换成「说明 + AI 归位」操作区
     const inboxView =
         !!inboxNode && selected === inboxNode.id && !searching && !reorgActive && !historyActive
+    // D92：可整理的目录 = 当前选中的单个真实目录（「全部」/收纳盒/搜索/多选/重分类或历史面板下不给入口，避免范围含糊）
+    const organizable =
+        selected !== 'all' && !searching && !reorgActive && !historyActive && multiFolders.size <= 1
+            ? (tree.find(f => f.id === selected && !f.is_system_inbox) ?? null)
+            : null
 
     // ---------- 目录树渲染 ----------
     const toggle = (id: string) => {
@@ -1313,7 +1396,7 @@ export function Library() {
                                     <Folder className="size-3.5 shrink-0 text-foreground/60" />
                                 )}
                                 <span className="min-w-0 flex-1 truncate">{folder.name}</span>
-                                {reorgFolderId === folder.id && (
+                                {activeTaskId !== null && folder.id === selected && (
                                     <Loader2 className="text-primary size-3 shrink-0 animate-spin" />
                                 )}
                                 <span className="tabular text-[11px] text-muted-foreground/50">
@@ -1403,6 +1486,30 @@ export function Library() {
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
+                    {/* D92 主入口：单目录视图下显式给出「整理此目录」（右键菜单为同一任务的快捷入口） */}
+                    {organizable && (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                                activeTaskId
+                                    ? setOrganizeTarget({ mode: 'task', taskId: activeTaskId })
+                                    : startOrganize(organizable.id, organizable.name)
+                            }
+                            disabled={!activeTaskId && (organizable.totalCount === 0 || processing)}
+                            data-organize-start={activeTaskId ? 'active' : 'idle'}
+                            title={
+                                activeTaskId
+                                    ? '已有进行中的整理，点击查看进度'
+                                    : organizable.totalCount === 0
+                                      ? '目录内没有可整理的书签'
+                                      : '整理此目录（含子目录）：网站入口归入书签目录，内容页收入资料分类；必要时读取正文确认。关闭后任务继续，均可撤销'
+                            }
+                        >
+                            {activeTaskId ? <Loader2 className="animate-spin" /> : <Sparkles className="size-3.5" />}
+                            {activeTaskId ? '查看整理进度' : '整理此目录'}
+                        </Button>
+                    )}
                     <Btn primary onClick={() => setAddOpen(true)}>
                         <Plus /> 添加书签
                     </Btn>
@@ -1461,7 +1568,7 @@ export function Library() {
                 ) : inboxView && inboxNode ? (
                     <div className="bg-muted/60 flex items-center gap-3 rounded-full py-1 pr-1 pl-3">
                         <p className="text-muted-foreground text-xs">
-                            随手丢进来的增量。点「AI 归位」自动分拣到各目录——只移动，不删除。
+                            随手丢进来，站点归为书签，内容收入资料库；自动处理均可撤销。
                         </p>
                         <Btn
                             primary
@@ -1601,6 +1708,14 @@ export function Library() {
                         )}
                         <ReorgButton active={reorgActive} onClick={activateReorg} />
                         <HistoryTrigger active={historyActive} onClick={activateHistory} />
+                        {/* D92：活动整理任务状态行 + 常驻「整理记录」入口 */}
+                        <OrganizeTaskEntry
+                            activeTaskId={activeTaskId}
+                            onView={() => activeTaskId && setOrganizeTarget({ mode: 'task', taskId: activeTaskId })}
+                            onList={() => setOrganizeTarget({ mode: 'list' })}
+                            onChanged={onOrganizeChanged}
+                            onSettled={clearActiveTask}
+                        />
                         <p className="text-muted-foreground/50 mt-2 px-2 text-[10.5px] leading-relaxed">
                             书签行可以直接拖到目录上归位；双击目录名重命名。
                         </p>
@@ -2052,12 +2167,14 @@ export function Library() {
                     {/* D54 最近自动归位：与列表容器平级——旧实现嵌在容器内，盒空（待处理全部归位完）
                         时 items=0 走 EmptyState 分支，历史区整块跟着消失（用户反馈「历史记录又看不到了」的根因）。
                         mx-2 = 对齐行盒缩进（与行 hover 背景左右缘齐平）；data-marquee-skip 防框选误伤 */}
-                    {inboxNode && selected === inboxNode.id && !searching && placedRows && placedRows.length > 0 && (
+                    {inboxNode && selected === inboxNode.id && !searching && placedRows && (placedRows.length > 0 || placedError) && (
                         <div className="bg-muted/40 mx-2 mt-3 rounded-xl px-4 py-2.5" data-marquee-skip>
-                            <p className="text-muted-foreground mb-1 text-[11px] font-medium">最近自动归位</p>
-                            <ul className="divide-y divide-border/40">
-                                {placedRows.map((p) => (
-                                    <li key={p.bookmark_id} className="flex items-center gap-2.5 py-1.5 text-[13px]">
+                            <h3 className="text-muted-foreground mb-1 text-[11px] font-medium">最近自动归位</h3>
+                            {placedError && <p className="text-muted-foreground mb-2 text-xs" role="status">{placedError}</p>}
+                            <ul aria-busy={placedLoading}>
+                                {placedRows.map((p, index) => (
+                                    <Fragment key={p.bookmark_id}>
+                                    <li className="data-row flex items-center gap-2.5 rounded-lg px-1 py-1.5 text-[13px]">
                                         <a
                                             href={p.url_canonical}
                                             target="_blank"
@@ -2066,24 +2183,57 @@ export function Library() {
                                         >
                                             {p.title}
                                         </a>
-                                        {p.folder_name && (
+                                        {/* D91：转资料条目去向显示「资料库」；普通归位显示目录名 */}
+                                        {p.materialized === 1 ? (
                                             <span className="shrink-0 text-xs">
-                                                →「<span className="font-medium">{p.folder_name}</span>」
+                                                →「<span className="font-medium">资料库</span>」
                                             </span>
+                                        ) : (
+                                            p.folder_name && (
+                                                <span className="shrink-0 text-xs">
+                                                    →「<span className="font-medium">{p.folder_name}</span>」
+                                                </span>
+                                            )
                                         )}
-                                        {p.reason && <span className="text-muted-foreground shrink-0 text-[11px]">{p.reason}</span>}
-                                        {p.version_id && (
-                                            <button
-                                                className="text-muted-foreground hover:text-foreground shrink-0 text-[11px] underline-offset-2 hover:underline"
+                                        {p.materialized !== 1 && p.reason && (
+                                            <span className="text-muted-foreground shrink-0 text-[11px]">{p.reason}</span>
+                                        )}
+                                        {p.materialized === 1 && p.convert_version_id ? (
+                                            <Button
+                                                variant="ghost"
+                                                size="xs"
+                                                disabled={undoingConvert}
+                                                aria-label={`撤销自动转资料：${p.title}`}
+                                                title="恢复为书签（资料保留；启用同步的设备会重建节点）"
+                                                onClick={() => void undoConvert(p.convert_version_id!)}
+                                            >
+                                                撤销
+                                            </Button>
+                                        ) : p.version_id ? (
+                                            <Button
+                                                variant="ghost"
+                                                size="xs"
+                                                disabled={undoingConvert}
+                                                aria-label={`撤销…（${p.title}）`}
                                                 title="归位记入版本历史，可精确撤销这一次"
                                                 onClick={activateHistory}
                                             >
                                                 撤销…
-                                            </button>
-                                        )}
+                                            </Button>
+                                        ) : null}
                                     </li>
+                                    {index < placedRows.length - 1 && <li aria-hidden="true" className="border-border/40 mx-1 border-t" />}
+                                    </Fragment>
                                 ))}
                             </ul>
+                            <NumberedPagination
+                                label="收纳盒归位记录分页"
+                                page={placedPage}
+                                pageSize={PLACED_PAGE_SIZE}
+                                total={placedTotal}
+                                disabled={placedLoading || undoingConvert}
+                                onPageChange={setPlacedPage}
+                            />
                         </div>
                     )}
                         </>
@@ -2345,6 +2495,27 @@ export function Library() {
                     refreshBadges()
                     void loadPage(selected, 0, false, statusFilter)
                 }}
+            />
+
+            {/* D92 目录整理任务：进度/结果/停止/继续/撤销；关闭即收起，任务继续 */}
+            <OrganizeTaskDialog
+                target={organizeTarget}
+                onOpenChange={setOrganizeTarget}
+                onTask={task => setActiveTaskId(isTaskActive(task) ? task.id : null)}
+                onChanged={onOrganizeChanged}
+                onOpenFolder={id => {
+                    setOrganizeTarget(null)
+                    revealFolder(id)
+                }}
+                onOpenCategory={path => {
+                    setOrganizeTarget(null)
+                    go('materials', { category: path })
+                }}
+                onShowHistory={() => {
+                    setOrganizeTarget(null)
+                    activateHistory()
+                }}
+                onRestart={folderId => startOrganize(folderId, folderName(folderId))}
             />
 
             <AddBookmarkDialog
