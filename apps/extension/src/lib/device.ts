@@ -9,6 +9,7 @@
 import { browser } from "wxt/browser";
 import { VIRTUAL_BOOKMARK_ROOT_TITLES as VIRTUAL_SHELL_TITLES } from "@mf/shared";
 import { api, getConfig, saveConfig } from "./api";
+import { withBrowserExecutor } from "./executor";
 
 const DEVICE_ID_KEY = "mfDeviceId";
 const PENDING_QUEUE_KEY = "mfPendingOps";
@@ -48,6 +49,12 @@ async function readQueue(): Promise<PendingOp[]> {
 
 async function writeQueue(q: PendingOp[]): Promise<void> {
   await browser.storage.local.set({ [PENDING_QUEUE_KEY]: q });
+}
+
+/** 待处理队列长度（D71 诊断用：收纳盒兜底清扫的门控不能只看服务端 count——卡在本机队列的条目还没映射到服务器） */
+export async function pendingOpsCount(): Promise<number> {
+  const q = await readQueue();
+  return q.filter((o) => o.status === "pending").length;
 }
 
 /** 入队（幂等：key 相同且 pending → 不重复） */
@@ -112,6 +119,10 @@ async function withMirrorGuard<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 export async function isMirrorMove(): Promise<boolean> {
+  // D81 §3-D-4：已同步设备无镜像写入（引擎是唯一浏览器写入者），5s 时间窗保护整体退役——
+  // 旧实现窗口内用户真实 move 被误抑制（收纳盒漏投递），超窗则保护失效（回环）
+  const { favoritesSync } = await getConfig();
+  if (favoritesSync) return false;
   const t = (await browser.storage.local.get(MIRROR_GUARD_KEY))[MIRROR_GUARD_KEY] as number | undefined;
   return t !== undefined && Date.now() - t < 5000;
 }
@@ -128,8 +139,17 @@ async function ensureMirrorFolder(folderName: string): Promise<string> {
   return existing?.id ?? (await browser.bookmarks.create({ parentId: root.id, title: folderName })).id;
 }
 
-/** 拉取并执行浏览器镜像操作（每条回执） */
-export async function runMirrorOps(): Promise<{
+/** 拉取并执行浏览器镜像操作（每条回执）。D81 §3-D-1：统一执行器排队（与同步引擎串行） */
+export function runMirrorOps(): Promise<{
+  executed: number;
+  failed: number;
+  cancelled: number;
+  reorderedNodes: number;
+}> {
+  return withBrowserExecutor(runMirrorOpsInner);
+}
+
+async function runMirrorOpsInner(): Promise<{
   executed: number;
   failed: number;
   cancelled: number;
@@ -149,11 +169,30 @@ export async function runMirrorOps(): Promise<{
   }>;
   try {
     ops = (await api<{ ops: typeof ops }>(`/browser/ops?deviceId=${encodeURIComponent(deviceId)}`, {})).ops;
-  } catch {
+    // D72 诊断：镜像拉取可见化（间歇性「节点滞留收纳盒」定位用）
+    console.log(`[mirror] fetched ${ops.length} ops (device ${deviceId.slice(0, 8)})`);
+    for (const o of ops) {
+      console.log(`[mirror] op ${o.id} ${o.op} → ${o.target_browser_parent_id ?? "(无目标)"}`);
+    }
+  } catch (err) {
+    console.log(`[mirror] fetch failed: ${String(err).slice(0, 80)}`);
     return { executed: 0, failed: 0, cancelled: 0, reorderedNodes: 0 }; // 服务端不可达：下次再试
   }
   // D46：总开关状态决定旧镜像操作的处置（循环外读一次）
   const { favoritesSync = false, syncDeleteToBrowser = false } = await getConfig();
+  // D81 §3-D-4（D80 Tier2-D）：已同步设备停发镜像 ops——服务端不再入队（device.sync_enabled），
+  // 存量积压一律终结（含 remove/create），浏览器写入由同步引擎单一执行器负责。
+  if (favoritesSync) {
+    for (const o of ops) {
+      await api(`/browser/ops/${o.id}/result`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "cancelled", error: "superseded_by_full_sync" }),
+      }).catch(() => undefined);
+      cancelled++;
+    }
+    return { executed: 0, failed: 0, cancelled, reorderedNodes: 0 };
+  }
   for (const o of ops) {
     try {
       // 总开关开启时，放置/排序由同步引擎负责——旧镜像 move/reorder 操作直接终结，

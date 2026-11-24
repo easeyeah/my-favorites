@@ -5,17 +5,18 @@
  */
 import { browser } from "wxt/browser";
 import { INBOX_FOLDER_TITLE } from "@mf/shared";
-import { api, fetchWeeklyReport, getConfig, saveConfig, sendEvent } from "../src/lib/api";
-import type { BookmarkDto } from "../src/lib/api";
+import { api, fetchWeeklyReport, getConfig, getServerNotifyStyle, saveConfig, sendEvent } from "../src/lib/api";
+import type { BookmarkDto, ExtensionConfig } from "../src/lib/api";
 import { decidePrivacy } from "../src/lib/privacy";
 import {
   drainQueue,
+  pendingOpsCount,
   enqueueOp,
   getDeviceId,
   isMirrorMove,
   runMirrorOps,
 } from "../src/lib/device";
-import { getSyncInfo, runSyncTick, scheduleSyncTick, setFavoritesSync, startEventStream } from "../src/lib/sync";
+import { getSyncInfo, markSyncError, runSyncTick, scheduleSyncTick, setFavoritesSync, startEventStream } from "../src/lib/sync";
 
 const MENU_SAVE_ID = "mf-save";
 const MENU_INBOX_ID = "mf-save-inbox";
@@ -288,7 +289,9 @@ async function onInboxEvent(childId: string): Promise<void> {
     kind: "inbox_map",
     payload: { browserBookmarkId: childId, url: bm.url, title: bm.title ?? bm.url },
   });
-  scheduleFlush();
+  // D72：事件处理器内 SW 活跃，直接 flush（原 setTimeout 1.2s 在 SW 休眠时静默丢失，
+  // 条目卡本机队列直到 1 分钟 alarm 兜底——用户窗口期内「管理台没数据」即此）。
+  void flushInbox();
 }
 
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -297,13 +300,51 @@ function scheduleFlush(delayMs = 1200): void {
   flushTimer = setTimeout(() => void flushInbox(), delayMs);
 }
 
+/** D72：flush 运行锁——MV3 的 setTimeout 在 SW 休眠时不可靠（定时器随 SW 死亡丢失，
+ *  即时 flush 静默不执行），事件处理器内 SW 活跃，直接调用本函数可靠；锁防连续丢入并发重复 process。 */
+let flushRunning = false;
+
 async function flushInbox(): Promise<void> {
+  if (flushRunning) {
+    scheduleFlush(1500); // 已有 flush 在跑 → 稍后补一轮（幂等，漏不了）
+    return;
+  }
+  flushRunning = true;
+  try {
+    await flushInboxInner();
+  } finally {
+    flushRunning = false;
+  }
+}
+
+/** 非核心通知单独限流；不占用整理/镜像的运行锁，不缓存任何账号的偏好。 */
+let inboxNotificationRunning = false;
+async function notifyInboxSorted(count: number, account: Pick<ExtensionConfig, "serverUrl" | "token">): Promise<void> {
+  if (inboxNotificationRunning) return;
+  inboxNotificationRunning = true;
+  try {
+    const style = await getServerNotifyStyle(account);
+    if (style === null || style === "silent") return;
+    // card 目前与 toast 相同：仅显示短暂归位角标，不承诺独立通知卡。
+    await browser.action.setBadgeText({ text: `归位${count}` });
+    setTimeout(() => {
+      void browser.action.setBadgeText({ text: "" }).catch(() => console.warn("[notify] badge could not be cleared"));
+    }, 5000);
+  } catch {
+    console.warn("[notify] completion notification could not be shown");
+  } finally {
+    inboxNotificationRunning = false;
+  }
+}
+
+async function flushInboxInner(): Promise<void> {
   // A2-2/A2-3：先把积压事件映射成应用库书签（服务端确认才出队）
   const drained = await drainQueue();
   // 映射完成后处理收件箱（应用库 ID）；带 deviceId 以生成镜像操作（A2-4）
   try {
     const deviceId = await getDeviceId();
-    const { notifyStyle } = await getConfig();
+    const notificationAccount = await getConfig();
+    let movedCount = 0;
     const inbox = await api<{ id: string }>("/inbox/setup", { method: "POST" });
     const inboxItems = await api<Array<{ id: string }>>(`/bookmarks?folderId=${inbox.id}&limit=100`, {});
     if (inboxItems.length > 0) {
@@ -317,19 +358,32 @@ async function flushInbox(): Promise<void> {
       });
       if (result.moved.length > 0) {
         void sendEvent("inbox_auto_sorted", { count: result.moved.length });
-        // D28：静默档不打扰——角标提示也不弹（版本记录仍在）
-        if ((notifyStyle ?? "toast") !== "silent") {
-          void browser.action.setBadgeText({ text: `归位${result.moved.length}` });
-          setTimeout(() => void browser.action.setBadgeText({ text: "" }), 5000);
-        }
+        movedCount = result.moved.length;
         // A2-4：立即执行镜像（把浏览器节点也移进对应目录）
         await runMirrorOps();
+        // D72：归位后立即触发同步引擎（若开启）——镜像 move 在同步开启时会让位引擎
+        //（superseded_by_full_sync），而引擎遍历豁免收纳盒子树，两边互相让位会让浏览器
+        // 收纳盒节点永久滞留（用户实测「库里已归位、浏览器收纳盒还在」）。引擎按身份
+        // 映射/URL 能找到节点并移入目标目录，这里主动踢一脚，不等 1 分钟 tick。
+        const { favoritesSync } = await getConfig();
+        if (favoritesSync) scheduleSyncTick(0);
       }
     }
     // A2-5：无论是否有移动，顺带执行可能积压的镜像操作
     await runMirrorOps();
-  } catch {
-    // 服务端不可达：事件留在持久队列，等下次唤醒（A2 验收：离线不丢操作）
+    // D71：成功即清失败痕迹（角标/记录）
+    await browser.action.setBadgeText({ text: "" });
+    await browser.storage.local.set({ mfInboxLastError: null });
+    // 整理与镜像已经完成：偏好读取失败/超时不能阻塞核心流程或误标整理失败。
+    if (movedCount > 0) void notifyInboxSorted(movedCount, notificationAccount);
+  } catch (err) {
+    // 服务端不可达/未授权：事件留在持久队列，等下次唤醒（A2 验收：离线不丢操作）。
+    // D71（D62 规范③）：失败必须可观测——角标 ⚠ + 原因落 storage（options 状态行展示），
+    // 此前静默吞掉导致「浏览器收纳盒有条目、管理台空空如也」而用户毫不知情。
+    const reason = String(err).slice(0, 200);
+    await browser.storage.local.set({ mfInboxLastError: reason });
+    void browser.action.setBadgeBackgroundColor({ color: "#d97706" });
+    void browser.action.setBadgeText({ text: "!" });
   }
   void drained;
 }
@@ -342,7 +396,10 @@ async function flushInbox(): Promise<void> {
 async function maybeSweepInbox(): Promise<void> {
   try {
     const { count } = await api<{ count: number }>("/inbox/count", {});
-    if (count > 0) await flushInbox();
+    // D71 门控修复：卡在本机持久队列的条目还没映射到服务器（count=0），
+    // 旧闸「count>0 才 flush」会让它们登录后也永久卡死——本机有积压同样要 flush。
+    const pending = await pendingOpsCount();
+    if (count > 0 || pending > 0) await flushInbox();
   } catch {
     // 服务端不可达：下个周期再试
   }
@@ -486,20 +543,48 @@ export default defineBackground((): void => {
   const touchSync = () => void scheduleSyncTick();
   browser.bookmarks.onCreated.addListener(touchSync);
   browser.bookmarks.onMoved.addListener(touchSync);
-  browser.bookmarks.onRemoved.addListener(touchSync);
+  browser.bookmarks.onRemoved.addListener((id, info) => {
+    touchSync();
+    // D79：用户删盒内节点 = 取消「待分类」条目 → 服务端守卫取消（ifInbox）。
+    // 否则库内条目仍在，D78 入口收敛会补建节点（僵尸复活）。已归位条目不走此路
+    //（其节点在基线内，删除由引擎 diff 推送）；409=竞态窗口内已归位 → 交普通删除同步。
+    void (async () => {
+      try {
+        const { inboxExtId } = await getConfig();
+        if (!inboxExtId || info.parentId !== inboxExtId) return;
+        if (await isMirrorMove()) return; // 镜像 remove（D44）不是用户取消
+        const deviceId = await getDeviceId();
+        const idn = await api<{ identities: Array<{ app_bookmark_id: string }> }>(
+          `/browser/identities?deviceId=${encodeURIComponent(deviceId)}&browserId=${encodeURIComponent(id)}`,
+          {},
+        );
+        const appId = idn.identities[0]?.app_bookmark_id;
+        if (!appId) return;
+        await api(`/bookmarks/${appId}?ifInbox=1`, { method: "DELETE" }).catch((e: unknown) => {
+          if (!String(e).includes("not_in_inbox")) console.warn("[inbox-cancel]", String(e).slice(0, 100));
+        });
+      } catch (err) {
+        console.warn("[inbox-cancel] failed:", String(err).slice(0, 100));
+      }
+    })();
+  });
   browser.bookmarks.onChanged.addListener(touchSync);
 
   // D46：同步周期收敛；D57：收纳盒定时清扫兜底（独立于同步开关）
   browser.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === "mf-sync-tick") void runSyncTick().catch(() => undefined);
+    // D74：mf-sync-kick = scheduleSyncTick 的一次性兜底 alarm（SW 休眠丢 setTimeout 时唤醒推送）
+    // D81 §3-B：失败不再静默——runSyncTick 内部已写错误状态，外层兜底同样落 SyncInfo
+    if (alarm.name === "mf-sync-tick" || alarm.name === "mf-sync-kick") {
+      void runSyncTick().catch((err) => void markSyncError(err));
+    }
     if (alarm.name === "mf-inbox-sweep") void maybeSweepInbox();
   });
 
   // A2-3：SW 每次启动恢复持久队列 + 镜像操作（内存队列丢失 ≠ 操作丢失）
   void (async () => {
     const drainResult = await drainQueue();
-    if (drainResult.left === 0 && drainResult.done > 0) {
-      scheduleFlush(0); // 恢复了积压事件 → 立即处理
+    if (drainResult.done > 0) {
+      void flushInbox(); // D72：SW 启动期活跃，直接 flush（原 setTimeout(0) 同样不可靠）
     }
     await runMirrorOps();
     // D57：收纳盒定时清扫兜底 alarm（独立于同步开关，常驻）。即时 flush 失败时靠它兜底，
@@ -572,6 +657,11 @@ export default defineBackground((): void => {
           sendResponse({ saved: !created.duplicate });
         } else if (msg.type === "setup-inbox") {
           sendResponse(await ensureInboxFolder());
+        } else if (msg.type === "inbox-status") {
+          // D71：options 状态行数据源（待同步队列 + 上次失败原因）
+          const pending = await pendingOpsCount();
+          const { mfInboxLastError } = await browser.storage.local.get("mfInboxLastError");
+          sendResponse({ pending, lastError: (mfInboxLastError as string | null) ?? null });
         } else if (msg.type === "sweep-inbox") {
           // 原型 07「立即清扫」：手动触发整箱归位 + 镜像同步（与 D57 定时清扫同路径）
           try {

@@ -1,225 +1,686 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <title>my-favorites 设置</title>
-    <style>
-      /* 自包含样式（options 页不挂 Tailwind pipeline，直接写） */
-      :root {
-        --bg: #f7f7f8;
-        --card: #ffffff;
-        --text: #1a1a1a;
-        --muted: #6b7280;
-        --border: #e5e7eb;
-        --accent: #4f46e5;
-        --accent-light: #eef2ff;
-        --danger: #dc2626;
-        --ok: #16a34a;
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #111113;
-          --card: #1c1c1f;
-          --text: #f3f4f6;
-          --muted: #9ca3af;
-          --border: #2d2d31;
-          --accent: #818cf8;
-          --accent-light: #2a2a35;
-        }
-      }
-      * { box-sizing: border-box; margin: 0; padding: 0; }
-      body {
-        font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-        background: var(--bg);
-        color: var(--text);
-        min-height: 100vh;
-      }
-      .wrap { max-width: 640px; margin: 0 auto; padding: 32px 24px 60px; }
-      h1 { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
-      .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
-      .card {
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        padding: 20px 24px;
-        margin-bottom: 16px;
-      }
-      .card h2 {
-        font-size: 13px;
-        font-weight: 600;
-        color: var(--muted);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        margin-bottom: 14px;
-      }
-      label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
-      input[type="text"], input[type="password"] {
-        width: 100%;
-        padding: 10px 14px;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: var(--bg);
-        color: var(--text);
-        font-size: 14px;
-        outline: none;
-        transition: border-color 0.15s;
-      }
-      input:focus { border-color: var(--accent); }
-      .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-      button {
-        padding: 9px 16px;
-        border-radius: 10px;
-        border: 1px solid var(--border);
-        background: var(--card);
-        color: var(--text);
-        font-size: 13px;
-        cursor: pointer;
-        transition: all 0.15s;
-      }
-      button:hover { border-color: var(--accent); color: var(--accent); }
-      button.primary {
-        background: var(--accent);
-        color: #fff;
-        border-color: var(--accent);
-        font-weight: 500;
-      }
-      button.primary:hover { opacity: 0.9; color: #fff; }
-      button.accent {
-        background: var(--accent-light);
-        border-color: var(--accent);
-        color: var(--accent);
-        font-weight: 500;
-      }
-      .stats { font-size: 13px; color: var(--muted); margin-top: 8px; }
-      .stats b { color: var(--text); font-size: 18px; }
-      .msg { margin-top: 10px; font-size: 13px; min-height: 18px; }
-      .msg.ok { color: var(--ok); }
-      .msg.err { color: var(--danger); }
-      .divider { border-top: 1px solid var(--border); margin: 16px 0; }
-      .notify-opt[aria-pressed="true"] {
-        border-color: var(--accent);
-        background: var(--accent-light);
-        color: var(--accent);
-        font-weight: 500;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="wrap">
-      <h1 style="display: flex; align-items: center; gap: 10px">
-        <img src="/brand/mark-color.svg" alt="" style="width: 28px; height: 28px" draggable="false" />
-        my-favorites
-      </h1>
-      <p class="sub">AI 书签导航 · 设置</p>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>插件设置 · my-favorites</title>
+        <style>
+            /* 自包含样式（options 页不挂 Tailwind pipeline，直接写） */
+            :root {
+                color-scheme: light dark;
+                --bg: #fafafa;
+                --card: #ffffff;
+                --text: #18181b;
+                --muted: #696973;
+                --soft: #f4f4f5;
+                --border: #8b8b95;
+                --accent: #4f46e5;
+                --accent-hover: #4338ca;
+                --focus: var(--accent);
+                --danger: #dc2626;
+                --ok: #15803d;
+                --shadow: 0 1px 3px rgb(0 0 0 / 0.06), 0 1px 2px rgb(0 0 0 / 0.03);
+            }
+            @media (prefers-color-scheme: dark) {
+                :root {
+                    --bg: #18181b;
+                    --card: #202023;
+                    --text: #f4f4f5;
+                    --muted: #a1a1aa;
+                    --soft: #27272a;
+                    --border: #71717a;
+                    --focus: #818cf8;
+                    --danger: #f87171;
+                    --ok: #4ade80;
+                    --shadow: 0 1px 3px rgb(0 0 0 / 0.2);
+                }
+            }
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+            body {
+                font:
+                    14px/1.6 -apple-system,
+                    'PingFang SC',
+                    'Microsoft YaHei',
+                    sans-serif;
+                background: var(--bg);
+                color: var(--text);
+                min-height: 100vh;
+            }
+            .wrap {
+                max-width: 720px;
+                margin: 0 auto;
+                padding: 32px 24px 56px;
+            }
+            .page-header {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 24px;
+            }
+            .brand-mark {
+                width: 32px;
+                height: 32px;
+            }
+            h1 {
+                font-size: 22px;
+                font-weight: 700;
+                line-height: 1.4;
+            }
+            .sub,
+            .description {
+                color: var(--muted);
+                font-size: 13px;
+            }
+            .sub {
+                margin-top: 2px;
+            }
+            .description {
+                margin: -4px 0 16px;
+            }
+            .card {
+                background: var(--card);
+                box-shadow: var(--shadow);
+                border-radius: 12px;
+                padding: 20px 24px;
+                margin-bottom: 16px;
+            }
+            .card h2 {
+                display: flex;
+                align-items: center;
+                gap: 9px;
+                font-size: 18px;
+                font-weight: 700;
+                margin-bottom: 12px;
+            }
+            .icon {
+                width: 16px;
+                height: 16px;
+                flex-shrink: 0;
+                fill: none;
+                stroke: currentColor;
+                stroke-width: 1.8;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+            }
+            .card h2 .icon {
+                color: var(--muted);
+            }
+            .section-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                margin-bottom: 12px;
+            }
+            .section-head h2 {
+                margin-bottom: 0;
+            }
+            label {
+                display: block;
+                font-size: 13px;
+                font-weight: 500;
+                margin-bottom: 6px;
+            }
+            input[type='text'],
+            input[type='password'],
+            input[type='url'],
+            select {
+                width: 100%;
+                min-width: 0;
+                min-height: 36px;
+                padding: 7px 11px;
+                border: 1px solid var(--border);
+                border-radius: 7px;
+                background: var(--card);
+                color: var(--text);
+                font: inherit;
+                font-size: 13px;
+            }
+            input[type='checkbox'] {
+                width: 16px;
+                height: 16px;
+                accent-color: var(--accent);
+            }
+            :where(input, select, button, a):focus-visible {
+                outline: 2px solid var(--focus);
+                outline-offset: 3px;
+            }
+            .field {
+                margin-top: 14px;
+            }
+            .row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-top: 12px;
+                flex-wrap: wrap;
+            }
+            .service-picker {
+                display: flex;
+                gap: 8px;
+            }
+            button {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                min-height: 36px;
+                padding: 7px 12px;
+                border-radius: 7px;
+                border: 0;
+                background: var(--soft);
+                color: var(--text);
+                font: inherit;
+                font-size: 13px;
+                font-weight: 500;
+                cursor: pointer;
+            }
+            button:hover:not(:disabled) {
+                background: var(--bg);
+            }
+            button.primary {
+                background: var(--accent);
+                color: #fff;
+            }
+            button.primary:hover:not(:disabled) {
+                background: var(--accent-hover);
+            }
+            button:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            button.icon-button {
+                width: 36px;
+                padding: 0;
+                flex-shrink: 0;
+            }
+            button.small {
+                min-height: 28px;
+                padding: 4px 9px;
+                font-size: 12px;
+            }
+            button.small .icon {
+                width: 14px;
+                height: 14px;
+            }
+            .msg {
+                margin-top: 10px;
+                font-size: 13px;
+                overflow-wrap: anywhere;
+            }
+            .msg:empty {
+                margin: 0;
+            }
+            .msg.ok {
+                color: var(--ok);
+            }
+            .msg.err {
+                color: var(--danger);
+            }
+            .divider {
+                height: 1px;
+                background: var(--soft);
+                margin: 16px 0;
+            }
+            .conn-status {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 10px 12px;
+                border-radius: 8px;
+                background: var(--soft);
+                font-size: 12px;
+            }
+            .conn-status .dot {
+                width: 7px;
+                height: 7px;
+                border-radius: 50%;
+                background: var(--muted);
+                flex-shrink: 0;
+            }
+            .conn-status .dot.ok {
+                background: var(--ok);
+            }
+            #conn-url {
+                min-width: 0;
+                flex: 1;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .conn-status .badge {
+                flex-shrink: 0;
+                color: var(--muted);
+            }
+            .conn-status .badge.ok {
+                color: var(--text);
+            }
+            .account-row,
+            .setting-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+            }
+            .account-row .row {
+                margin-top: 0;
+            }
+            .account-hint,
+            .hint {
+                color: var(--muted);
+                font-size: 12px;
+            }
+            .account-hint {
+                margin-top: 6px;
+            }
+            .stats {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 12px;
+                padding: 12px 16px;
+                border-radius: 8px;
+                background: var(--soft);
+            }
+            .stats dl {
+                display: flex;
+                align-items: baseline;
+                gap: 7px;
+            }
+            .stats dt {
+                order: 1;
+                font-size: 12px;
+                color: var(--muted);
+            }
+            .stats dd {
+                font-size: 20px;
+                font-weight: 700;
+                font-variant-numeric: tabular-nums;
+            }
+            .stats-message {
+                color: var(--muted);
+                font-size: 12px;
+                grid-column: 1 / -1;
+            }
+            .overview-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin-bottom: 8px;
+            }
+            .overview-head h3 {
+                font-size: 13px;
+                font-weight: 500;
+            }
+            .toggle-label {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin: 0;
+                min-height: 28px;
+            }
+            .setting-row {
+                padding: 10px 8px;
+                margin: 0 -8px;
+                border-radius: 7px;
+            }
+            .setting-row:hover,
+            .setting-row:focus-within {
+                background: var(--soft);
+            }
+            .setting-row p {
+                color: var(--muted);
+                font-size: 12px;
+                margin-top: 2px;
+            }
+            .setting-row button {
+                flex-shrink: 0;
+            }
+            .setting-title {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            .setting-title .icon {
+                color: var(--muted);
+            }
+            .about-list div {
+                display: flex;
+                gap: 16px;
+                padding: 5px 0;
+                font-size: 13px;
+            }
+            .about-list dt {
+                width: 64px;
+                flex-shrink: 0;
+                color: var(--muted);
+            }
+            .about-list dd {
+                min-width: 0;
+                overflow-wrap: anywhere;
+            }
+            a {
+                color: inherit;
+                text-underline-offset: 3px;
+            }
+            @media (max-width: 520px) {
+                .wrap {
+                    padding: 24px 16px 40px;
+                }
+                .card {
+                    padding: 18px 16px;
+                }
+                .section-head {
+                    align-items: flex-start;
+                }
+                .account-row {
+                    align-items: flex-start;
+                    flex-direction: column;
+                    gap: 8px;
+                }
+                .stats {
+                    gap: 8px;
+                    padding: 12px;
+                }
+                .stats dl {
+                    flex-direction: column;
+                    gap: 0;
+                }
+                .setting-row {
+                    align-items: flex-start;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <header class="page-header">
+                <img class="brand-mark" src="/brand/mark-color.svg" alt="" draggable="false" />
+                <div>
+                    <h1>插件设置</h1>
+                    <p class="sub">my-favorites · 连接服务，自动整理收藏</p>
+                </div>
+            </header>
+            <main>
+                <section class="card">
+                    <div class="section-head">
+                        <h2>
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <rect x="3" y="3" width="18" height="7" rx="2" />
+                                <rect x="3" y="14" width="18" height="7" rx="2" />
+                                <path d="M7 6.5h.01M7 17.5h.01" />
+                            </svg>
+                            服务与账号
+                        </h2>
+                        <button id="open-admin" class="small">
+                            打开管理台
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path
+                                    d="M15 3h6v6M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"
+                                />
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="conn-status">
+                        <span class="dot" id="conn-dot" aria-hidden="true"></span>
+                        <span id="conn-url">未配置</span>
+                        <span id="conn-state">检测中</span>
+                        <span class="badge" id="conn-badge">未登录</span>
+                    </div>
 
-      <div class="card">
-        <h2>① 服务端连接</h2>
-        <label for="server">服务端地址（官方云 / 自建 Docker）</label>
-        <input id="server" type="text" placeholder="http://localhost:3000" />
-        <div class="row">
-          <button class="primary" id="save">保存</button>
-          <button id="test">测试连接</button>
-          <button id="open-admin">打开管理台</button>
-        </div>
-        <p class="msg" id="msg-connect"></p>
-      </div>
+                    <div class="field">
+                        <label for="server-select">当前服务</label>
+                        <div class="service-picker">
+                            <select id="server-select" aria-describedby="server-hint"></select>
+                            <button
+                                id="add-toggle"
+                                class="icon-button"
+                                title="添加服务端"
+                                aria-label="添加服务端"
+                                aria-expanded="false"
+                                aria-controls="panel-add"
+                            >
+                                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M12 5v14M5 12h14" />
+                                </svg>
+                            </button>
+                            <button
+                                id="server-remove"
+                                class="icon-button"
+                                title="只移除本机连接，服务端数据不受影响"
+                                aria-label="移除此服务"
+                                style="display: none"
+                            >
+                                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6" />
+                                </svg>
+                            </button>
+                        </div>
+                        <p class="hint" id="server-hint" style="margin-top: 6px">
+                            选择即切换，各服务登录状态分别保留。
+                        </p>
+                    </div>
+                    <p class="msg" id="msg-connect" role="status"></p>
+                    <p class="msg err" id="inbox-pending" style="display: none" role="status"></p>
 
-      <div class="card">
-        <h2>② 鉴权（可选）</h2>
-        <label for="pw">管理员密码（服务端设置了 ADMIN_PASSWORD 才需要）</label>
-        <input id="pw" type="password" placeholder="留空表示服务端未启用鉴权" />
-        <div class="row">
-          <button id="login">登录获取 token</button>
-        </div>
-        <p class="msg" id="msg-auth"></p>
-      </div>
+                    <div id="panel-add" style="display: none">
+                        <div class="field">
+                            <label for="add-url">服务端地址</label>
+                            <input
+                                id="add-url"
+                                type="url"
+                                placeholder="http://nas-home.local:3000"
+                                autocapitalize="none"
+                                spellcheck="false"
+                            />
+                        </div>
+                        <div class="field">
+                            <label for="add-label">名称（选填）</label>
+                            <input id="add-label" type="text" placeholder="家里的 NAS" />
+                        </div>
+                        <div class="row">
+                            <button class="primary" id="add-save">探测并添加</button>
+                            <button id="add-cancel">取消</button>
+                        </div>
+                        <p class="msg" id="msg-add" role="status"></p>
+                    </div>
 
-      <div class="card">
-        <h2>③ 收藏夹双向同步</h2>
-        <p style="font-size: 13px; color: var(--muted); margin-bottom: 12px">
-          开启后：管理台就是书签的唯一管理面，浏览器收藏夹自动与库保持一致——两边的增、改、移、删、排序自动双向收敛：任一侧动作后数秒内同步（扩展休眠时≤1 分钟兜底）。首次开启自动完成全量对齐（等同导入，无需其他操作）。
-        </p>
-        <div class="row" style="align-items:center">
-          <label style="margin:0;font-size:13px;display:flex;align-items:center;gap:6px">
-            <input type="checkbox" id="sync-master" /> 开启双向同步
-          </label>
-          <button id="sync-now">🔄 立即同步</button>
-        </div>
-        <p class="msg" id="msg-sync"></p>
-        <div class="row" id="sync-guard-row" style="display:none;margin-top:6px">
-          <button id="sync-confirm-delete">⚠️ 确认执行大批量删除</button>
-        </div>
-        <p style="font-size:12px;color:var(--muted);margin-top:6px" id="sync-status-line"></p>
-      </div>
+                    <div class="divider"></div>
+                    <div id="panel-account">
+                        <div id="acct-in" style="display: none">
+                            <div class="account-row">
+                                <p style="font-size: 13px">
+                                    已登录 ·
+                                    <b id="acct-name">…</b>
+                                </p>
+                                <div class="row">
+                                    <button id="test" class="small">测试连接</button>
+                                    <button id="acct-switch" class="small">切换账号</button>
+                                </div>
+                            </div>
+                            <p class="account-hint">插件与管理台独立登录，退出互不影响。</p>
+                        </div>
+                        <div id="acct-out" style="display: none">
+                            <label for="cloud-user">用户名</label>
+                            <input
+                                id="cloud-user"
+                                type="text"
+                                placeholder="alice"
+                                autocomplete="username"
+                                autocapitalize="none"
+                                spellcheck="false"
+                            />
+                            <div class="field">
+                                <label for="cloud-pw">密码</label>
+                                <input
+                                    id="cloud-pw"
+                                    type="password"
+                                    placeholder="请输入密码"
+                                    autocomplete="current-password"
+                                />
+                            </div>
+                            <div class="row" id="cloud-login-row">
+                                <button class="primary" id="cloud-login">登录</button>
+                                <button id="cloud-show-register">没有账号？注册</button>
+                            </div>
+                            <div id="cloud-register" style="display: none">
+                                <div class="field">
+                                    <label for="cloud-pw2">确认密码</label>
+                                    <input
+                                        id="cloud-pw2"
+                                        type="password"
+                                        placeholder="再次输入密码（至少 8 位）"
+                                        autocomplete="new-password"
+                                    />
+                                </div>
+                                <div class="row">
+                                    <button class="primary" id="cloud-register-btn">注册并登录</button>
+                                    <button id="cloud-back-login">返回登录</button>
+                                </div>
+                            </div>
+                            <p class="msg" id="msg-cloud" role="status"></p>
+                        </div>
+                    </div>
 
-      <div class="card">
-        <h2>④ 收纳盒（自动收纳 · 投递口）</h2>
-        <p style="font-size: 13px; color: var(--muted); margin-bottom: 12px">
-          丢进去的书签会自动归类（应用库 + 浏览器同步整理）；文件夹只是物理投递口，管理入口 = 工具栏图标角标 → popup「收纳盒」标签
-        </p>
-        <div class="row" style="align-items:center">
-          <label style="margin:0;font-size:13px">「📥 收纳盒」文件夹位置</label>
-          <select id="inbox-parent" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text)">
-            <option value="1">书签栏（默认 · 投递可见易拖）</option>
-            <option value="2">其他书签（不占栏位）</option>
-          </select>
-        </div>
-        <div class="row">
-          <button id="inbox">创建收纳盒</button>
-          <button id="sweep">立即清扫收纳盒</button>
-          <span style="font-size:12px;color:var(--muted)">歧义阈值 80% · 攒 ≥3 条集中询问</span>
-        </div>
-        <p class="msg" id="msg-inbox"></p>
-      </div>
+                    <div class="divider"></div>
+                    <div class="overview-head">
+                        <h3>服务端概览</h3>
+                        <button id="refresh" class="small" aria-label="刷新服务端概览">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path
+                                    d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-2L20 8M4 16l2.3 3A7 7 0 0 0 17.9 17"
+                                />
+                            </svg>
+                            刷新
+                        </button>
+                    </div>
+                    <div class="stats" id="stats" aria-busy="true"><p class="stats-message">正在加载概览…</p></div>
+                </section>
 
-      <div class="card">
-        <h2>⑤ 整理通知方式</h2>
-        <p style="font-size: 13px; color: var(--muted); margin-bottom: 10px">
-          整理完成并记入版本后，怎么告诉你（端侧偏好，与管理台各自设置）
-        </p>
-        <div class="row" id="notify-group">
-          <button class="notify-opt" data-style="toast">轻提示（默认）</button>
-          <button class="notify-opt" data-style="card">通知卡</button>
-          <button class="notify-opt" data-style="silent">静默</button>
+                <section class="card">
+                    <h2>
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="m16 3 4 4-4 4M4 11V9a2 2 0 0 1 2-2h14M8 21l-4-4 4-4M20 13v2a2 2 0 0 1-2 2H4" />
+                        </svg>
+                        收藏夹双向同步
+                    </h2>
+                    <p class="description">两边的增删改移与排序自动同步，首次开启会全量对齐。</p>
+                    <div class="account-row">
+                        <label class="toggle-label" for="sync-master">
+                            <input type="checkbox" id="sync-master" />
+                            开启双向同步
+                        </label>
+                        <button id="sync-now" class="small">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="m16 3 4 4-4 4M4 11V9a2 2 0 0 1 2-2h14M8 21l-4-4 4-4M20 13v2a2 2 0 0 1-2 2H4" />
+                            </svg>
+                            立即同步
+                        </button>
+                    </div>
+                    <p class="msg" id="msg-sync" role="status"></p>
+                    <div class="row" id="sync-guard-row" style="display: none">
+                        <button id="sync-confirm-delete" class="small">确认执行大批量删除</button>
+                    </div>
+                    <p class="hint" id="sync-status-line" style="margin-top: 10px"></p>
+                </section>
+
+                <section class="card">
+                    <h2>
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="m4 4-3 9v6a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2v-6l-3-9H4ZM1 13h6l2 3h6l2-3h6" />
+                        </svg>
+                        收纳盒
+                    </h2>
+                    <p class="description">拖入书签即可自动归类，归位去向与撤销在管理台查看。</p>
+                    <label for="inbox-parent">投递文件夹位置</label>
+                    <select id="inbox-parent">
+                        <option value="1">书签栏（默认）</option>
+                        <option value="2">其他书签</option>
+                    </select>
+                    <div class="row">
+                        <button id="inbox" class="small">创建收纳盒</button>
+                        <button id="sweep" class="small">立即清扫收纳盒</button>
+                    </div>
+                    <p class="msg" id="msg-inbox" role="status"></p>
+                </section>
+
+                <section class="card">
+                    <h2>
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
+                        </svg>
+                        管理台设置
+                    </h2>
+                    <p class="description">账号偏好统一在管理台修改，插件无需重复设置。</p>
+                    <div class="setting-row">
+                        <div>
+                            <div class="setting-title">
+                                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+                                </svg>
+                                整理通知
+                            </div>
+                            <p>通知方式与整理偏好</p>
+                        </div>
+                        <button id="open-notification-settings" class="small" aria-label="前往管理台设置整理通知">
+                            前往设置
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
+                        </button>
+                    </div>
+                    <div class="setting-row">
+                        <div>
+                            <div class="setting-title">
+                                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z" />
+                                    <path d="m9 12 2 2 4-4" />
+                                </svg>
+                                隐私保护
+                            </div>
+                            <p>隐私域名与内容保护规则</p>
+                        </div>
+                        <button id="open-privacy-settings" class="small" aria-label="前往管理台设置隐私保护">
+                            前往设置
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
+                        </button>
+                    </div>
+                    <p class="msg" id="msg-settings" role="status"></p>
+                </section>
+
+                <section class="card">
+                    <h2>
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <circle cx="12" cy="12" r="10" />
+                            <path d="M12 16v-4M12 8h.01" />
+                        </svg>
+                        关于
+                    </h2>
+                    <dl class="about-list">
+                        <div>
+                            <dt>版本</dt>
+                            <dd id="about-version">扩展 v—</dd>
+                        </div>
+                        <div>
+                            <dt>当前模型</dt>
+                            <dd id="about-model">正在加载…</dd>
+                        </div>
+                        <div>
+                            <dt>开源</dt>
+                            <dd>
+                                <a href="https://github.com/easeyeah/my-favorites" target="_blank" rel="noreferrer">
+                                    GitHub
+                                </a>
+                                · AGPL-3.0
+                            </dd>
+                        </div>
+                    </dl>
+                </section>
+            </main>
         </div>
-        <p class="msg" id="msg-notify"></p>
-      </div>
-
-      <div class="card">
-        <h2>⑥ 隐私保护</h2>
-        <p style="font-size: 13px; color: var(--muted); margin-bottom: 8px">
-          隐私域名（银行、内网等）的书签：<b>不读取正文、不上传内容、不调用 AI、不做快照</b>，只保存标题和地址。规则在收藏前于本设备判定，服务端再次校验。
-        </p>
-        <p style="font-size: 12px; color: var(--muted)">
-          规则变更后会自动清理已保存的正文、摘要与快照；<b>已发送给 AI 供应商的内容无法追回</b>。
-          私密书签（🔒）为实验性能力：仅隐藏显示，暂无二次验证或加密。
-        </p>
-      </div>
-
-      <div class="card">
-        <h2>⑦ 服务端概览</h2>
-        <div class="stats" id="stats">未连接</div>
-        <div class="row">
-          <button id="refresh">刷新统计</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>⑧ 关于</h2>
-        <div style="font-size: 13.5px; color: var(--text)">
-          <div class="row" style="margin-top:0"><span style="color:var(--muted);width:96px">版本</span><span id="about-version" class="grow">扩展 v—</span></div>
-          <div class="row"><span style="color:var(--muted);width:96px">开源</span><span class="grow"><a href="https://github.com/easeyeah/my-favorites" target="_blank" style="color:var(--accent)">github.com/easeyeah/my-favorites</a> · AGPL-3.0</span></div>
-          <div class="row"><span style="color:var(--muted);width:96px">当前模型</span><span id="about-model" class="grow">管理台配置 · 只读（D37）</span></div>
-        </div>
-      </div>
-
-      <div class="card" style="opacity:.6">
-        <h2>💻 本地模式（预留 · 后续交付）</h2>
-        <p style="font-size: 13px; color: var(--muted)">
-          未连接服务端时：受限本地缓存模式（离线首屏 + 基础搜索，D18）。完整本地模式（含本地 BYOK 直连，复用与自建端相同的供应商选择器）为后续独立交付（D15）。
-        </p>
-      </div>
-    </div>
-    <script type="module" src="./main.ts"></script>
-  </body>
+        <script type="module" src="./main.ts"></script>
+    </body>
 </html>

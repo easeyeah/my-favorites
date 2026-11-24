@@ -1,10 +1,15 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "noEmit": true,
-    "jsx": "react-jsx",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["wxt/browser", "chrome"]
-  },
-  "include": ["entrypoints", "src", ".wxt/types"]
+    "extends": "../../tsconfig.base.json",
+    "compilerOptions": {
+        "noEmit": true,
+        "jsx": "react-jsx",
+        "lib": ["ES2022", "DOM", "DOM.Iterable"],
+        "types": ["wxt/browser", "chrome"],
+        "moduleResolution": "bundler",
+        "module": "ESNext",
+        "allowImportingTsExtensions": true,
+        "verbatimModuleSyntax": false,
+        "noUncheckedSideEffectImports": true
+    },
+    "include": ["entrypoints", "src", ".wxt/types"]
 }
