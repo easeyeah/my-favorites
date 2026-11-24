@@ -33,6 +33,33 @@ services:
       #                    真实端点 -> 厂商 OpenAI 兼容 URL
       LLM_BASE_URL: http://llm-mock:8080/v1
       LLM_API_KEY: mock
+
+  # 可选第二实例：与主实例完全同一形态，仅用于多实例/跨地址联测，不代表另一套部署：
+  #   docker compose -f docker/docker-compose.dev.yml --profile multi-instance up -d
+  # 管理台 http://127.0.0.1:3100；登录、注册、系统管理与 3000 完全一致。
+  server-secondary:
+    container_name: my-favorites-server-secondary
+    profiles: ["multi-instance"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: dev
+    volumes:
+      - ../packages:/app/packages
+      - ../apps/server:/app/apps/server
+      - ../apps/web/dist:/web-dist:ro
+      - secondary-data:/data
+    ports:
+      - "3100:3000"
+    environment:
+      MF_FORM: self-hosted
+      MF_ENV: dev # 与主实例相同：仅地址和数据卷不同
+      PORT: 3000
+      ADMIN_PASSWORD: "123456"
+      WEB_DIST_DIR: /web-dist
+      DATA_DIR: /data
+      LLM_BASE_URL: http://llm-mock:8080/v1
+      LLM_API_KEY: mock
   llm-mock:
     container_name: my-favorites-llm-mock
     image: node:22-alpine
@@ -47,3 +74,4 @@ services:
 
 volumes:
   server-data:
+  secondary-data:
