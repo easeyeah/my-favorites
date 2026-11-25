@@ -174,8 +174,11 @@ function seed(): MockDb {
     B("b-8", "f-be", "PostgreSQL 17 发布说明", "https://www.postgresql.org/docs/17/release", { fail: "403（反爬拦截）" }),
     B("b-9", "f-be", "Nginx 配置生成器", "https://nginxconfig.io/", {}),
     B("b-10", "f-be", "Kubernetes 中文社区", "https://kubernetes.org.cn/", {}),
+    B("b-29", "f-be", "Docker Hub", "https://hub.docker.com/", { tags: ["docker", "镜像"] }),
+    B("b-30", "f-be", "Portainer 容器管理面板", "https://portainer.io/", {}),
     B("b-11", "f-dev", "阮一峰的科技爱好者周刊", "https://www.ruanyifeng.com/blog/weekly", { summary: "每周记录值得分享的科技内容，读书、工具与行业观察。", tags: ["周刊"] }),
     B("b-12", "f-dev", "深入 Node.js 事件循环（旧博客）", "http://old-blog.example.com/node-event-loop", { status: "dead", added_at: d(1500), fail: "连接超时" }),
+    B("b-31", "f-dev", "AI 工具集导航", "https://ai-tools.example.com/", { tags: ["AI", "导航"] }),
 
     // 设计灵感
     B("b-13", "f-design", "Dribbble", "https://dribbble.com/", { tags: ["设计", "灵感"] }),

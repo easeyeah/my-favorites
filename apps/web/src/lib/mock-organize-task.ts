@@ -61,6 +61,10 @@ interface Plan {
   key: string | null;
   category: string | null;
   reason: string;
+  /** D94：复用库内已有的其他目录（可在来源目录之外） */
+  reuseId: string | null;
+  /** D94：与来源目录主题无关、库内又没有对应目录 → 新建顶级目录 */
+  top: boolean;
 }
 type MockItem = OrganizeTaskItem & { plan: Plan | null; fromFolder: string };
 interface Node {
@@ -69,6 +73,8 @@ interface Node {
   parentKey: string | null;
   reuseId: string | null;
   id: string | null;
+  /** 与服务端同口径：一级新建节点建在来源目录之下还是顶级 */
+  placement?: "inside" | "top";
 }
 interface MockTask extends OrganizeTask {
   requestId: string;
@@ -76,10 +82,14 @@ interface MockTask extends OrganizeTask {
   nodes: Node[];
   cats: Array<{ path: string; existedBefore: boolean }>;
   versionId: string | null;
+  /** 来源目录子树的目录 ID 快照：落点不在其中 = 「目录外」 */
+  sourceIds: string[];
 }
 
 const PAGE = 10;
 const BATCH = 4;
+/** D95 成组门槛（与服务端同口径）：新目录直接承接不足这么多条同类就不建；复用现有目录不受限 */
+const MIN_NEW_FOLDER_ITEMS = 3;
 const tasks = new Map<string, MockTask>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -98,21 +108,58 @@ const ACTIVE = (t: MockTask): boolean =>
 
 const TOPICS: Array<[RegExp, string, string]> = [
   [/rustdesk|向日葵|todesk|远程控制/i, "远程控制", ""],
-  [/docker|nginx|k8s|部署|linux|服务器|portainer|compose/i, "部署运维", ""],
+  [/docker|nginx|k8s|kubernetes|部署|linux|服务器|portainer|compose/i, "部署运维", ""],
   [/figma|配色|\bui\b|icon|字体|设计/i, "设计资源", ""],
   [/\bai\b|llm|agent|智能|模型|prompt/i, "AI 与工具", ""],
   [/rust\b|typescript|react|vue|node|前端|css|javascript/i, "开发", "前端开发"],
 ];
 const CONTENT_RE = /教程|指南|tutorial|guide|博客|文章|笔记|文档|blog|weekly|\/docs?\//i;
+/** 演示用「库内其他目录」对照：主题在库里有对应目录就跨根复用，而不是在来源目录下硬建 */
+const REUSE_BY_TOPIC: Record<string, string> = {
+  "设计资源": "设计灵感",
+  "阅读与参考": "阅读清单",
+  "远程控制": "远程控制",
+};
 
-function planOf(b: MockBm): Plan {
+/** 名称的粗粒度词元（与服务端兜底判断同口径）：中文取相邻两字，英文/数字取长度 ≥2 的词 */
+function nameTokens(s: string): Set<string> {
+  const out = new Set<string>();
+  const cjk = s.replace(/[^\u4e00-\u9fff]/g, "");
+  if (cjk.length === 1) out.add(cjk);
+  for (let i = 0; i + 1 < cjk.length; i++) out.add(cjk.slice(i, i + 2));
+  for (const word of s.toLowerCase().match(/[a-z0-9]+/g) ?? []) if (word.length >= 2) out.add(word);
+  return out;
+}
+
+/**
+ * 按标题/网址归纳主题；教程/文章类内容页转资料。
+ * 落点（D94）：库内已有对应目录 → 跨根复用；没有且与来源目录名称无关 → 新建顶级目录；否则建在来源目录之下。
+ */
+function planOf(b: MockBm, ctx: { db: MockTaskDb; rootName: string }): Plan {
   const hit = TOPICS.find(([re]) => re.test(b.title) || re.test(b.url_canonical));
   const topic = hit?.[1] ?? "阅读与参考";
   if (CONTENT_RE.test(b.title) || CONTENT_RE.test(b.url_canonical)) {
-    return { decision: "convert", key: null, category: `${topic}/教程与文章`, reason: "content_page" };
+    return { decision: "convert", key: null, category: `${topic}/教程与文章`, reason: "content_page", reuseId: null, top: false };
   }
   const sub = hit?.[2] && /rust\b|typescript|react|vue|css|前端|javascript/i.test(b.title) ? hit[2] : "";
-  return { decision: "move", key: sub ? `s:${topic}/${sub}` : `t:${topic}`, category: null, reason: "topic_match" };
+  const reuseName = REUSE_BY_TOPIC[topic];
+  const reuse = sub || !reuseName ? undefined : ctx.db.folders.find((f) => f.name === reuseName && !f.is_system_inbox);
+  const sourceTokens = nameTokens(ctx.rootName);
+  const related = [...nameTokens(topic)].some((t) => sourceTokens.has(t));
+  return {
+    decision: "move", key: sub ? `s:${topic}/${sub}` : `t:${topic}`, category: null, reason: "topic_match",
+    reuseId: reuse?.id ?? null, top: !reuse && !related,
+  };
+}
+
+/** 落点是否在来源目录之外（已创建/复用看目录 ID；未创建的看规划与父节点） */
+function outsideOf(t: MockTask, n: Node): boolean {
+  if (n.id) return !t.sourceIds.includes(n.id);
+  if (n.parentKey) {
+    const parent = t.nodes.find((x) => x.key === n.parentKey);
+    return parent ? outsideOf(t, parent) : false;
+  }
+  return n.placement === "top";
 }
 
 // ---------- 视图 ----------
@@ -135,8 +182,15 @@ function summary(t: MockTask, c: ReturnType<typeof counts>, remaining: number): 
   if (t.status === "stopped") {
     return `已停止：已检查 ${t.total - remaining} / ${t.total}，剩余 ${remaining}；已归位 ${c.moved} 条、转资料 ${c.converted} 条`;
   }
-  const tail = c.unchanged > 0 ? `；另有 ${c.unchanged} 条已在合适位置` : "";
-  if (c.moved + c.converted === 0) return `已检查 ${t.total} 条，当前位置均合适，本次未调整`;
+  // 「同类太少没建目录」不是「位置本来就好」，单独说
+  const few = t.items.filter((it) => it.decision === "keep" && it.reason === "too_few_to_group").length;
+  const placed = c.unchanged - few;
+  const tail =
+    (placed > 0 ? `；另有 ${placed} 条已在合适位置` : "") + (few > 0 ? `；${few} 条同类太少，未单独建目录` : "");
+  if (c.moved + c.converted === 0) {
+    if (few > 0 && few === c.unchanged) return `已检查 ${t.total} 条，有 ${few} 条同类太少，未单独建目录，保留原位，本次未调整`;
+    return `已检查 ${t.total} 条，当前位置均合适，本次未调整`;
+  }
   return `检查完成：书签归位 ${c.moved} 条${c.converted > 0 ? `，转入资料 ${c.converted} 条` : ""}${tail}`;
 }
 
@@ -146,11 +200,16 @@ function view(t: MockTask): OrganizeTask {
   const remaining = Math.max(0, t.total - (c.moved + c.converted + c.unchanged + skipped + c.failed));
   const movedKeys = new Set(t.items.filter((it) => it.decision === "moved").map((it) => it.plan?.key));
   const usedCats = new Set(t.items.filter((it) => it.decision === "converted").map((it) => it.plan?.category));
+  const movedOutside = t.items.filter((it) => {
+    if (it.decision !== "moved" || !it.plan?.key) return false;
+    const node = t.nodes.find((n) => n.key === it.plan?.key);
+    return node ? outsideOf(t, node) : false;
+  }).length;
   return {
     id: t.id, folder_id: t.folder_id, folder_name: t.folder_name, status: t.status, phase: t.phase,
     phase_note: t.phase_note, mode: t.mode, total: t.total, checked: t.total - remaining, remaining,
     planned: t.items.filter((it) => it.decision === "remaining" && it.plan).length,
-    moved: c.moved, converted: c.converted, new_materials: c.converted, reused_materials: 0,
+    moved: c.moved, moved_outside: movedOutside, converted: c.converted, new_materials: c.converted, reused_materials: 0,
     unchanged: c.unchanged, skipped, failed: c.failed, protected_count: t.protected_count,
     excluded_archived: t.excluded_archived,
     planned_new_folders: t.nodes.filter((n) => !n.reuseId).length,
@@ -213,15 +272,21 @@ function schedule(t: MockTask, fn: (t: MockTask) => void, ms: number): void {
   );
 }
 
-/** 找到或新建落点目录（一级主题挂被整理目录下，子主题挂主题目录下）；同父同名即复用 */
+/**
+ * 找到或新建落点目录（D94 与服务端同口径）：与来源无关的一级主题建为顶级目录，其余一级主题挂被整理目录下，
+ * 子主题挂主题目录下；同级同名即复用。
+ */
 function ensureTarget(t: MockTask, env: MockTaskEnv, key: string | null): string | null {
   const node = t.nodes.find((n) => n.key === key);
   if (!node) return null;
   if (node.id) return env.db().folders.some((f) => f.id === node.id) ? node.id : null;
-  const parentId = node.parentKey ? ensureTarget(t, env, node.parentKey) : t.folder_id;
-  if (!parentId) return null;
+  const top = !node.parentKey && node.placement === "top";
+  const parentId = node.parentKey ? ensureTarget(t, env, node.parentKey) : top ? null : t.folder_id;
+  if (!top && !parentId) return null;
   const db = env.db();
-  const existing = db.folders.find((f) => f.parent_id === parentId && f.name === node.name);
+  const existing = parentId
+    ? db.folders.find((f) => f.parent_id === parentId && f.name === node.name)
+    : db.folders.find((f) => !f.parent_id && f.name === node.name && !f.is_system_inbox);
   if (existing) {
     node.id = existing.id;
     node.reuseId = existing.id;
@@ -271,9 +336,12 @@ function commitBatch(t: MockTask, env: MockTaskEnv): void {
     const b = db.bookmarks.find((x) => x.id === it.bookmark_id);
     const plan = it.plan;
     // 提交前重查：条目在等待期间被转资料/归档/删除 → 跳过，不冒领
-    if (!b || b.materialized || b.status === "archived" || !plan) {
+    if (!b || b.materialized || b.status === "archived") {
       it.decision = "skip";
       it.reason = b ? "converted_elsewhere" : "deleted_during_task";
+    } else if (!plan) {
+      // 规划阶段就定了保留原位（同类太少，不值得单独建目录）：原因已在规划时写好
+      it.decision = "keep";
     } else if (plan.decision === "convert" && plan.category) {
       b.materialized = true;
       let m = db.materials.find((x) => x.bookmark_id === b.id);
@@ -424,7 +492,7 @@ export function mockOrganizeTask(
         protectedCount++;
         continue;
       }
-      const plan = planOf(b);
+      const plan = planOf(b, { db, rootName: root.name });
       if (plan.key) {
         nodeKeys.add(plan.key);
         if (plan.key.startsWith("s:")) nodeKeys.add(`t:${plan.key.slice(2).split("/")[0]}`);
@@ -438,26 +506,53 @@ export function mockOrganizeTask(
     const nodes: Node[] = [...nodeKeys].map((key) => {
       const isSub = key.startsWith("s:");
       const name = isSub ? key.slice(2).split("/")[1]! : key.slice(2);
-      // 一级主题与被整理目录的直接子目录同名即复用，不建同义副本
-      const existing = isSub ? undefined : db.folders.find((f) => f.parent_id === root.id && f.name === name);
+      const first = items.find((it) => it.plan?.key === key)?.plan;
+      // 一级主题：规划里指定复用库内某个目录（可在来源之外）则直接复用；否则按规划建在来源目录下或顶级
+      const reuseId = isSub ? null : (first?.reuseId ?? null);
       return {
         key, name, parentKey: isSub ? `t:${key.slice(2).split("/")[0]}` : null,
-        reuseId: existing?.id ?? null, id: existing?.id ?? null,
+        reuseId, id: reuseId, ...(isSub || reuseId ? {} : { placement: first?.top ? "top" as const : "inside" as const }),
       };
     });
+    // D95 成组门槛（与服务端同口径）：新目录直接承接不足 MIN_NEW_FOLDER_ITEMS 条同类就不建。
+    // 二级不足 → 撤销，条目回流一级；一级直接承接不足：没有保住的子目录 → 不建；只保住一个 → 连它一起撤销
+    const inflow = new Map<string, number>();
+    for (const it of items) if (it.plan?.key) inflow.set(it.plan.key, (inflow.get(it.plan.key) ?? 0) + 1);
+    const alive = new Set(nodes.map((n) => n.key));
+    for (const n of nodes.filter((x) => x.parentKey && !x.reuseId)) {
+      if ((inflow.get(n.key) ?? 0) >= MIN_NEW_FOLDER_ITEMS) continue;
+      alive.delete(n.key);
+      inflow.set(n.parentKey!, (inflow.get(n.parentKey!) ?? 0) + (inflow.get(n.key) ?? 0));
+    }
+    for (const n of nodes.filter((x) => !x.parentKey && !x.reuseId)) {
+      const subs = nodes.filter((x) => x.parentKey === n.key && alive.has(x.key) && !x.reuseId);
+      if ((inflow.get(n.key) ?? 0) >= MIN_NEW_FOLDER_ITEMS || subs.length >= 2) continue;
+      alive.delete(subs.length === 1 ? subs[0]!.key : n.key);
+    }
+    for (const it of items) {
+      const key = it.plan?.key;
+      if (!key || alive.has(key)) continue;
+      const parent = nodes.find((n) => n.key === key)?.parentKey;
+      if (parent && alive.has(parent)) it.plan = { ...it.plan!, key: parent };
+      else {
+        it.plan = null;
+        it.reason = "too_few_to_group";
+      }
+    }
+    const keptNodes = nodes.filter((n) => alive.has(n.key));
     const existingCats = new Set(db.materials.map((m) => m.category).filter(Boolean) as string[]);
     const task: MockTask = {
       id: env.nid("task"), requestId: String(body.requestId ?? ""), folder_id: root.id, folder_name: root.name,
       status: "running", phase: "plan", phase_note: `正在归纳内容主题 · 0 / ${items.length}`, mode: "ai",
       total: items.length + protectedCount, checked: 0, remaining: items.length + protectedCount, planned: 0,
-      moved: 0, converted: 0, new_materials: 0, reused_materials: 0, unchanged: 0, skipped: protectedCount, failed: 0,
+      moved: 0, moved_outside: 0, converted: 0, new_materials: 0, reused_materials: 0, unchanged: 0, skipped: protectedCount, failed: 0,
       protected_count: protectedCount, excluded_archived: excluded,
-      planned_new_folders: nodes.filter((n) => !n.reuseId).length, created_folders: 0, reused_folders: 0,
+      planned_new_folders: keptNodes.filter((n) => !n.reuseId).length, created_folders: 0, reused_folders: 0,
       planned_categories: catSet.size, new_categories: 0, reused_categories: 0, topics: [], error: null, revision: 1,
       can_continue: true, continue_expires_at: null, undo_status: "none", undo_restored: 0, undo_kept: 0,
       undo_categories: 0, undo_folders: 0, created_at: ts, started_at: ts, phase_at: ts, finished_at: null,
-      summary: null, items, nodes, cats: [...catSet].map((c) => ({ path: c, existedBefore: existingCats.has(c) })),
-      versionId: null,
+      summary: null, items, nodes: keptNodes, cats: [...catSet].map((c) => ({ path: c, existedBefore: existingCats.has(c) })),
+      versionId: null, sourceIds: [...ids],
     };
     tasks.set(task.id, task);
     // 规划阶段：逐批「归纳」（演示态只推进计数，结论已在上面落定）→ 提交阶段
@@ -504,13 +599,21 @@ export function mockOrganizeTask(
   }
 
   if (method === "GET" && seg[3] === "folders") {
+    // 未创建的节点按规划推算完整路径：顶级主题只写主题名，其余从被整理目录写起（与服务端同口径）
+    const plannedPath = (n: Node): string => {
+      if (n.id) return pathOf(env.db(), n.id, t.folder_id);
+      if (!n.parentKey) return n.placement === "top" ? n.name : `${t.folder_name} / ${n.name}`;
+      const parent = t.nodes.find((x) => x.key === n.parentKey);
+      return parent ? `${plannedPath(parent)} / ${n.name}` : n.name;
+    };
     const rows: OrganizeTaskFolder[] = t.nodes.map((n) => {
       const mine = t.items.filter((it) => it.decision === "moved" && it.plan?.key === n.key).length;
       return {
         key: n.key,
-        path: n.id ? pathOf(env.db(), n.id, t.folder_id) : [t.folder_name, n.name].join(" / "),
+        path: plannedPath(n),
         state: n.reuseId ? "reused" : n.id ? "created" : "unapplied",
         folder_id: n.id, planned_count: mine, actual_count: mine,
+        outside: outsideOf(t, n),
       };
     });
     return { folders: rows.slice(offset, offset + limit), total: rows.length };

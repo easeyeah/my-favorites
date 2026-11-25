@@ -520,6 +520,8 @@ export interface OrganizeTask {
   remaining: number;
   planned: number;
   moved: number;
+  /** D94：已移动条目中归入来源目录之外的条数（跨根复用 / 新建顶级目录）；明细已裁剪的历史任务不带 */
+  moved_outside?: number;
   converted: number;
   new_materials: number;
   reused_materials: number;
@@ -577,6 +579,8 @@ export interface OrganizeTaskFolder {
   folder_id: string | null;
   planned_count: number;
   actual_count: number;
+  /** D94：落点在来源目录之外（复用了库内其他目录，或新建的顶级目录） */
+  outside: boolean;
 }
 export interface OrganizeTaskCategory {
   path: string;

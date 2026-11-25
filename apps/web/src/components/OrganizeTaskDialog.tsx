@@ -180,7 +180,7 @@ export function OrganizeTaskDialog({
                 <Sparkles className="text-primary size-4" /> 整理「{target?.mode === "start" ? target.folderName : ""}」
               </DialogTitle>
               <DialogDescription>
-                来源：该目录及其子目录的全部收藏；去向：目录内的书签分类，或你的资料分类。关闭后任务继续。
+                来源：该目录及其子目录的全部收藏；去向：库内任意目录（包括其他根目录）或你的资料分类——与这个目录无关的内容会被归到别处。关闭后任务继续。
               </DialogDescription>
             </DialogHeader>
             <div className="bg-muted/50 rounded-xl px-4 py-6 text-center" role="status" aria-live="polite">
@@ -385,7 +385,7 @@ function TaskDetail({
           <Badge variant="outline" className="shrink-0 font-normal">{taskStatusLabel(task)}</Badge>
         </DialogTitle>
         <DialogDescription>
-          来源：该目录及其子目录 · 去向：目录内的书签分类 / 你的资料分类。关闭后任务继续，可从「整理记录」找回。
+          来源：该目录及其子目录 · 去向：库内任意目录（包括其他根目录）或你的资料分类，与它无关的内容会被归到别处。关闭后任务继续，可从「整理记录」找回。
         </DialogDescription>
       </DialogHeader>
 
@@ -419,6 +419,11 @@ function TaskDetail({
           {task.protected_count > 0 && (
             <p className="text-muted-foreground/70 mt-1 text-[11px]">另有 {task.protected_count} 条私密或隐私条目未参与（不送模型、不移动）</p>
           )}
+          {(task.moved_outside ?? 0) > 0 && (
+            <p className="mt-1 text-[11px]" data-task-moved-outside>
+              其中 {task.moved_outside} 条归入了这个目录之外（库内其他目录或新建的顶级目录）
+            </p>
+          )}
           {task.topics.length > 0 && (
             <p className="text-muted-foreground mt-1 text-[11px]">
               归纳出的主题：{task.topics.map((t) => (
@@ -439,7 +444,7 @@ function TaskDetail({
           )}
           {task.mode === "rule_only" && (
             <p className="text-muted-foreground mt-1 text-[11px]">
-              未配置整理模型：本次只按本地规则归位，没有做 AI 主题发现、新目录规划和资料分流。
+              未配置整理模型：本次只按本地规则归位到库内已有的同名目录，没有做 AI 主题发现、新目录规划和资料分流。
             </p>
           )}
         </div>
@@ -508,6 +513,9 @@ function TaskDetail({
                   <FolderOpen className="size-3.5" /> 目录变化
                   <span className="text-muted-foreground text-xs">
                     新建 {task.created_folders} · 复用 {task.reused_folders}
+                    {folders?.some((f) => f.outside) && (
+                      <span className="text-primary"> · {folders.filter((f) => f.outside).length} 个在此目录之外</span>
+                    )}
                   </span>
                 </button>
                 {showFolders && <FolderRows folders={folders} onOpen={onOpenFolder} />}
@@ -675,6 +683,10 @@ function FolderRows({ folders, onOpen }: { folders: OrganizeTaskFolder[] | null;
         <li key={f.key} className="data-row flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px]">
           <FolderOpen className="text-muted-foreground size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{f.path}</span>
+          {/* D94：落点可能在来源目录之外——路径是从顶级写起的完整路径，并明确标出 */}
+          {f.outside && (
+            <Badge className="shrink-0 bg-primary/10 px-1.5 py-0 text-[11px] font-normal text-primary hover:bg-primary/10">目录外</Badge>
+          )}
           <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[11px] font-normal">{FOLDER_STATE[f.state] ?? f.state}</Badge>
           <span className="text-muted-foreground shrink-0 text-xs tabular">
             {f.actual_count > 0 ? `承接 ${f.actual_count}` : f.planned_count > 0 ? `计划 ${f.planned_count}` : "未承接"}
