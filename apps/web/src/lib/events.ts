@@ -59,6 +59,43 @@ function notify(): void {
   }
 }
 
+// ---------- D92 整理任务门铃 ----------
+// 书签变更门铃不是任务进度（模型等待/失败/零动作/停止都没有书签变更）：
+// 服务端另推 event:task，只带 taskId；任务快照仍走 REST。不为每个任务单独占连接。
+
+type TaskListener = (taskId: string) => void;
+const taskListeners = new Set<TaskListener>();
+
+/** 订阅任务状态门铃；返回退订函数。?mock 下订阅 mock 层派发的 mf:mock-task */
+export function subscribeTasks(fn: TaskListener): () => void {
+  taskListeners.add(fn);
+  return () => taskListeners.delete(fn);
+}
+
+function notifyTasks(taskId: string): void {
+  for (const fn of [...taskListeners]) {
+    try {
+      fn(taskId);
+    } catch {
+      /* 单订阅者异常隔离 */
+    }
+  }
+}
+
+const MOCK_TASK_EVENT = "mf:mock-task";
+
+/** mock 层任务状态推进后调用（detail.taskId） */
+export function emitMockTask(taskId: string): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(MOCK_TASK_EVENT, { detail: { taskId } }));
+}
+
+/** 演示态订阅任务门铃（与 subscribeTasks 同口径） */
+export function subscribeMockTask(fn: TaskListener): () => void {
+  const handler = (e: Event): void => fn(String((e as CustomEvent<{ taskId?: string }>).detail?.taskId ?? ""));
+  window.addEventListener(MOCK_TASK_EVENT, handler);
+  return () => window.removeEventListener(MOCK_TASK_EVENT, handler);
+}
+
 /** 页面订阅原始门铃（合并/调度由订阅方负责）；返回退订函数 */
 export function subscribeChanges(fn: Listener): () => void {
   listeners.add(fn);
@@ -87,19 +124,33 @@ async function loop(cfg: AdminConfig, signal: AbortSignal): Promise<void> {
       notify();
       const reader = res.body.getReader();
       const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let cut = buf.indexOf("\n\n");
-        while (cut >= 0) {
-          const frame = buf.slice(0, cut);
-          buf = buf.slice(cut + 2);
-          if (frame.includes("event: change")) notify();
-          cut = buf.indexOf("\n\n");
+        let buf = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let cut = buf.indexOf("\n\n");
+          while (cut >= 0) {
+            const frame = buf.slice(0, cut);
+            buf = buf.slice(cut + 2);
+            if (frame.includes("event: change")) notify();
+            if (frame.includes("event: task")) {
+              // data 行是 {"taskIds":["…"]}；解析失败不致命——页面侧有低频轮询兜底
+              const data = frame
+                .split("\n")
+                .filter((l) => l.startsWith("data:"))
+                .map((l) => l.slice(5).trim())
+                .join("");
+              try {
+                const ids = (JSON.parse(data) as { taskIds?: string[] }).taskIds ?? [];
+                for (const id of ids) notifyTasks(id);
+              } catch {
+                /* 忽略坏帧 */
+              }
+            }
+            cut = buf.indexOf("\n\n");
+          }
         }
-      }
     } catch {
       /* 断线走退避重连 */
     }

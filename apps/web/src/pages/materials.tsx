@@ -9,18 +9,21 @@
  * 仍进 MCP/导出，供 AI 检索），不再作为人的浏览维度。
  * 行 = 标题 + 已存全文徽章 + 📸 + 分类徽章 + 行内操作（打开原页/导出/移出）。
  */
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowUpRight, Clapperboard, Download, FileText, Image as ImageIcon, LibraryBig, Loader2, Search, Trash2 } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowUpRight, Clapperboard, Download, FileText, Image as ImageIcon, LibraryBig, Loader2, RotateCcw, Search, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { EmptyState, PageScroll, PageHeader, toast } from "@/components/shared";
-import { useShell } from "@/components/layout";
-import { useServerChanges } from "@/lib/events";
+import { EmptyState, NumberedPagination, PageScroll, PageHeader, toast } from "@/components/shared";
+import { useRoute, useShell } from "@/components/layout";
+import { useLiveRefresh } from "@/lib/live-refresh";
 import { fetchers, type MaterialCounts, type MaterialFacets, type MaterialRow } from "@/lib/api";
 import { categoryEmoji, tagEmoji } from "@/lib/tag-emoji";
 import { cn } from "@/lib/utils";
 
 type KindFilter = "" | "article" | "video" | "image";
+type MaterialAction = "export" | "dismiss" | "restore";
+const PAGE_SIZE = 10;
 
 const KIND_META: Record<MaterialRow["type"], { label: string; icon: typeof FileText }> = {
   article: { label: "文章", icon: FileText },
@@ -46,50 +49,93 @@ const hostOf = (url: string): string => {
 
 export function Materials() {
   const { cfg } = useShell();
+  // D92 深链：整理结果里的「查看资料分类」跳 #materials?category=一级/二级，进入即选中该分类
+  const deepCategory = useRoute().params.get("category");
   const [items, setItems] = useState<MaterialRow[]>([]);
   const [counts, setCounts] = useState<MaterialCounts>({ total: 0, article: 0, video: 0, image: 0 });
   const [facets, setFacets] = useState<MaterialFacets | null>(null);
   const [filter, setFilter] = useState<KindFilter>("");
   const [q, setQ] = useState("");
-  const [catFilter, setCatFilter] = useState<string | null>(null);
+  const [catFilter, setCatFilter] = useState<string | null>(deepCategory);
   const [uncategorized, setUncategorized] = useState(false);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [action, setAction] = useState<{ id: string; kind: MaterialAction } | null>(null);
+  const actionInFlight = useRef(false);
+  useEffect(() => {
+    setCatFilter(deepCategory);
+    setUncategorized(false);
+    setPage(1);
+  }, [deepCategory]);
+  const view = useMemo(() => ({ cfg, filter, q, catFilter, uncategorized, page }), [cfg, filter, q, catFilter, uncategorized, page]);
+  const request = useRef<{ view: typeof view; controller: AbortController; promise: Promise<void> } | null>(null);
 
-  const load = useCallback((silent = false) => {
-    if (!silent) setLoading(true);
-    fetchers
-      .materials(cfg, {
-        type: filter || undefined,
-        q: q || undefined,
-        category: catFilter || undefined,
-        uncategorized,
-        limit: 100,
-      })
+  const load = useCallback((silent = false): Promise<void> => {
+    // 同一视图共享在途请求；切筛选/翻页取消旧请求，迟到响应无权覆盖新页。
+    if (request.current?.view === view && !request.current.controller.signal.aborted) return request.current.promise;
+    request.current?.controller.abort();
+    const controller = new AbortController();
+    if (!silent) {
+      setLoading(true);
+      setItems([]);
+    }
+    setRefreshing(true);
+    const promise = fetchers
+      .materials(view.cfg, {
+        type: view.filter || undefined,
+        q: view.q || undefined,
+        category: view.catFilter || undefined,
+        uncategorized: view.uncategorized,
+        limit: PAGE_SIZE,
+        offset: (view.page - 1) * PAGE_SIZE,
+      }, controller.signal)
       .then((r) => {
-        setItems(r.items);
+        if (controller.signal.aborted) return;
         setCounts(r.counts);
+        setTotal(r.total);
+        setLoadError(null);
+        const lastPage = Math.max(1, Math.ceil(r.total / PAGE_SIZE));
+        if (view.page > lastPage) {
+          setPage(lastPage); // 移出/外部删除使末页失效时，重新查询最近的合法页。
+          return;
+        }
+        setItems(r.items);
       })
-      .catch(() => setItems([]))
-      .finally(() => setLoading(false));
-  }, [cfg, filter, q, catFilter, uncategorized]);
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setLoadError(err instanceof Error ? err.message : "请稍后重试");
+        throw err;
+      })
+      .finally(() => {
+        if (request.current?.controller !== controller) return;
+        request.current = null;
+        setLoading(false);
+        setRefreshing(false);
+      });
+    request.current = { view, controller, promise };
+    return promise;
+  }, [view]);
 
   useEffect(() => {
-    load();
+    void load().catch(() => { /* loadError 已展示，保留失败而不是伪装空列表。 */ });
+    return () => request.current?.controller.abort();
   }, [load]);
 
-  // 分面统计：仅随配置变化（全局计数），移出资料库后手动刷新
-  const loadFacets = useCallback(() => {
-    fetchers
-      .materialFacets(cfg)
-      .then(setFacets)
-      .catch(() => setFacets(null));
-  }, [cfg]);
-  useEffect(loadFacets, [loadFacets]);
+  // 分面统计始终为全库计数，移出与外部变更后刷新。
+  const loadFacets = useCallback(() => fetchers
+    .materialFacets(cfg)
+    .then(setFacets)
+    .catch(() => setFacets(null)), [cfg]);
+  useEffect(() => { void loadFacets(); }, [loadFacets]);
 
-  // D81：服务端变更门铃 → 列表 + 分类树合并刷新（资料入库/移出随扩展动作实时可见；静默不闪骨架）
-  useServerChanges(() => {
-    load(true);
-    loadFacets();
+  const busy = loading || refreshing || action !== null;
+  // 复用 D82 在途/阻塞补轮：门铃不与分页、恢复、移出并发抢写列表。
+  const liveRefresh = useLiveRefresh({
+    refresh: async () => { await Promise.all([load(true), loadFacets()]); },
+    blocked: busy,
   });
 
   // 分类树：category 路径（"一级/二级"）→ 两层结构，一级计数 = 子树聚合
@@ -109,33 +155,40 @@ export function Materials() {
   const categorized = (facets?.categories ?? []).reduce((s, c) => s + c.count, 0);
   const uncategorizedCount = Math.max(0, counts.total - categorized);
 
-  const exportMd = async (id: string, title: string) => {
+  const runAction = async (it: MaterialRow, kind: MaterialAction) => {
+    // ref 覆盖 React 提交前的同帧连击；行内操作与翻页共用 busy 禁用态。
+    if (busy || actionInFlight.current) return;
+    actionInFlight.current = true;
+    setAction({ id: it.id, kind });
     try {
-      const blob = await fetchers.materialExport(cfg, id);
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${title.replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 60) || "material"}.md`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    } catch {
-      toast.err("导出失败");
-    }
-  };
-
-  const dismiss = (id: string) => {
-    fetchers
-      .materialDismiss(cfg, id)
-      .then(() => {
+      if (kind === "export") {
+        const blob = await fetchers.materialExport(cfg, it.id);
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${it.title.replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 60) || "material"}.md`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        return;
+      }
+      if (kind === "restore") {
+        await fetchers.materialRestore(cfg, it.id);
+        // 服务端已确认恢复；即使随后刷新失败，也不能继续展示「恢复」旧操作。
+        setItems((rows) => rows.map((row) => row.id === it.id ? { ...row, materialized: 0 } : row));
+        toast.ok("已恢复为书签，资料仍保留；浏览器收藏夹将在同步后出现");
+      } else {
+        await fetchers.materialDismiss(cfg, it.id);
         toast.ok("已移出资料库（书签仍保留在书签库）");
-        load();
-        loadFacets();
-      })
-      .catch(() => toast.err("移出失败"));
-  };
-
-  const openOriginal = (id: string) => {
-    const it = items.find((x) => x.id === id);
-    if (it) window.open(it.url_raw, "_blank");
+      }
+      // 刷新失败独立可见，不把已确认的写入误报为失败；load 内校准合法页码。
+      await load(true).catch(() => { /* loadError 提供重试入口。 */ });
+      if (kind === "dismiss") await loadFacets();
+    } catch (err) {
+      const message = kind === "restore" ? "恢复失败" : kind === "dismiss" ? "移出失败" : "导出失败";
+      toast.err(`${message}${err instanceof Error ? `：${err.message}` : ""}`);
+    } finally {
+      actionInFlight.current = false;
+      setAction(null);
+    }
   };
 
   const filtersActive = filter !== "" || q !== "" || catFilter !== null || uncategorized;
@@ -157,9 +210,10 @@ export function Materials() {
               onClick={() => {
                 setCatFilter(null);
                 setUncategorized(false);
+                setPage(1);
               }}
               className={cn(
-                "mb-0.5 flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] transition-colors",
+                "data-row mb-0.5 flex w-full items-center gap-1.5 px-2 py-1 text-[13px]",
                 catFilter === null && !uncategorized
                   ? "bg-primary/10 font-medium text-primary"
                   : "hover:bg-accent/60 text-foreground",
@@ -173,6 +227,7 @@ export function Materials() {
               <Fragment key={top.name}>
                 <button
                   onClick={() => {
+                    setPage(1);
                     if (catFilter === top.name) setCatFilter(null);
                     else {
                       setCatFilter(top.name);
@@ -180,7 +235,7 @@ export function Materials() {
                     }
                   }}
                   className={cn(
-                    "flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] transition-colors",
+                    "data-row flex w-full items-center gap-1.5 px-2 py-1 text-[13px]",
                     catFilter === top.name ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
                   )}
                 >
@@ -194,6 +249,7 @@ export function Materials() {
                     <button
                       key={sub.name}
                       onClick={() => {
+                        setPage(1);
                         if (catFilter === path) setCatFilter(null);
                         else {
                           setCatFilter(path);
@@ -201,7 +257,7 @@ export function Materials() {
                         }
                       }}
                       className={cn(
-                        "flex w-full items-center gap-1.5 rounded-lg py-1 pr-2 text-xs transition-colors",
+                        "data-row flex w-full items-center gap-1.5 py-1 pr-2 text-xs",
                         catFilter === path ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
                       )}
                       style={{ paddingLeft: 26 }}
@@ -217,6 +273,7 @@ export function Materials() {
             {uncategorizedCount > 0 && (
               <button
                 onClick={() => {
+                  setPage(1);
                   if (uncategorized) setUncategorized(false);
                   else {
                     setUncategorized(true);
@@ -224,7 +281,7 @@ export function Materials() {
                   }
                 }}
                 className={cn(
-                  "mt-0.5 flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] transition-colors",
+                  "data-row mt-0.5 flex w-full items-center gap-1.5 px-2 py-1 text-[13px]",
                   uncategorized ? "bg-primary/10 font-medium text-primary" : "hover:bg-accent/60 text-foreground",
                 )}
               >
@@ -250,7 +307,8 @@ export function Materials() {
               ]).map((f) => (
                 <button
                   key={f.key || "all"}
-                  onClick={() => setFilter(f.key)}
+                  onClick={() => { setFilter(f.key); setPage(1); }}
+                  aria-pressed={filter === f.key}
                   className={cn(
                     "rounded-full px-3 py-1 text-xs transition-colors",
                     filter === f.key
@@ -267,37 +325,45 @@ export function Materials() {
               <Search className="text-muted-foreground pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2" />
               <Input
                 value={q}
-                onChange={(e) => setQ(e.target.value)}
+                onChange={(e) => { setQ(e.target.value); setPage(1); }}
+                aria-label="搜索资料标题、摘要与全文"
                 placeholder="搜标题、摘要与全文"
                 className="h-8 pl-8 text-xs"
               />
             </div>
           </div>
 
+          {loadError && (
+            <div role="alert" className="mb-3 flex items-center justify-between gap-3 rounded-lg bg-muted px-3 py-2 text-xs">
+              <p>资料列表加载失败：{loadError}</p>
+              <Button variant="outline" size="sm" disabled={busy} onClick={liveRefresh.retry}>重试</Button>
+            </div>
+          )}
           {loading ? (
             <div className="text-muted-foreground flex items-center justify-center gap-2 py-16 text-sm">
               <Loader2 className="size-4 animate-spin" />
               正在加载…
             </div>
-          ) : items.length === 0 ? (
+          ) : loadError && items.length === 0 ? null : items.length === 0 ? (
             <EmptyState
               icon="📚"
               title={filtersActive ? "没有符合条件的内容" : "资料库还是空的"}
               hint={
                 filtersActive
-                  ? "换个分类、标签、类型或关键词试试。"
+                  ? "换个分类、类型或关键词试试。"
                   : "用扩展收藏文章、视频或图片后会自动分类入库；已有书签在服务端启动时完成了一次存量回灌。"
               }
             />
           ) : (
-            <ul>
+            <ul aria-label="资料列表" aria-busy={busy}>
               {items.map((it, i) => {
                 const meta = KIND_META[it.type];
                 const KindIcon = meta.icon;
+                const pending = action?.id === it.id ? action.kind : null;
                 return (
-                  <Fragment key={it.id}>
-                    {/* 规范 #4：分割线是独立元素（不挂在行 border 上）与圆角解耦——行只做圆角 hover 高亮 */}
-                    <li className="group hover:bg-accent/40 m-1 flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors">
+                  <li key={it.id}>
+                    {/* 规范 #4：整行 hover/focus-within；分隔线独立于圆角数据行。 */}
+                    <div className="data-row m-1 flex items-center gap-3 px-3 py-2.5">
                       {/* 位 1+2：标题行 + 分类标签行 */}
                       <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-1.5">
@@ -342,35 +408,72 @@ export function Materials() {
                       </div>
                       {/* 位 4：行内操作 */}
                       <div className="flex shrink-0 items-center gap-0.5">
-                        <button
-                          className="text-muted-foreground hover:bg-accent hover:text-foreground rounded-lg p-1.5 transition-colors"
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          className="size-7 p-0"
                           title="打开原页"
-                          onClick={() => openOriginal(it.id)}
+                          aria-label={`打开原页：${it.title}`}
+                          disabled={busy}
+                          onClick={() => window.open(it.url_raw, "_blank", "noopener,noreferrer")}
                         >
-                          <ArrowUpRight className="size-3.5" />
-                        </button>
-                        <button
-                          className="text-muted-foreground hover:bg-accent hover:text-foreground rounded-lg p-1.5 transition-colors"
+                          <ArrowUpRight data-icon="inline-start" aria-hidden="true" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          className="size-7 p-0"
                           title="导出 Markdown"
-                          onClick={() => void exportMd(it.id, it.title)}
+                          aria-label={`导出 Markdown：${it.title}`}
+                          disabled={busy}
+                          onClick={() => void runAction(it, "export")}
                         >
-                          <Download className="size-3.5" />
-                        </button>
-                        <button
-                          className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive rounded-lg p-1.5 transition-colors"
-                          title="移出资料库（书签保留）"
-                          onClick={() => dismiss(it.id)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </button>
+                          {pending === "export" ? <Loader2 data-icon="inline-start" aria-hidden="true" className="animate-spin" /> : <Download data-icon="inline-start" aria-hidden="true" />}
+                        </Button>
+                        {it.materialized === 1 ? (
+                          // D91：恢复保留资料，服务端确认后切换为「移出资料库」。
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="size-7 p-0"
+                            title="恢复为书签（资料保留；浏览器收藏夹节点同步后重建）"
+                            aria-label={`恢复为书签：${it.title}（资料保留）`}
+                            disabled={busy}
+                            onClick={() => void runAction(it, "restore")}
+                          >
+                            {pending === "restore" ? <Loader2 data-icon="inline-start" aria-hidden="true" className="animate-spin" /> : <RotateCcw data-icon="inline-start" aria-hidden="true" />}
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="size-7 p-0"
+                            title="移出资料库（书签保留）"
+                            aria-label={`移出资料库：${it.title}（书签保留）`}
+                            disabled={busy}
+                            onClick={() => void runAction(it, "dismiss")}
+                          >
+                            {pending === "dismiss" ? <Loader2 data-icon="inline-start" aria-hidden="true" className="animate-spin" /> : <Trash2 data-icon="inline-start" aria-hidden="true" />}
+                          </Button>
+                        )}
                       </div>
-                    </li>
-                    {i < items.length - 1 && <li aria-hidden className="border-border/40 mx-4 border-t" />}
-                  </Fragment>
+                    </div>
+                    {i < items.length - 1 && <div aria-hidden="true" className="bg-border/40 mx-4 h-px" />}
+                  </li>
                 );
               })}
             </ul>
           )}
+          <NumberedPagination
+            label="资料列表分页"
+            page={page}
+            total={total}
+            pageSize={PAGE_SIZE}
+            disabled={busy || loadError !== null}
+            onPageChange={(next) => {
+              if (!busy && !actionInFlight.current && next !== page) setPage(next);
+            }}
+          />
         </div>
       </div>
     </PageScroll>

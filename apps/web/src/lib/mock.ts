@@ -20,6 +20,7 @@ import type {
   VersionRow,
 } from "./api";
 import { isSensitiveHost, PRIVATE_FOLDER_NAME } from "@mf/shared";
+import { mockOrganizeTask } from "./mock-organize-task";
 
 const MOCK_KEY = "mf-mock-demo";
 
@@ -45,9 +46,12 @@ interface MockVersion extends VersionRow {
   createdFolders?: string[];
   /** D43：本批标私密的条目（撤销时还原 is_private=0，与服务端 markPrivate 逆放同口径） */
   unmarkPrivate?: string[];
+  /** D91：本批转资料条目（撤销=恢复书签） */
+  convertIds?: string[];
 }
 
-/** D61 资料库条目（演示态）：正文/摘要不复制，读时从 bookmark.cache 派生 */
+/** D61 资料库条目（演示态）：正文/摘要不复制，读时从 bookmark.cache 派生。
+ *  D91：materialized=1 表示书签已转资料（书签面隐藏，行操作可恢复） */
 interface MockMaterial {
   id: string;
   bookmark_id: string;
@@ -57,7 +61,11 @@ interface MockMaterial {
   signals: string[];
   textLen: number;
   cover: boolean;
+  materialized?: 0 | 1;
 }
+
+/** D91：mock 书签的转资料标记（Bookmark 类型外的演示字段） */
+type DemoBookmark = Bookmark & { materialized?: boolean };
 
 /** D65 演示分类映射：按 URL/标题给 mock 材料配两级路径（模拟 AI 摘要顺带产出） */
 function mockCategory(b: { title: string; url_canonical: string }): string | null {
@@ -166,8 +174,11 @@ function seed(): MockDb {
     B("b-8", "f-be", "PostgreSQL 17 发布说明", "https://www.postgresql.org/docs/17/release", { fail: "403（反爬拦截）" }),
     B("b-9", "f-be", "Nginx 配置生成器", "https://nginxconfig.io/", {}),
     B("b-10", "f-be", "Kubernetes 中文社区", "https://kubernetes.org.cn/", {}),
+    B("b-29", "f-be", "Docker Hub", "https://hub.docker.com/", { tags: ["docker", "镜像"] }),
+    B("b-30", "f-be", "Portainer 容器管理面板", "https://portainer.io/", {}),
     B("b-11", "f-dev", "阮一峰的科技爱好者周刊", "https://www.ruanyifeng.com/blog/weekly", { summary: "每周记录值得分享的科技内容，读书、工具与行业观察。", tags: ["周刊"] }),
     B("b-12", "f-dev", "深入 Node.js 事件循环（旧博客）", "http://old-blog.example.com/node-event-loop", { status: "dead", added_at: d(1500), fail: "连接超时" }),
+    B("b-31", "f-dev", "AI 工具集导航", "https://ai-tools.example.com/", { tags: ["AI", "导航"] }),
 
     // 设计灵感
     B("b-13", "f-design", "Dribbble", "https://dribbble.com/", { tags: ["设计", "灵感"] }),
@@ -251,10 +262,15 @@ function seed(): MockDb {
   };
 
   const versions: MockVersion[] = [
+    { id: "ver-d91-convert", session_id: null, kind: "收纳盒自动归位", label: "material_convert", reverted: 0, created_at: h(1), actionCount: 1, moves: [], convertIds: ["b-v1"] },
     { id: "ver-a1b2c3d4", session_id: null, kind: "收纳盒自动归位", reverted: 0, created_at: h(2), actionCount: 3, moves: [] },
     { id: "ver-e5f6a7b8", session_id: null, kind: "「开发工具」重分类", reverted: 0, created_at: d(1), actionCount: 12, moves: [] },
     { id: "ver-c9d0e1f2", session_id: null, kind: "合并重复", reverted: 1, created_at: d(3), actionCount: 1, moves: [] },
   ];
+
+  // D91：一条已转资料的视频（书签面隐藏，资料页可恢复）——模拟收纳盒自动分流
+  const convertedVideo = bookmarks.find((b) => b.id === "b-v1");
+  if (convertedVideo) (convertedVideo as DemoBookmark).materialized = true;
 
   // D61 资料库演示：文章须已存全文（summary 即有内容），视频/图片凭 URL 形态入库
   const materials: MockMaterial[] = bookmarks
@@ -286,6 +302,7 @@ function seed(): MockDb {
         signals,
         textLen: summary ? 1800 + (b.id.length % 7) * 260 : 0,
         cover: type !== "article",
+        materialized: (b as DemoBookmark).materialized ? 1 : 0,
       };
     });
 
@@ -435,7 +452,7 @@ export function installMockSimulator(): void {
 
 function folderTree(): FolderTreeNode[] {
   return db.folders.map((f) => {
-    const own = db.bookmarks.filter((b) => b.folder_id === f.id).length;
+    const own = db.bookmarks.filter((b) => b.folder_id === f.id && !(b as DemoBookmark).materialized).length;
     // 子树 totalCount：父目录聚拢全部后代
     const ids = new Set<string>([f.id]);
     let grew = true;
@@ -448,7 +465,7 @@ function folderTree(): FolderTreeNode[] {
         }
       }
     }
-    return { ...f, directCount: own, totalCount: db.bookmarks.filter((b) => ids.has(b.folder_id)).length };
+    return { ...f, directCount: own, totalCount: db.bookmarks.filter((b) => ids.has(b.folder_id) && !(b as DemoBookmark).materialized).length };
   });
 }
 
@@ -587,6 +604,14 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
   const path = rawPath.replace(/^\/api\/v1/, "").split("?")[0] ?? "";
   const seg = path.split("/").filter(Boolean);
 
+  // D92 目录整理任务（含版本历史里撤销任务批次）：数据与 ID 生成经 env 注入，避免循环引用
+  const organizeTask = mockOrganizeTask(method, path, ctx, {
+    db: () => ({ folders: db.folders, bookmarks: db.bookmarks, materials: db.materials, versions: db.versions }),
+    nid,
+    now,
+  });
+  if (organizeTask !== null) return organizeTask;
+
   // ---------- D61 资料库 ----------
   const materialRow = (m: MockMaterial, detail: boolean): MaterialRow | MaterialDetail | null => {
     const b = db.bookmarks.find((x) => x.id === m.bookmark_id);
@@ -615,6 +640,8 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
       signals: m.signals,
       meta: {},
       created_at: m.created_at,
+      // 书签 mock 仍用 boolean；列表/详情 DTO 只暴露 numeric 0/1，兼容旧 HMR 材料字段。
+      materialized: ((b as DemoBookmark).materialized ?? m.materialized) ? 1 : 0,
     };
     if (!detail) return base;
     // 演示正文：文章给生成段；视频/图片仅元数据（与服务端语义一致）
@@ -642,7 +669,7 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
       video: all.filter((r) => r.type === "video").length,
       image: all.filter((r) => r.type === "image").length,
     };
-    const items = all
+    const filtered = all
       .filter((r) => (type ? r.type === type : true))
       .filter((r) => {
         if (ctx.query.get("uncategorized") === "1") return r.category === null;
@@ -653,8 +680,10 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
       .filter((r) =>
         q ? `${r.title} ${r.url_canonical} ${r.l1_summary ?? ""}`.toLowerCase().includes(q) : true,
       )
-      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-    return { items, counts };
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
+    const limit = Math.min(200, Math.max(1, Math.trunc(Number(ctx.query.get("limit")) || 10)));
+    const offset = Math.max(0, Math.trunc(Number(ctx.query.get("offset")) || 0));
+    return { items: filtered.slice(offset, offset + limit), counts, total: filtered.length };
   }
   if (method === "GET" && path === "/materials/facets") {
     // 分面统计（演示态）：AI 分类树计数 + AI 标签频次榜，从 mock 材料实时聚合
@@ -678,15 +707,29 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
   }
   if (method === "DELETE" && seg[0] === "materials" && seg.length === 2) {
     const idx = db.materials.findIndex((x) => x.id === seg[1]);
-    if (idx < 0) return undefined;
+    const m = db.materials[idx];
+    if (!m) return { error: "not_found" };
+    // 与真实路由同口径：必须先恢复为书签，不能无动作却返回 ok。
+    if (materialRow(m, false)?.materialized === 1) return { error: "restore_first" };
     db.materials.splice(idx, 1);
+    return { ok: true };
+  }
+  // D91：恢复只改变书签可见性，资料保留；用户直接操作不改批次版本的撤销状态。
+  if (method === "POST" && seg[0] === "materials" && seg.length === 3 && seg[2] === "restore") {
+    const m = db.materials.find((x) => x.id === seg[1]);
+    if (!m) return { error: "not_found" };
+    const b = db.bookmarks.find((x) => x.id === m.bookmark_id) as DemoBookmark | undefined;
+    if (!b || (b.is_private === 1 && !privateVisibleIn(ctx))) return { error: "not_found" };
+    if (materialRow(m, false)?.materialized !== 1) return { error: "already_bookmark" };
+    b.materialized = false;
+    m.materialized = 0;
     return { ok: true };
   }
 
   // ---------- GET ----------
   if (method === "GET" && path === "/stats") {
     const s: Stats = {
-      total: db.bookmarks.length,
+      total: db.bookmarks.filter((b) => !(b as DemoBookmark).materialized).length,
       dead: db.bookmarks.filter((b) => b.status === "dead").length,
       suspect: db.bookmarks.filter((b) => b.status === "suspect").length,
       folders: db.folders.filter((f) => f.is_system_inbox !== 1).length,
@@ -728,6 +771,8 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
     const limit = Number(ctx.query.get("limit") ?? 100);
     const offset = Number(ctx.query.get("offset") ?? 0);
     let list = db.bookmarks;
+    // D91：转资料条目从书签面排除（资料页可恢复）
+    list = list.filter((b) => !(b as DemoBookmark).materialized);
     // D43 边界与服务端一致：默认过滤私密，X-MF-Private 为已鉴权管理面的显式显示开关
     if (!privateVisibleIn(ctx)) list = list.filter((b) => b.is_private !== 1);
     if (folderId) {
@@ -751,12 +796,17 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
     return {
       results: db.bookmarks.filter(
         (b) =>
+          !(b as DemoBookmark).materialized &&
           (privateVisibleIn(ctx) || b.is_private !== 1) &&
           (b.title.toLowerCase().includes(q) || b.url_canonical.toLowerCase().includes(q)),
       ),
     };
   }
-  if (method === "GET" && path === "/organize/versions") return { versions: db.versions };
+  if (method === "GET" && path === "/organize/versions") {
+    const limit = Math.min(200, Math.max(1, Math.trunc(Number(ctx.query.get("limit")) || 50)));
+    const offset = Math.max(0, Math.trunc(Number(ctx.query.get("offset")) || 0));
+    return { versions: db.versions.slice(offset, offset + limit), total: db.versions.length };
+  }
   if (method === "GET" && seg[0] === "maintenance" && seg[1] === "report" && seg[2] === "latest") {
     return ctx.query.get("type") === "duplicate_scan" ? db.lastDup : db.lastLink;
   }
@@ -972,9 +1022,22 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
       }));
     // D54：mock 收纳盒视图也要能演示「最近自动归位」区（去向目录名 + 理由 + 版本可撤销）
     const folderNameOf = (fid: string) => db.folders.find((x) => x.id === fid)?.name ?? "未整理";
-    const placed = db.bookmarks
-      .filter((b) => b.folder_id !== "f-inbox" && !b.archived_into)
-      .slice(0, 5)
+    // D91：转资料条目排首位，去向显示「资料库」
+    const converted = db.bookmarks
+      .filter((b) => (b as DemoBookmark).materialized)
+      .map((b) => ({
+        bookmark_id: b.id,
+        title: b.title,
+        url_canonical: b.url_canonical,
+        reason: null,
+        updated_at: b.added_at,
+        version_id: null,
+        folder_name: null,
+        materialized: 1,
+        convert_version_id: "ver-d91-convert",
+      }));
+    const normal = db.bookmarks
+      .filter((b) => b.folder_id !== "f-inbox" && !b.archived_into && !(b as DemoBookmark).materialized)
       .map((b, i) => ({
         bookmark_id: b.id,
         title: b.title,
@@ -984,7 +1047,15 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
         version_id: `v-demo-${i}`,
         folder_name: folderNameOf(b.folder_id),
       }));
-    return { items, placed, ambiguousCount: items.filter((x) => x.state === "ambiguous").length };
+    const placed = [...converted, ...normal];
+    const placedLimit = Math.min(200, Math.max(1, Math.trunc(Number(ctx.query.get("placedLimit")) || 10)));
+    const placedOffset = Math.max(0, Math.trunc(Number(ctx.query.get("placedOffset")) || 0));
+    return {
+      items,
+      placed: placed.slice(placedOffset, placedOffset + placedLimit),
+      placedTotal: placed.length,
+      ambiguousCount: items.filter((x) => x.state === "ambiguous").length,
+    };
   }
   if (method === "POST" && path === "/inbox/assign") {
     const { bookmarkId, folderId } = (ctx.body ?? {}) as { bookmarkId?: string; folderId?: string };
@@ -1213,6 +1284,16 @@ export function mockRequest(method: string, rawPath: string, ctx: MockCtx): unkn
       const b = db.bookmarks.find((x) => x.id === id);
       if (b && b.is_private === 1) {
         b.is_private = 0;
+      }
+    }
+    // D91：转资料批次的撤销 = 恢复书签（资料保留）
+    for (const id of v.convertIds ?? []) {
+      const b = db.bookmarks.find((x) => x.id === id) as DemoBookmark | undefined;
+      const m = db.materials.find((x) => x.bookmark_id === id);
+      if (b?.materialized) {
+        b.materialized = false;
+        if (m) m.materialized = 0;
+        n++;
       }
     }
     for (const mv of v.moves ?? []) {

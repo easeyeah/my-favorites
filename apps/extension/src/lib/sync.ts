@@ -125,7 +125,14 @@ interface RetryEntry { item: PullItem; attempts: number; lastError: string; crea
 /** 库侧挂起删除（库 → 浏览器方向的删除事件） */
 interface PendingDeletes { bookmarks: Array<{ id: string; url: string }>; folders: Array<{ id: string; name: string }>; at: number }
 
-interface LibBookmark { id: string; folder_id: string; title: string; url_raw: string; content_revision?: number }
+interface LibBookmark {
+  id: string;
+  folder_id: string;
+  title: string;
+  url_raw: string;
+  content_revision?: number;
+  materialized_at?: string | null;
+}
 interface SyncSnapshot {
   folders: LibFolderRow[];
   bookmarks: LibBookmark[];
@@ -594,11 +601,59 @@ interface PullCtx extends PlaceCtx {
   revisions: Record<string, number>;
   /** 拉取前浏览器侧已有未提交修改的实体（app id）：本轮若库侧也改了它 = 真实并发冲突 */
   localEditApps: Set<string>;
+  /** 系统移除浏览器节点时同时剪掉开局存在性基线，不能反向推成用户删除。 */
+  existence: Snapshot;
+  materialIdentities?: Array<{ browser_bookmark_id: string; app_bookmark_id: string }>;
+}
+
+/** D91：转资料只撤下受本设备身份管理的浏览器节点，不按 URL 误删用户的另存副本。
+ *  立即按事件顺序执行（不混入真实删除的批尾队列），恢复 upsert 不会再被旧转换覆盖。 */
+async function retireMaterialBookmark(row: LibBookmark, pc: PullCtx): Promise<void> {
+  const ids = new Set<string>();
+  const mapped = pc.bmMap[row.id];
+  if (mapped) ids.add(mapped);
+  if (!pc.materialIdentities) {
+    const result = await api<{ identities: Array<{ browser_bookmark_id: string; app_bookmark_id: string }> }>(
+      `/browser/identities?deviceId=${encodeURIComponent(pc.deviceId)}`, {},
+    );
+    pc.materialIdentities = result.identities;
+  }
+  for (const identity of pc.materialIdentities) {
+    if (identity.app_bookmark_id === row.id) ids.add(identity.browser_bookmark_id);
+  }
+  for (const bid of ids) {
+    if (pc.protectedLeaves?.has(bid)) throw new Error(`bookmark_pending_local_intent: ${bid}`);
+    const node = (await browser.bookmarks.get(bid).catch((err: unknown) => {
+      if (/can't find bookmark|not found|no bookmark/i.test(String(err))) return [];
+      throw err;
+    }))[0];
+    if (node?.url) {
+      // 等待识别时用户已把节点改成另一个网址：保留该节点，交给出站队列登记新意图。
+      if (node.url !== row.url_raw) continue;
+      await browser.bookmarks.remove(bid);
+      pc.stats.deletedBrowser++;
+    }
+    delete pc.base.leaves[bid];
+    delete pc.existence.leaves[bid];
+    delete pc.walk.snapshot.leaves[bid];
+  }
+  delete pc.bmMap[row.id];
 }
 
 /** 单条 pull 事件应用。失败抛出 → 调用方持久化入重试队列（游标推进的前提是「已应用或已入队」） */
 async function applyPullEvent(it: PullItem, pc: PullCtx): Promise<void> {
   const { folders, fMap, base, walk, bmMap, stats, deleteEvents, folderDeletes, touched } = pc;
+  if (it.entity === "bookmark" && ["materialize", "upsert", "move"].includes(it.op)) {
+    const row = (it.payload ?? {}) as LibBookmark;
+    const knownRevision = pc.revisions[it.entity_id];
+    // 持久重试队列可能晚于恢复事件重放；较旧状态不再覆盖已确认的新修订。
+    if (typeof row.content_revision === "number" && knownRevision !== undefined && row.content_revision < knownRevision) return;
+    if (typeof row.content_revision === "number") pc.revisions[it.entity_id] = row.content_revision;
+    if (it.op === "materialize" || row.materialized_at) {
+      await retireMaterialBookmark({ ...row, id: it.entity_id }, pc);
+      return;
+    }
+  }
   if (it.entity === "bookmark" && it.op === "delete") {
     const url = String((it.payload as { url?: string } | null)?.url ?? "");
     if (pc.localEditApps.delete(it.entity_id)) stats.conflicts++;
@@ -681,6 +736,29 @@ async function applyPullEvent(it: PullItem, pc: PullCtx): Promise<void> {
 async function execBookmarkDeletes(dels: Array<{ id: string; url: string }>, pc: PullCtx): Promise<void> {
   const { bmMap, base, stats } = pc;
   for (const del of dels) {
+    // 删除可能已在保险丝或重试队列中停留很久；库中仍保留的收藏不能按过期事件撤下。
+    // D91 恢复与真正物理删除不同：物理删除是 404，资料转换则必须按当前状态处理。
+    let current: LibBookmark | null = null;
+    try {
+      current = await api<LibBookmark>(`/bookmarks/${encodeURIComponent(del.id)}`, { headers: { "x-mf-private": "1" } });
+    } catch (err) {
+      if (!/HTTP 404\b/.test(String(err))) {
+        await enqueueRetry({ entity: "bookmark", entity_id: del.id, op: "delete", payload: { url: del.url } }, String(err));
+        continue;
+      }
+    }
+    if (current) {
+      try {
+        if (current.materialized_at) await retireMaterialBookmark(current, pc);
+        else await placeBookmark(current, pc);
+        if (typeof current.content_revision === "number") {
+          pc.revisions[del.id] = Math.max(pc.revisions[del.id] ?? 0, current.content_revision);
+        }
+      } catch (err) {
+        await enqueueRetry({ entity: "bookmark", entity_id: del.id, op: "delete", payload: { url: del.url } }, String(err));
+      }
+      continue;
+    }
     let bid = bmMap[del.id];
     let node = bid ? (await browser.bookmarks.get(bid).catch(() => []))[0] : undefined;
     if (!node?.url && del.url) {
@@ -705,6 +783,7 @@ async function execBookmarkDeletes(dels: Array<{ id: string; url: string }>, pc:
     }
     delete bmMap[del.id];
     delete base.leaves[node.id];
+    delete pc.existence.leaves[node.id];
     stats.deletedBrowser++;
   }
 }
@@ -1163,7 +1242,7 @@ async function doTick(confirmDeletes: boolean): Promise<SyncInfo> {
       }
     }
   }
-  const pc: PullCtx = { ...ctx, base, fMap, walk, deleteEvents: [], folderDeletes: [], touched: new Set<string>(), revisions, localEditApps };
+  const pc: PullCtx = { ...ctx, base, fMap, walk, deleteEvents: [], folderDeletes: [], touched: new Set<string>(), revisions, localEditApps, existence: snapshot };
   const { deleteEvents, folderDeletes, touched } = pc;
   let cursor = syncCursor;
   {
@@ -1272,7 +1351,7 @@ async function doTick(confirmDeletes: boolean): Promise<SyncInfo> {
         const i = byBrowser.get(child.id);
         if (!i || !i.app_exists) continue;
         const b = (await api<LibBookmark>(`/bookmarks/${i.app_bookmark_id}`, {}).catch(() => null)) as LibBookmark | null;
-        if (!b || (folders.inboxFolderId && b.folder_id === folders.inboxFolderId)) continue;
+        if (!b || b.materialized_at || (folders.inboxFolderId && b.folder_id === folders.inboxFolderId)) continue;
         try {
           await placeBookmark({ id: b.id, folder_id: b.folder_id, title: b.title, url_raw: b.url_raw }, ctx);
           stats.pulledApplied++;

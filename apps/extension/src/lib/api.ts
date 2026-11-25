@@ -302,6 +302,9 @@ export interface InboxPlacedDto {
   version_id: string | null;
   /** D54：归位目标目录名（回答「它去哪了」） */
   folder_name: string | null;
+  /** D91：1 = 已自动转资料（去向显示「资料库」，撤销走 convert_version_id） */
+  materialized?: number;
+  convert_version_id?: string | null;
 }
 
 export interface VersionDto {
@@ -311,6 +314,7 @@ export interface VersionDto {
   reverted: number;
   created_at: string;
   actionCount: number;
+  label?: string | null;
 }
 /** D27 act + undo：一次调用直接生效；actions 为只读明细（事后呈现，不承担确认职责） */
 export interface OrganizeRunDto {

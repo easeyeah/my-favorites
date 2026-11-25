@@ -1,8 +1,8 @@
 /**
  * D70 收纳盒「书签/资料」自动分流集成测试：
- *  - video：URL 规则即判 → 归位后直接物化（不抓取，视频不下载本体）；
- *  - article：LLM 归位时判定 material=true → 队列补抓正文 → ≥200 字显性化入资料（+摘要/分类涓流）；
- *  - material 判定为 false（工具首页等内容壳）→ 只做书签归位，不入资料库；
+ *  - video：URL 线索异步分流，不先归普通目录，视频不下载本体；
+ *  - article：新收纳盒入口队列补抓/复用授权正文，独立判内容后才物化/转换；
+ *  - 归位模型的 material 布尔不作证据，内容太薄或独立判定非内容则保留书签；
  *  - 隐私：loopback 属内置隐私域 → 收纳盒层 privacy_hold 不归位，crawlOne 层独立拒绝（双保险）。
  * 异步规范（D62）：扫描走串行涓流队列，不阻塞归位响应；失败落 cache.failReason 可观测。
  */
@@ -14,7 +14,8 @@ import { makeEnv, type TestEnv } from "./test-env";
 
 let env: TestEnv;
 
-afterEach(() => {
+afterEach(async () => {
+  await env?.pipeline.scanIdle();
   env?.cleanup();
   env = undefined as unknown as TestEnv;
 });
@@ -92,7 +93,8 @@ describe("D70 收纳盒书签/资料自动分流", () => {
     env = makeEnv(fakeLlm({ material: false }));
     const bmId = await addInboxItem("https://www.bilibili.com/video/BV1xx411c7mD", "测试视频");
     const r = await processInbox(bmId);
-    expect((r as { moved: unknown[] }).moved.length).toBe(1);
+    expect((r as { moved: unknown[] }).moved.length).toBe(0); // 尚未成功，不预报归位
+    expect((r as unknown as { queued: string[] }).queued).toContain(bmId);
     await env.pipeline.scanIdle();
     expect(await materialOf(bmId)).toMatchObject({ type: "video" });
   });
@@ -101,7 +103,8 @@ describe("D70 收纳盒书签/资料自动分流", () => {
     env = makeEnv(null); // 无 LLM：规则归位 + no_llm 早退路径
     const bmId = await addInboxItem("https://www.bilibili.com/video/BV1xx411c7mE", "无LLM视频");
     const r = await processInbox(bmId);
-    expect((r as { moved: unknown[] }).moved.length).toBe(1); // bilibili 内置域名规则归位
+    expect((r as { moved: unknown[] }).moved.length).toBe(0); // D91：直接异步分流，不先建「视频」目录
+    expect((r as unknown as { queued: string[] }).queued).toContain(bmId);
     await env.pipeline.scanIdle();
     expect(await materialOf(bmId)).toMatchObject({ type: "video" });
   });
@@ -142,7 +145,7 @@ describe("D70 收纳盒书签/资料自动分流", () => {
     const r = await processInbox(bmId);
     expect((r as { moved: unknown[] }).moved.length).toBe(1);
     await env.pipeline.scanIdle();
-    expect(fetchCalled).toBe(0); // 未被判定为资料 → 不补抓
+    expect(fetchCalled).toBe(1); // D91：归位的 material=false 只是标题/URL猜测，仍必须读取实际内容
     expect(await materialOf(bmId)).toBeNull();
   });
 

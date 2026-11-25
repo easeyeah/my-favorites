@@ -39,12 +39,20 @@ test.beforeAll(async () => {
     await new Promise((r) => setTimeout(r, 500));
   }
 
+  // D91：此套验证既有资料消费/移出语义，样本显式放普通目录；收纳盒自动转换另有专用端到端用例。
+  const folderRes = await fetch(`${BASE}/api/v1/folders`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "资料消费样本" }),
+  });
+  expect(folderRes.ok).toBe(true);
+  const { id: folderId } = await folderRes.json() as { id: string };
   // 预置三类样本：文章（捕获全文）、视频、图片
   const article = (await (
     await fetch(`${BASE}/api/v1/bookmarks`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url: "https://materials.example/blog/deep-dive", title: "一篇深度文章" }),
+      body: JSON.stringify({ url: "https://materials.example/blog/deep-dive", title: "一篇深度文章", folderId }),
     })
   ).json()) as { id: string };
   await fetch(`${BASE}/api/v1/content/capture`, {
@@ -55,12 +63,12 @@ test.beforeAll(async () => {
   await fetch(`${BASE}/api/v1/bookmarks`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ url: "https://www.bilibili.com/video/BV1e2e3v4", title: "一个测试视频" }),
+    body: JSON.stringify({ url: "https://www.bilibili.com/video/BV1e2e3v4", title: "一个测试视频", folderId }),
   });
   await fetch(`${BASE}/api/v1/bookmarks`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ url: "https://cdn.example.com/pic/shot.png", title: "一张直链图片" }),
+    body: JSON.stringify({ url: "https://cdn.example.com/pic/shot.png", title: "一张直链图片", folderId }),
   });
   browser = await chromium.launch({ headless: true });
 }, 60_000);

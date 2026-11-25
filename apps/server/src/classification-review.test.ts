@@ -65,6 +65,9 @@ async function setupPlaced(organizeCategory: string, llmOpts: Parameters<typeof 
     await post("/api/v1/bookmarks", { url: "https://remoteapp.example.com/app", title: "RemoteGo 远程桌面客户端", folderId: inbox.id })
   ).json()) as { id: string };
   await post("/api/v1/inbox/process", { bookmarkIds: [bm.id] });
+  await env.pipeline.scanIdle();
+  // D77 独立验证归位复核：模拟 D91 内容识别已完成且该客户端页面不是资料。
+  env.store.setMaterialCandidateState(bm.id, "done", "not_content_page");
   const st = env.store.getInboxState(bm.id);
   expect(st?.state).toBe("placed");
   expect(st?.reason).toBe(organizeCategory);

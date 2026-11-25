@@ -10,7 +10,7 @@
  * - SensitiveButton / SensitiveSection：敏感内容旁路（D43）——入口挂目录树底部重分类下方，
  *   点了就跑：命中项标私密 + 移入「私人收藏」，不再外发；版本历史可整批撤销。
  */
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   CheckCircle2,
   Copy,
@@ -26,7 +26,7 @@ import {
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
-import { Btn, EmptyState, SiteIcon, hostOf, tidyNotify, timeAgo, toast } from '@/components/shared'
+import { Btn, EmptyState, NumberedPagination, SiteIcon, hostOf, tidyNotify, timeAgo, toast } from '@/components/shared'
 import { useShell } from '@/components/layout'
 import { useServerChanges } from '@/lib/events'
 import {
@@ -463,7 +463,9 @@ export function ReorgSection({
         tidyNotify.ok(`已重分类 ${r.applied} 项——明细在下方`)
         onApplied()
       } else {
-        tidyNotify.ok('库结构已经很好，无需调整 ✅')
+        // D92：未产生调整 ≠「结构很好」——以服务端按真实结果生成的说明为准（规则未命中 / 模型故障 / 范围外）。
+        // 用 toast 而非 tidyNotify：这类说明属于「需要知道」，不受静默成功提示偏好影响
+        toast.info(r.answer || '本次没有产生调整')
       }
       refreshBadges()
       window.dispatchEvent(new Event('mf:versions-changed'))
@@ -480,7 +482,9 @@ export function ReorgSection({
     setUndoing(true)
     try {
       const r = await apiCall<{ reversed: number }>(cfg, `/organize/rollback/${result.versionId}`, { method: 'POST' })
-      tidyNotify.ok(`已撤销 ${r.reversed} 项——书签全部回到原目录`)
+      // D92：reversed 是真实回执——整理后被手动改过的条目会保留，不能一律说「全部回到原目录」
+      if (r.reversed > 0) tidyNotify.ok(`已撤销 ${r.reversed} 项（整理后被你改过的条目保留）`)
+      else toast.info('条目已有其他改动，本次没有覆盖')
       setResult(null)
       onApplied()
       refreshBadges()
@@ -765,23 +769,57 @@ export function HistorySection({ onClose, onApplied }: { onClose: () => void; on
   const { cfg, refreshBadges } = useShell()
   const [versions, setVersions] = useState<VersionRow[]>([])
   const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const [error, setError] = useState('')
+  const request = useRef<AbortController | null>(null)
+  const rollingBack = useRef(false)
+  const pageSize = 10
 
   const load = useCallback(() => {
-    fetchers.versions(cfg).then((r) => setVersions(r.versions)).catch(() => setVersions([]))
-  }, [cfg])
+    request.current?.abort()
+    const controller = new AbortController()
+    request.current = controller
+    setLoading(true)
+    void apiCall<{ versions: VersionRow[]; total: number }>(
+      cfg, `/organize/versions?limit=${pageSize}&offset=${(page - 1) * pageSize}`, { signal: controller.signal },
+    ).then(r => {
+      if (controller.signal.aborted) return
+      setTotal(r.total)
+      const last = Math.max(1, Math.ceil(r.total / pageSize))
+      if (page > last) setPage(last)
+      else setVersions(r.versions)
+      setError('')
+    }).catch(e => {
+      if (!controller.signal.aborted) setError(`版本记录暂时未更新：${e instanceof Error ? e.message : String(e)}`)
+    }).finally(() => {
+      if (request.current === controller) setLoading(false)
+    })
+  }, [cfg, page])
 
   useEffect(() => {
     load()
     const h = () => load()
     window.addEventListener('mf:versions-changed', h)
-    return () => window.removeEventListener('mf:versions-changed', h)
+    return () => {
+      request.current?.abort()
+      window.removeEventListener('mf:versions-changed', h)
+    }
   }, [load])
+  useServerChanges(load)
 
   async function rollback(v: VersionRow) {
+    if (rollingBack.current) return
+    rollingBack.current = true
     setBusy(true)
     try {
-      const r = await apiCall<{ reversed: number }>(cfg, `/organize/rollback/${v.id}`, { method: 'POST' })
-      tidyNotify.ok(`已撤销 ${r.reversed} 项（生成新版本，历史永不删除）`)
+      const r = await apiCall<{ reversed: number; pending?: boolean }>(cfg, `/organize/rollback/${v.id}`, { method: 'POST' })
+      if (r.pending) {
+        // D92：任务仍在进行——已请求停止，撤销会在在途提交排空后执行（可在整理记录里查看）
+        toast.info('已请求停止这次整理并撤销，稍后会在这里更新')
+      } else if (r.reversed > 0) tidyNotify.ok(`已撤销 ${r.reversed} 项（生成新版本，历史永不删除）`)
+      else toast.info('条目已有其他改动，本次没有覆盖')
       load()
       onApplied()
       refreshBadges()
@@ -789,6 +827,7 @@ export function HistorySection({ onClose, onApplied }: { onClose: () => void; on
     } catch (e) {
       toast.err(`撤销失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
+      rollingBack.current = false
       setBusy(false)
     }
   }
@@ -811,25 +850,35 @@ export function HistorySection({ onClose, onApplied }: { onClose: () => void; on
         </button>
       </div>
 
+      {error && <p className="text-muted-foreground mt-3 text-xs" role="status">{error}</p>}
       {versions.length === 0 ? (
         <p className="text-muted-foreground mt-6 text-sm">
-          还没有整理记录——跑一次全库重分类或合并重复，这里就会出现记录。
+          {loading ? '正在读取版本记录…' : error ? '记录读取失败，请稍后重试。' : '还没有整理记录——自动归位或整理后，这里就会出现记录。'}
         </p>
       ) : (
-        <div className="relative mt-5 space-y-3 pl-4">
-          <div className="bg-border absolute top-1 bottom-1 left-[5px] w-px" />
+        <div className="relative mt-5 pl-4" aria-busy={loading}>
+          <div className="bg-border absolute top-1 bottom-1 left-[5px] w-px" aria-hidden="true" />
+          <ol className="flex flex-col gap-3">
           {versions.map((v, i) => (
-            <div key={v.id} className="relative">
+            <li key={v.id} className="relative">
               <span
+                aria-hidden="true"
                 className={cn(
                   'border-card absolute top-2 -left-4 size-2.5 rounded-full border-2',
-                  v.reverted > 0 ? 'bg-zinc-300 dark:bg-zinc-600' : i === 0 ? 'bg-primary' : 'bg-primary/40',
+                  v.reverted > 0 ? 'bg-muted-foreground/40' : i === 0 && page === 1 ? 'bg-primary' : 'bg-primary/40',
                 )}
               />
-              <div className={cn('rounded-xl px-2 py-1.5', i === 0 && v.reverted === 0 && 'bg-primary/5')}>
+              <div className={cn('data-row rounded-xl px-2 py-1.5', i === 0 && page === 1 && v.reverted === 0 && 'bg-primary/5')}>
                 <p className="flex items-center gap-1.5 text-[13px] font-semibold">
-                  <span className="min-w-0 flex-1 truncate">{v.kind || '整理'}</span>
-                  {i === 0 && v.reverted === 0 && <Badge className="px-1.5 py-0">最新</Badge>}
+                  <span className="min-w-0 flex-1 truncate">
+                    {v.label === 'material_convert'
+                      ? v.kind === 'undo' ? '重新收入资料库' : '自动收入资料库'
+                      : v.label === 'organize_task'
+                        // D92：目录整理任务的批次（整次撤销在「整理记录」里，这里也可单批撤销）
+                        ? v.kind === 'undo' ? '撤销目录整理' : '目录整理' + (v.task_batch ? ` · 第 ${v.task_batch} 批` : '')
+                      : v.kind === 'undo' ? '撤销操作' : v.kind === 'apply' ? '自动整理' : v.kind || '整理'}
+                  </span>
+                  {i === 0 && page === 1 && v.reverted === 0 && <Badge className="px-1.5 py-0">最新</Badge>}
                 </p>
                 <p className="text-muted-foreground mt-0.5 text-xs">
                   {v.actionCount} 项 · {timeAgo(v.created_at)}
@@ -837,19 +886,22 @@ export function HistorySection({ onClose, onApplied }: { onClose: () => void; on
                 </p>
                 {v.reverted === 0 && (
                   <Btn
+                    size="xs"
                     className="mt-1.5"
-                    disabled={busy}
+                    disabled={busy || loading}
                     onClick={() => void rollback(v)}
-                    title="逆放这次整理的变更（生成新版本）"
+                    title="逆放这次变更（生成新版本，保留后续手动改动）"
                   >
-                    {busy ? <Loader2 className="animate-spin" /> : <RotateCcw />} 撤销这次整理
+                    {busy ? <Loader2 className="animate-spin" /> : <RotateCcw />} 撤销这次处理
                   </Btn>
                 )}
               </div>
-            </div>
+            </li>
           ))}
+          </ol>
         </div>
       )}
+      <NumberedPagination page={page} total={total} pageSize={pageSize} onPageChange={setPage} disabled={loading || busy} label="版本历史分页" />
     </div>
   )
 }

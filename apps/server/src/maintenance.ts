@@ -275,8 +275,9 @@ export function startRetentionPrune(store: Store, registry?: Registry): void {
         try {
           const r = store.pruneRetention();
           const receipts = store.pruneOpReceipts(); // D81：opId 回执 7 天裁剪
-          const total = r.changes + r.events + r.idempotency + r.audit + receipts;
-          if (total > 0) console.log(`[retention] pruned ${total} rows (${JSON.stringify({ ...r, receipts })})`);
+          const tasks = store.pruneOrganizeTasks(); // D92：整理任务明细 30 天 / 最近 20 次（版本事实不裁剪）
+          const total = r.changes + r.events + r.idempotency + r.audit + receipts + tasks;
+          if (total > 0) console.log(`[retention] pruned ${total} rows (${JSON.stringify({ ...r, receipts, tasks })})`);
         } catch (err) {
           console.error("[retention] prune failed:", String(err));
         }
@@ -367,6 +368,26 @@ export function startClassificationReview(
   };
   kick();
   setInterval(kick, 1800_000);
+}
+
+/** D91：持久新入口候选补扫（启动+每分钟，不回溯历史；单个任务失败不阻塞其他用户）。 */
+export function startMaterialConversionSweep(
+  pipeline: { resumeMaterialCandidates(limit?: number): number },
+  registry?: Registry,
+): void {
+  const kick = (): void => {
+    for (const uid of registry ? registry.listUserIds() : ["self"]) {
+      runAsUser(uid, () => {
+        try {
+          pipeline.resumeMaterialCandidates(10);
+        } catch (err) {
+          console.error("[material-convert] sweep failed:", String(err).slice(0, 160));
+        }
+      });
+    }
+  };
+  kick();
+  setInterval(kick, 60_000);
 }
 
 /** 进程内调度器（自建端 compose 通过 env 启用；默认关闭便于测试） */

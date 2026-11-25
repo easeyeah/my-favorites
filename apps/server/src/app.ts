@@ -24,6 +24,7 @@ import { Store, type BookmarkRow } from "./store";
 import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
 import { enqueueBrowserReorder, enqueueMirrorMoves } from "./organize";
+import { OrganizeTaskService, OrganizeTaskError } from "./organize-task";
 import { applySyncMutations } from "./sync-apply";
 import { ChangeHub } from "./events";
 import { analyzeSiteProjection, type SiteProjection } from "./site-analysis";
@@ -72,6 +73,8 @@ export interface AppDeps {
   dataDir: string;
   pipeline: Pipeline;
   organize: OrganizeService;
+  /** D92：目录整理任务运行器（持久任务、分批提交、整次撤销） */
+  organizeTasks: OrganizeTaskService;
   semantic: SemanticService;
   maintenance: MaintenanceService;
   adminPassword?: string;
@@ -88,7 +91,7 @@ export { hashPassword, verifyPasswordHash } from "./password";
 import { hashPassword, verifyPasswordHash } from "./password";
 
 export function buildApp(deps: AppDeps): Hono {
-  const { store, llmFor, pipeline, organize, dataDir, semantic, maintenance, adminPassword } = deps;
+  const { store, llmFor, pipeline, organize, organizeTasks, dataDir, semantic, maintenance, adminPassword } = deps;
   // D68 统一部署：登录=用户名+密码（注册开放，MF_REGISTER_OPEN 可关）；
   // 多用户隔离=每用户独立 SQLite 文件（owner 'self' 恒主库）；DEPLOY_MODE 分叉退役。
   const registry = deps.registry ?? new Registry(store.db);
@@ -112,6 +115,12 @@ export function buildApp(deps: AppDeps): Hono {
   // D50：变更广播（Store 钩子 → SSE 订阅者）
   const hub = new ChangeHub();
   store.onRecorded = (ch) => hub.publish(ch);
+  // D92：整理任务状态门铃——书签变更门铃不是任务进度（模型等待/失败/零动作/停止都没有书签变更），
+  // 单独一类事件只带 taskId，数据真相仍走 REST 任务快照。回调运行在任务所属用户的上下文内。
+  organizeTasks.onChange = (taskId) =>
+    hub.publish({ entity: "organize_task", entity_id: taskId, op: "change", device: null, user: currentUserId() });
+  organizeTasks.onApplied = (task) =>
+    dispatchWebhooks(store, "bookmark.organized", { applied: task.moved + task.converted });
 
   const api = new Hono().basePath("/api/v1");
   // A1-3 日志脱敏：hono 默认 logger 会输出完整 path+query（含 /by-url?url= 的完整隐私 URL）。
@@ -482,7 +491,7 @@ export function buildApp(deps: AppDeps): Hono {
 
   api.get("/bookmarks/:id", (c) => {
     const bm = store.getBookmark(c.req.param("id"));
-    if (!bm) return c.json({ error: "not_found" }, 404);
+    if (!bm || bm.materialized_at) return c.json({ error: "not_found" }, 404);
     if (bm.is_private && !privateVisible(c)) {
       return c.json({ error: "private_bookmark" }, 403);
     }
@@ -503,17 +512,14 @@ export function buildApp(deps: AppDeps): Hono {
     if (!canon) return c.json({ error: "invalid_url" }, 400);
     const existing = store.findByCanonical(canon.canonical);
     if (existing) {
-      return c.json({ ...existing, duplicate: true }, 200);
+      // D91：命中已转资料的隐藏行 → 告诉收藏方「已在资料库」，不复活书签
+      return c.json({ ...existing, duplicate: true, materialized: Boolean(existing.materialized_at) }, 200);
     }
     const suggest = pipeline.suggest(body.url, body.title ?? body.url);
     const folderIdForced =
       body.folderId && store.getFolder(body.folderId) ? body.folderId : undefined;
-    const folderId =
-      folderIdForced ??
-      suggest.folderId ??
-      (suggest.folderPath.length > 0 ? store.ensurePath(suggest.folderPath).id : undefined) ??
-      store.inboxFolder()?.id ??
-      store.ensurePath(["未整理"]).id;
+    const folderId = folderIdForced ??
+      (store.inboxFolder() ?? store.createFolder(INBOX_FOLDER_TITLE, null, "user", true)).id;
     const bm = store.createBookmark({
       folderId,
       urlRaw: body.url,
@@ -530,8 +536,10 @@ export function buildApp(deps: AppDeps): Hono {
       bookmark: { title: bm.title, folder: store.getFolder(folderId)?.name ?? null },
     });
     // D61 资料库：视频/图片凭 URL 形态即时入库（文章等捕获到全文后再显性化）
-    if (pipeline.syncMode) await pipeline.materialize(bm.id);
-    else void pipeline.materialize(bm.id);
+    if (!store.getMaterialCandidate(bm.id)) {
+      if (pipeline.syncMode) await pipeline.materialize(bm.id);
+      else void pipeline.materialize(bm.id);
+    }
     return c.json({ ...bm, suggest }, 201);
   });
 
@@ -550,6 +558,7 @@ export function buildApp(deps: AppDeps): Hono {
     const id = c.req.param("id");
     const bm = store.getBookmark(id);
     if (!bm) return c.json({ error: "not_found" }, 404);
+    if (bm.materialized_at && body.folderId !== undefined) return c.json({ error: "restore_first" }, 409);
     const fields: Parameters<Store["updateBookmark"]>[1] = {
       ...(body.title !== undefined ? { title: body.title } : {}),
       ...(body.folderId !== undefined ? { folder_id: body.folderId } : {}),
@@ -593,7 +602,7 @@ export function buildApp(deps: AppDeps): Hono {
     // 防止与归位流水线竞态窗口误删已归位条目（归位后删除走普通双向同步）
     if (c.req.query("ifInbox") === "1") {
       const inbox = store.inboxFolder();
-      if (!inbox || bm.folder_id !== inbox.id) return c.json({ error: "not_in_inbox" }, 409);
+      if (bm.materialized_at || !inbox || bm.folder_id !== inbox.id) return c.json({ error: "not_in_inbox" }, 409);
     }
     const deleted = store.deleteBookmark(c.req.param("id"));
     if (!deleted) return c.json({ error: "not_found" }, 404);
@@ -619,7 +628,9 @@ export function buildApp(deps: AppDeps): Hono {
   // privacy_hold 隐私、retry 失败重试）+ 最近已归位（撤销入口带版本）
   api.get("/inbox/items", (c) => {
     const items = store.listInboxWithState();
-    const placed = store.listInboxRecentPlaced(5);
+    const placedLimit = Math.min(200, Math.max(1, Math.trunc(Number(c.req.query("placedLimit")) || 10)));
+    const placedOffset = Math.min(1_000_000_000, Math.max(0, Math.trunc(Number(c.req.query("placedOffset")) || 0)));
+    const placed = store.listInboxRecentPlaced(placedLimit, placedOffset);
     const domainRules = store.getDomainPlaceRules();
     const withSuggest = items.map((it) => {
       const parsed = canonicalizeUrl(it.url_canonical);
@@ -630,7 +641,7 @@ export function buildApp(deps: AppDeps): Hono {
         domainRuleFolderId: domainRules[parsed?.registrableDomain ?? ""] ?? null,
       };
     });
-    return c.json({ items: withSuggest, placed, ambiguousCount: items.filter((i) => i.state === "ambiguous").length });
+    return c.json({ items: withSuggest, placed, placedTotal: store.countInboxRecentPlaced(), ambiguousCount: items.filter((i) => i.state === "ambiguous").length });
   });
 
   // 手动选目录 / 改目录（D37：隐私条目「按域名记忆」本地规则可自动归位，不走 AI）
@@ -642,6 +653,7 @@ export function buildApp(deps: AppDeps): Hono {
     const bm = store.getBookmark(body.bookmarkId);
     const folder = store.getFolder(body.folderId);
     if (!bm || !folder) return c.json({ error: "not_found" }, 404);
+    if (bm.materialized_at) return c.json({ error: "restore_first" }, 409);
     store.moveBookmark(bm.id, folder.id);
     store.clearInboxState(bm.id);
     if (body.deviceId) enqueueMirrorMoves(store, bm.id, folder.id, body.deviceId);
@@ -657,7 +669,7 @@ export function buildApp(deps: AppDeps): Hono {
     const body = (await c.req.json().catch(() => ({}))) as { bookmarkId?: string; deviceId?: string };
     if (!body.bookmarkId) return c.json({ error: "bookmarkId_required" }, 400);
     const bm = store.getBookmark(body.bookmarkId);
-    if (!bm) return c.json({ error: "not_found" }, 404);
+    if (!bm || bm.materialized_at) return c.json({ error: "not_found" }, 404);
     store.upsertInboxState(bm.id, "pending", null, null, 0);
     const inbox = store.inboxFolder();
     if (!inbox || bm.folder_id !== inbox.id) return c.json({ error: "not_in_inbox" }, 400);
@@ -728,6 +740,8 @@ export function buildApp(deps: AppDeps): Hono {
       browserBookmarkId: body.browserBookmarkId,
       appBookmarkId: bm.id,
     });
+    // 隐藏资料只绑定入口身份，不能被迟到/重复的投递事件复活为书签。
+    if (bm.materialized_at) return c.json({ bookmarkId: bm.id, mapped: true, duplicate: true, materialized: true });
     // D78：已归位条目被再次丢入投递口 = 用户「重新分类」意图 → 库条目移回收纳盒重走流水线。
     // 旧实现（D72）反向补「移出」镜像，把用户刚丢入的节点弹回原目录——投递口不收已归位条目，
     // 浏览器与管理台再次分叉。D72 滞留场景（镜像让位致节点 stuck 在盒内）由同步引擎
@@ -735,8 +749,9 @@ export function buildApp(deps: AppDeps): Hono {
     if (bm.folder_id !== inbox.id) {
       store.moveBookmark(bm.id, inbox.id);
       store.upsertInboxState(bm.id, "pending", null, null, 0);
+      store.registerMaterialCandidate(bm.id, true);
     }
-    return c.json({ bookmarkId: bm.id, mapped: true, duplicate: byCanonical !== undefined });
+    return c.json({ bookmarkId: bm.id, mapped: true, duplicate: byCanonical != null });
   });
 
   /**
@@ -883,7 +898,7 @@ export function buildApp(deps: AppDeps): Hono {
   api.post("/crawl/run", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { ids?: string[] };
     const targets = body.ids?.length
-      ? body.ids.map((id) => store.getBookmark(id)).filter((b) => b !== undefined)
+      ? body.ids.map((id) => store.getBookmark(id)).filter((b) => b !== undefined && !b.materialized_at)
       : store.bookmarksMissingContent(10);
     const results: Array<{ id: string; ok: boolean; reason?: string }> = [];
     for (const bm of targets) {
@@ -899,19 +914,18 @@ export function buildApp(deps: AppDeps): Hono {
 
   // ---------- D61 资料库（收藏内容三级识别的实体面：文章已存全文显性化/视频元数据/图片主图） ----------
   api.get("/materials", (c) => {
-    return c.json({
-      items: store.listMaterials({
-        type: c.req.query("type") || undefined,
-        q: c.req.query("q") || undefined,
-        tag: c.req.query("tag") || undefined,
-        category: c.req.query("category") || undefined,
-        uncategorized: c.req.query("uncategorized") === "1",
-        limit: c.req.query("limit") ? Math.min(Number(c.req.query("limit")), 200) : undefined,
-        offset: c.req.query("offset") ? Math.max(Number(c.req.query("offset")), 0) : undefined,
-        includePrivate: privateVisible(c),
-      }),
-      counts: store.countMaterials(),
-    });
+    const filter = {
+      type: c.req.query("type") || undefined,
+      q: c.req.query("q") || undefined,
+      tag: c.req.query("tag") || undefined,
+      category: c.req.query("category") || undefined,
+      uncategorized: c.req.query("uncategorized") === "1",
+      folderId: c.req.query("folderId") || undefined,
+      limit: Math.min(200, Math.max(1, Math.trunc(Number(c.req.query("limit")) || 10))),
+      offset: Math.min(1_000_000_000, Math.max(0, Math.trunc(Number(c.req.query("offset")) || 0))),
+      includePrivate: privateVisible(c),
+    };
+    return c.json({ items: store.listMaterials(filter), counts: store.countMaterials(), total: store.countFilteredMaterials(filter) });
   });
 
   // 分面统计（左侧双维度面板：分类树计数 + AI 标签频次榜）——先于 /materials/:id 注册避免被截胡
@@ -991,6 +1005,11 @@ export function buildApp(deps: AppDeps): Hono {
   // 移出资料库：软删（书签本体不动；防 capture/crawl 复活），封面文件即时清理
   api.delete("/materials/:id", (c) => {
     const id = c.req.param("id");
+    // D91：书签已转资料（隐藏）时禁止直接 dismiss——否则收藏隐形消失；先恢复为书签
+    const existing = store.getMaterial(id);
+    if (existing && existing.materialized) {
+      return c.json({ error: "restore_first" }, 409);
+    }
     const ref = store.getMaterialCoverPath(id);
     const ok = store.dismissMaterial(id);
     if (!ok) return c.json({ error: "not_found" }, 404);
@@ -998,13 +1017,51 @@ export function buildApp(deps: AppDeps): Hono {
     return c.json({ ok: true });
   });
 
+  // D91 恢复为书签：转资料条目回到书签体系（资料保留 = 双份并存，与主动收藏一致），
+  // upsert change 驱动扩展 placeBookmark 重建浏览器收藏夹节点。用户直接操作不写版本。
+  api.post("/materials/:id/restore", (c) => {
+    const m = store.getMaterial(c.req.param("id"));
+    if (!m) return c.json({ error: "not_found" }, 404);
+    if (m.is_private === 1 && !privateVisible(c)) return c.json({ error: "not_found" }, 404);
+    const bookmarkId = String(m.bookmark_id);
+    const bm = store.getBookmark(bookmarkId);
+    if (!bm) return c.json({ error: "not_found" }, 404);
+    if (!bm.materialized_at) return c.json({ error: "already_bookmark" }, 409);
+    const db = store.db;
+    db.exec("BEGIN");
+    try {
+      const restored = store.restoreMaterialBookmark(bookmarkId);
+      if (!restored) {
+        db.exec("ROLLBACK");
+        return c.json({ error: "already_bookmark" }, 409);
+      }
+      store.setInboxConvertVersion(bookmarkId, null);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+    return c.json({ ok: true });
+  });
+
   // ---------- D64 MCP 端点：资料库的 AI 一等消费面（鉴权随 /api/v1 中间件） ----------
   api.post("/mcp", (c) => handleMcpRequest(store, c));
 
   // ---------- F3 整理（D27 act + undo：一次调用直接生效，安全网 = 版本撤销） ----------
+  // D92 账号级准入：旧同步整理入口与目录整理任务共用同一执行槽——已有进行中的任务/撤销时明确拒绝，
+  // 不能因为保留旧响应形态而绕过互斥（两套写者同时搬同一批书签会互相覆盖基线）。
+  const organizeBusy = (c: Context): Response | null => {
+    const active = store.activeOrganizeTask();
+    return active
+      ? c.json({ error: "organize_task_active", taskId: active.id, hint: "已有进行中的目录整理，等它结束或先停止后再试" }, 409)
+      : null;
+  };
+
   api.post("/organize/sessions", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { message?: string };
     if (!body.message) return c.json({ error: "message_required" }, 400);
+    const busy = organizeBusy(c);
+    if (busy) return busy;
     try {
       const result = await organize.handleMessage(body.message);
       // F3.8 偏好记忆：只统计实际生效（applied 的 move）；冲突/跳过不计入偏好
@@ -1032,6 +1089,8 @@ export function buildApp(deps: AppDeps): Hono {
       includeSubfolders?: boolean;
     };
     if (!body.folderId) return c.json({ error: "folderId_required" }, 400);
+    const busy = organizeBusy(c);
+    if (busy) return busy;
     try {
       const result = await organize.reclassifyFolder(body.folderId, {
         includeSubfolders: body.includeSubfolders !== false,
@@ -1055,13 +1114,156 @@ export function buildApp(deps: AppDeps): Hono {
   });
 
   // DEV-08/14：历史版本列表（通知卡 / 只读明细 / 版本时间线三处撤销入口的兜底一环）
-  api.get("/organize/versions", (c) => c.json({ versions: store.listVersions() }));
+  api.get("/organize/versions", (c) => {
+    const limit = Math.min(200, Math.max(1, Math.trunc(Number(c.req.query("limit")) || 50)));
+    const offset = Math.min(1_000_000_000, Math.max(0, Math.trunc(Number(c.req.query("offset")) || 0)));
+    return c.json({ versions: store.listVersions(limit, offset), total: store.countVersions() });
+  });
 
-  api.post("/organize/rollback/:versionId", (c) => {
+  api.post("/organize/rollback/:versionId", async (c) => {
+    const versionId = c.req.param("versionId");
     try {
-      return c.json(organize.rollback(c.req.param("versionId")));
+      const version = store.getVersion(versionId);
+      if (!version) return c.json({ error: "version_not_found" }, 400);
+      // D92：目录整理任务的关联版本走任务协调器——先停止并锁定旧任务再逆放，不能绕过任务锁直接回滚
+      if (version.task_id) {
+        const task = store.getOrganizeTask(version.task_id);
+        if (!task) return c.json({ error: "task_not_found" }, 404);
+        if (["queued", "running", "stopping"].includes(task.status)) {
+          organizeTasks.requestUndo(version.task_id, versionId);
+          return c.json({ reversed: 0, skipped: [], undoVersionId: null, pending: true, taskId: task.id });
+        }
+        const before = task.undo_restored;
+        organizeTasks.requestUndo(version.task_id, versionId);
+        await organizeTasks.idle();
+        const after = store.getOrganizeTask(version.task_id)!;
+        return c.json({
+          reversed: after.undo_restored - before,
+          skipped: [],
+          undoVersionId: null,
+          taskId: task.id,
+          undoStatus: after.undo_status,
+        });
+      }
+      return c.json(organize.rollback(versionId));
     } catch (err) {
+      if (err instanceof OrganizeTaskError) return c.json({ error: err.code, hint: err.message }, err.status);
       return c.json({ error: String(err) }, 400);
+    }
+  });
+
+  // ---------- D92 目录整理任务（《书签目录自动整理重设计》§7.2） ----------
+  const taskPaging = (c: Context): { limit: number; offset: number } => ({
+    limit: Math.min(50, Math.max(1, Math.trunc(Number(c.req.query("limit")) || 10))),
+    offset: Math.min(1_000_000_000, Math.max(0, Math.trunc(Number(c.req.query("offset")) || 0))),
+  });
+  const taskFailure = (c: Context, err: unknown): Response => {
+    if (err instanceof OrganizeTaskError) return c.json({ error: err.code, hint: err.message }, err.status);
+    // D62 规范③：失败可观测——非预期异常落日志，不静默成一句 500
+    console.error("[organize-task] route failed:", String(err).slice(0, 240));
+    return c.json({ error: String(err) }, 500);
+  };
+
+  // 创建即持久接受（202）；同幂等键回同一任务，已有活动任务回它而不并行
+  api.post("/organize/tasks", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { folderId?: string; requestId?: string };
+    try {
+      const r = organizeTasks.create(String(body.folderId ?? ""), String(body.requestId ?? ""));
+      return c.json({ task: organizeTasks.view(r.task), created: r.created, existing: r.existing }, r.created ? 202 : 200);
+    } catch (err) {
+      return taskFailure(c, err);
+    }
+  });
+
+  api.get("/organize/tasks", (c) => {
+    const { limit, offset } = taskPaging(c);
+    const active = store.activeOrganizeTask();
+    return c.json({
+      tasks: store.listOrganizeTasks(limit, offset).map((t) => organizeTasks.view(t)),
+      total: store.countOrganizeTasks(),
+      active: active ? { id: active.id } : null,
+    });
+  });
+
+  api.get("/organize/tasks/:id", (c) => {
+    try {
+      return c.json({ task: organizeTasks.view(organizeTasks.get(c.req.param("id"))) });
+    } catch (err) {
+      return taskFailure(c, err);
+    }
+  });
+
+  // 明细分页：受保护条目不落明细也不返回，只以 protectedCount 聚合（分页按可展示数计算）
+  api.get("/organize/tasks/:id/items", (c) => {
+    try {
+      const task = organizeTasks.get(c.req.param("id"));
+      const result = String(c.req.query("result") ?? "");
+      const decisionMap: Record<string, string[]> = {
+        moved: ["moved"], converted: ["converted"], unchanged: ["keep"], skipped: ["skip"], failed: ["fail"],
+        // 运行中的「最近完成」：已落库的归位 + 转资料
+        changed: ["moved", "converted"],
+      };
+      const decisions = decisionMap[result];
+      const { limit, offset } = taskPaging(c);
+      const items = store.listOrganizeTaskItems(task.id, { decisions, limit, offset });
+      return c.json({
+        items: items.map((it) => organizeTasks.itemView(it)),
+        total: store.countOrganizeTaskItems(task.id, decisions),
+        protectedCount: organizeTasks.protectedCount(task, decisions ?? []),
+      });
+    } catch (err) {
+      return taskFailure(c, err);
+    }
+  });
+
+  api.get("/organize/tasks/:id/folders", (c) => {
+    try {
+      const { limit, offset } = taskPaging(c);
+      const rows = organizeTasks.folderChanges(organizeTasks.get(c.req.param("id")));
+      return c.json({ folders: rows.slice(offset, offset + limit), total: rows.length });
+    } catch (err) {
+      return taskFailure(c, err);
+    }
+  });
+
+  api.get("/organize/tasks/:id/material-categories", (c) => {
+    try {
+      const { limit, offset } = taskPaging(c);
+      const rows = organizeTasks.categoryChanges(organizeTasks.get(c.req.param("id")));
+      return c.json({ categories: rows.slice(offset, offset + limit), total: rows.length });
+    } catch (err) {
+      return taskFailure(c, err);
+    }
+  });
+
+  // 停止：持久记录请求；「已停止」由任务状态确认（提交屏障排空后才终态）
+  api.post("/organize/tasks/:id/stop", (c) => {
+    try {
+      const task = organizeTasks.requestStop(c.req.param("id"));
+      return c.json({ task: organizeTasks.view(task) });
+    } catch (err) {
+      return taskFailure(c, err);
+    }
+  });
+
+  api.post("/organize/tasks/:id/continue", async (c) => {
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as { mode?: string };
+      const mode = (body.mode ?? c.req.query("mode")) === "failed" ? "failed" : "remaining";
+      const r = organizeTasks.continueTask(c.req.param("id"), mode);
+      return c.json({ task: organizeTasks.view(r.task), reopened: r.reopened });
+    } catch (err) {
+      return taskFailure(c, err);
+    }
+  });
+
+  // 撤销本次整理：先停止并排空在途提交，再按批次逆序逆放；返回可查询的撤销状态
+  api.post("/organize/tasks/:id/undo", (c) => {
+    try {
+      const r = organizeTasks.requestUndo(c.req.param("id"));
+      return c.json({ task: organizeTasks.view(r.task), pending: r.pending });
+    } catch (err) {
+      return taskFailure(c, err);
     }
   });
 
@@ -1460,14 +1662,27 @@ export function buildApp(deps: AppDeps): Hono {
     const myUser = currentUserId();
     return streamSSE(c, async (stream) => {
       let dirty = false;
+      // D92：整理任务进度门铃（与书签变更分开——模型等待/失败/零动作/停止没有书签变更）
+      const taskDirty = new Set<string>();
       const unsub = hub.subscribe((ev) => {
-        if (!ev.user || ev.user === myUser) dirty = true;
+        if (ev.user && ev.user !== myUser) return;
+        if (ev.entity === "organize_task") {
+          taskDirty.add(ev.entity_id);
+          return;
+        }
+        dirty = true;
       });
       try {
         await stream.writeSSE({ event: "hello", data: "{}" });
         let lastPing = Date.now();
         while (!stream.aborted) {
           await new Promise((r) => setTimeout(r, 1000));
+          if (taskDirty.size > 0) {
+            const taskIds = [...taskDirty];
+            taskDirty.clear();
+            await stream.writeSSE({ event: "task", data: JSON.stringify({ taskIds, at: Date.now() }) });
+            lastPing = Date.now();
+          }
           if (dirty) {
             dirty = false;
             await stream.writeSSE({ event: "change", data: JSON.stringify({ at: Date.now() }) });

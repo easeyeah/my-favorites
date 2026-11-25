@@ -8,6 +8,7 @@ import { Registry } from "./registry";
 import { UserDbManager, currentUserId } from "./tenancy";
 import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
+import { OrganizeTaskService } from "./organize-task";
 import { SemanticService } from "./semantic";
 import { MaintenanceService } from "./maintenance";
 import { buildApp, type AppDeps } from "./app";
@@ -26,6 +27,7 @@ export interface TestEnv extends AppDeps {
   userDbs: UserDbManager;
   pipeline: Pipeline;
   organize: OrganizeService;
+  organizeTasks: OrganizeTaskService;
   semantic: SemanticService;
   maintenance: MaintenanceService;
 }
@@ -52,10 +54,13 @@ export function makeEnv(
     syncAi,
     dataDir, // D61：资料库封面落盘（封面下载走 loopback 放行的 guardConfig）
     guardConfig: { mode: "selfhosted_allowlist", allowedCidrs: ["127.0.0.0/8", "::1/128"] },
-    coverFetcher: opts.coverFetcher,
-    crawlFetcher: opts.crawlFetcher,
+    coverFetcher: opts.coverFetcher ?? (async () => null),
+    // 自动资料识别会覆盖所有新入口：测试默认禁止真实出站，网络场景必须显式注入替身。
+    crawlFetcher: opts.crawlFetcher ?? (async () => ({ ok: false, status: 503,
+      readBody: async () => Buffer.from(""), dispose: () => undefined })),
   });
   const organize = new OrganizeService(store, llmFor);
+  const organizeTasks = new OrganizeTaskService(store, llmFor, pipeline, organize);
   const semantic = new SemanticService(
     store,
     opts.embedClient ?? null,
@@ -72,6 +77,7 @@ export function makeEnv(
     dataDir,
     pipeline,
     organize,
+    organizeTasks,
     semantic,
     maintenance,
     adminPassword: opts.adminPassword,
@@ -87,6 +93,7 @@ export function makeEnv(
     llmFor,
     pipeline,
     organize,
+    organizeTasks,
     semantic,
     maintenance,
     dataDir,

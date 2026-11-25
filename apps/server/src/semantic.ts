@@ -98,11 +98,12 @@ export class SemanticService {
     if (!qv) return this.store.search(query, limit, opts);
 
     // DEV-02：语义搜索与关键词搜索同一边界——私密（可显式开启）与软归档一律排除
+    // D91：转资料条目同属书签面排除（资料检索走 MCP / 资料库搜索）
     const privateCond = opts.includePrivate ? "" : " AND b.is_private = 0";
     const rows = this.store.db
       .prepare(
         `SELECT b.*, c.embedding FROM bookmarks b JOIN content_cache c ON c.bookmark_id = b.id
-         WHERE c.embedding IS NOT NULL AND b.archived_into IS NULL${privateCond} LIMIT 10000`,
+         WHERE c.embedding IS NOT NULL AND b.archived_into IS NULL AND b.materialized_at IS NULL${privateCond} LIMIT 10000`,
       )
       .all() as unknown as Array<BookmarkRow & { embedding: string }>;
     const scored = rows

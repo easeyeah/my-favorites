@@ -17,7 +17,7 @@ import {
   type PrivacyRules,
 } from "@mf/shared";
 import type { LlmClient } from "@mf/ai/llm-client";
-import type { Store } from "./store";
+import type { Store, MaterialConversionCandidate } from "./store";
 import { enqueueMirrorMoves } from "./organize";
 import { fetchMaterialCover, saveCoverFile } from "./materials";
 import { guardedFetch, fetchGuardConfigFromEnv, type FetchGuardConfig } from "./fetch-guard";
@@ -75,6 +75,9 @@ export interface MaterialScanResult {
 /** D77：分类自检移动阈值——比归位（0.6/0.8）更保守：已归位条目搬家更打扰，
  *  只有「明显更合适」才动；且只移入现有目录，永不新建 */
 const REVIEW_MOVE_CONFIDENCE = 0.85;
+
+const CONTENT_PAGE_PROMPT =
+  '判断每个网页是否值得作为「资料」收藏：文章/教程/文档/报告/深度阅读等有实质内容的页面 material=true；工具首页/导航站/登录页/搜索结果/列表页/论坛首页等内容壳 material=false。只返回 JSON：{"results":[{"index":0,"material":true}]}。';
 
 export class Pipeline {
   constructor(
@@ -219,10 +222,12 @@ export class Pipeline {
     if (input.faviconDataUrl) {
       this.store.updateBookmark(input.bookmarkId, { favicon_url: input.faviconDataUrl });
     }
-    if (this.opts.syncAi) {
-      await this.materialize(input.bookmarkId, input.ogImage);
-    } else {
-      void this.materialize(input.bookmarkId, input.ogImage);
+    this.store.rebaseMaterialCandidate(input.bookmarkId, bm?.content_revision ?? 1);
+    if (l2) this.store.authorizeMaterialCandidateText(input.bookmarkId, l2);
+    const candidate = this.store.getMaterialCandidate(input.bookmarkId);
+    if (!candidate) {
+      if (this.opts.syncAi) await this.materialize(input.bookmarkId, input.ogImage);
+      else void this.materialize(input.bookmarkId, input.ogImage);
     }
     const summarized = await this.maybeSummarize(input.bookmarkId);
     return { summarized };
@@ -411,8 +416,7 @@ export class Pipeline {
           }>([
             {
               role: "system",
-              content:
-                "判断每个网页是否值得作为「资料」收藏：文章/教程/文档/报告/深度阅读等有实质内容的页面 material=true；工具首页/导航站/登录页/搜索结果/列表页/论坛首页等内容壳 material=false。只返回 JSON：{\"results\":[{\"index\":0,\"material\":true}]}。",
+              content: CONTENT_PAGE_PROMPT,
             },
             {
               role: "user",
@@ -466,10 +470,17 @@ export class Pipeline {
    */
   async crawlOne(
     bookmarkId: string,
-    opts: { skipMaterialize?: boolean } = {},
-  ): Promise<{ ok: boolean; reason?: string; detail?: string }> {
+    opts: {
+      skipMaterialize?: boolean;
+      skipSummary?: boolean;
+      expected?: MaterialConversionCandidate;
+      /** D92：整理任务取证用——不补写书签描述（会递增修订，破坏任务的 await 前基线） */
+      skipMeta?: boolean;
+    } = {},
+  ): Promise<{ ok: boolean; reason?: string; detail?: string; text?: string }> {
     const bm = this.store.getBookmark(bookmarkId);
-    if (!bm) return { ok: false, reason: "not_found" };
+    if (!bm || bm.materialized_at) return { ok: false, reason: "not_found" };
+    if (opts.expected && !this.store.materialCandidateMatches(opts.expected)) return { ok: false, reason: "stale_candidate" };
     // A1-3 服务端纵深校验：隐私域/私密书签禁止抓取
     const decision = this.serverDecide("server_fetch", bm.url_raw, {
       isPrivateBookmark: bm.is_private === 1,
@@ -508,19 +519,26 @@ export class Pipeline {
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 20_000);
-      this.store.upsertCache({
-        bookmarkId,
-        l2Text: text || null,
-        fetchedVia: "server_crawl",
-      });
-      if (description && !bm.description) {
+      if (opts.expected && !this.store.materialCandidateMatches(opts.expected)) return { ok: false, reason: "stale_candidate" };
+      // 即使显式 crawl，也不能把异步旧 URL 的正文写进已被修改的实体。
+      const after = this.store.getBookmark(bookmarkId);
+      if (!after || after.url_raw !== bm.url_raw || after.content_revision !== bm.content_revision ||
+          !this.serverDecide("server_fetch", after.url_raw, { isPrivateBookmark: after.is_private === 1 }).allowed) {
+        return { ok: false, reason: "stale_candidate" };
+      }
+      this.store.upsertCache({ bookmarkId, l2Text: text || null, fetchedVia: "server_crawl" });
+      // D92：整理任务取证不补写描述——描述写入会递增 content_revision，任务自己的 await 前基线会被误判为冲突
+      if (!opts.expected && !opts.skipMeta && description && !bm.description) {
         this.store.updateBookmark(bookmarkId, { description: description.slice(0, 500) });
       }
-      await this.maybeSummarize(bookmarkId);
+      if (!opts.skipSummary) await this.maybeSummarize(bookmarkId);
       // D89 目录资料扫描：内容型页面判定由调用方完成后再物化（crawl 本身不等于资料）
       if (!opts.skipMaterialize) await this.materialize(bookmarkId);
-      return { ok: true };
+      return { ok: true, text };
     } catch (err) {
+      if (!this.store.getBookmark(bookmarkId) || (opts.expected && !this.store.materialCandidateMatches(opts.expected))) {
+        return { ok: false, reason: "stale_candidate" };
+      }
       // D62 规范③失败可观测：原因落 cache.failReason（带 crawl_failed: 前缀，补扫可解释）
       const detail = String(err).slice(0, 120);
       this.store.upsertCache({
@@ -532,67 +550,197 @@ export class Pipeline {
     }
   }
 
-  /**
-   * D70 收纳盒资料自动分流队列：串行涓流（丢入是偶发行为，量小；D62 三件套：
-   * 异步不阻塞归位响应 + 串行限流 + 失败落 cache.failReason）。
-   * uid 在入队时捕获（请求上下文内）——异步执行时经 runAsUser 落到正确的用户库（D67）。
-   */
-  private scanQueue: Promise<void> = Promise.resolve();
-  private readonly scanEnqueued = new Set<string>();
+  /** D91：跨 Pipeline / 跨用户共用串行闸；数据库候选才是任务真相，内存队列仅唤醒。 */
+  private static scanQueue: Promise<void> = Promise.resolve();
+  private static readonly scanEnqueued = new Set<string>();
 
-  enqueueInboxScan(jobs: Array<{ id: string; kind: "materialize" | "crawl" }>): void {
-    if (jobs.length === 0) return;
+  enqueueInboxScan(jobs: Array<{ id: string; kind?: "materialize" | "crawl" }>): void {
     const uid = currentUserId();
-    for (const job of jobs) {
-      if (this.scanEnqueued.has(job.id)) continue;
-      this.scanEnqueued.add(job.id);
-      this.scanQueue = this.scanQueue
-        .then(async () => {
-          await runAsUser(uid, () => this.scanOne(job.id, job.kind));
-        })
-        .catch(() => undefined)
-        .finally(() => this.scanEnqueued.delete(job.id));
+    for (const { id } of jobs) {
+      const cand = this.store.getMaterialCandidate(id);
+      if (!cand || !["pending", "retry", "ready"].includes(cand.state) ||
+          (cand.next_attempt_at && cand.next_attempt_at > new Date().toISOString())) continue;
+      const key = `${uid}:${id}:${cand.entry_id}`;
+      if (Pipeline.scanEnqueued.has(key)) continue;
+      Pipeline.scanEnqueued.add(key);
+      Pipeline.scanQueue = Pipeline.scanQueue.then(() => runAsUser(uid, async () => {
+        try {
+          await this.scanOne(cand);
+        } catch (err) {
+          const fresh = this.store.getMaterialCandidate(id);
+          if (fresh?.entry_id === cand.entry_id && ["pending", "retry", "ready"].includes(fresh.state)) {
+            this.setCandidateState(cand, "retry", `scan_failed:${String(err).slice(0, 160)}`);
+          }
+          console.warn("[inbox-scan] failed:", String(err).slice(0, 160));
+        }
+      })).finally(() => Pipeline.scanEnqueued.delete(key)).catch((err) => {
+        // 最外层防止单个租户库异常毒化全局 Promise 链，其持久候选仍留待补扫。
+        console.error("[inbox-scan] queue failed:", String(err).slice(0, 160));
+      });
     }
   }
 
-  /** D70/D81：归位条目 → 资料分流任务（video/image 纯规则物化；article 仅 LLM 判定项补抓）。
-   *  无 LLM 早退路径与 LLM 路径共用——资料分流不依赖 LLM 存在。 */
-  private buildScanJobs(
-    moved: Array<{ id: string; to: string; source: string }>,
-    materialIds: Set<string>,
-  ): Array<{ id: string; kind: "materialize" | "crawl" }> {
-    const scanJobs: Array<{ id: string; kind: "materialize" | "crawl" }> = [];
-    const seenPlaced = new Set<string>();
-    for (const m of moved) {
-      if (seenPlaced.has(m.id)) continue;
-      seenPlaced.add(m.id);
-      const bm = this.store.getBookmark(m.id);
-      const cls = bm ? classifyMaterialKind(bm.url_canonical) : null;
-      if (cls && cls.kind !== "article") scanJobs.push({ id: m.id, kind: "materialize" });
-      else if (materialIds.has(m.id)) scanJobs.push({ id: m.id, kind: "crawl" });
-    }
-    return scanJobs;
+  /** 启动/定时补扫仅消费已登记的新入口，不遍历历史书签/资料，ready 也可跨重启提交。 */
+  resumeMaterialCandidates(limit = 10): number {
+    const candidates = this.store.pendingMaterialCandidates(limit);
+    this.enqueueInboxScan(candidates.map((c) => ({ id: c.bookmark_id })));
+    return candidates.length;
   }
 
-  /** 测试确定性：等待扫描队列排空 */
-  scanIdle(): Promise<void> {
-    return this.scanQueue;
-  }
-
-  private async scanOne(id: string, kind: "materialize" | "crawl"): Promise<void> {
+  /** 必须有同一入口、同一URL/revision/策略下的成功证据。active material 本身不是证据。 */
+  commitMaterialConversions(ids: string[]): number {
+    const db = this.store.db;
+    db.exec("SAVEPOINT mf_material_convert");
     try {
-      if (kind === "materialize") {
-        await this.materialize(id); // 视频/图片：URL 规则即判，无需抓取（视频不下载本体）
+      const actions: unknown[] = [];
+      const converted: string[] = [];
+      for (const id of new Set(ids)) {
+        const r = this.store.convertToMaterial(id);
+        if (!r) continue;
+        const after = this.store.getBookmark(id)!;
+        actions.push({ type: "convertToMaterial", bookmarkId: id, fromFolderId: r.folderId,
+          revisionAfter: after.content_revision, materializedGeneration: after.materialized_generation });
+        converted.push(id);
+      }
+      if (actions.length > 0) {
+        const versionId = this.store.saveVersion(null, actions, { label: "material_convert" });
+        for (const id of converted) this.store.setMaterialVersion(id, versionId);
+      }
+      db.exec("RELEASE mf_material_convert");
+      return converted.length;
+    } catch (err) {
+      db.exec("ROLLBACK TO mf_material_convert");
+      db.exec("RELEASE mf_material_convert");
+      throw err;
+    }
+  }
+
+  /** 测试等待全局串行任务排空，不访问任何真实实例。 */
+  scanIdle(): Promise<void> {
+    return Pipeline.scanQueue;
+  }
+
+  /** 旧入口的异步结果不能取消新入口；系统归位/捕获重绑修订时，过期任务改为下轮重试。 */
+  private setCandidateState(cand: MaterialConversionCandidate, state: string, reason: string | null = null, kind?: string): void {
+    const fresh = this.store.getMaterialCandidate(cand.bookmark_id);
+    if (!fresh || fresh.entry_id !== cand.entry_id || fresh.state === "cancelled" ||
+        (fresh.state === "done" && state !== "done")) return;
+    if (state === "cancelled" && fresh.content_revision !== cand.content_revision && this.store.materialCandidateMatches(fresh)) {
+      state = "retry";
+      reason = "stale_task_rebased";
+    }
+    this.store.setMaterialCandidateState(cand.bookmark_id, state, reason, kind);
+  }
+
+  private async scanOne(enqueued: MaterialConversionCandidate): Promise<void> {
+    const id = enqueued.bookmark_id;
+    const cand = this.store.getMaterialCandidate(id);
+    if (!cand || cand.entry_id !== enqueued.entry_id || !["pending", "retry", "ready"].includes(cand.state)) return;
+    if (!this.store.materialCandidateMatches(cand)) {
+      this.setCandidateState(cand, "cancelled", "stale_url_revision_or_policy");
+      return;
+    }
+    if (cand.state === "ready") {
+      if (this.commitMaterialConversions([id]) === 0) this.setCandidateState(cand, "cancelled", "evidence_no_longer_valid");
+      return;
+    }
+    const bm = this.store.getBookmark(id)!;
+    const cls = classifyMaterialKind(bm.url_canonical);
+    if (!cls) {
+      this.setCandidateState(cand, "done", "invalid_url");
+      return;
+    }
+    const existing = this.store.getMaterialByBookmark(id);
+    if (existing && !this.store.getActiveMaterialByBookmark(id)) {
+      this.setCandidateState(cand, "cancelled", "material_dismissed");
+      return;
+    }
+    let text = cand.authorized_text ?? "";
+    if (cls.kind === "article") {
+      const llm = this.llmFor("summarize");
+      if (!llm) {
+        this.setCandidateState(cand, "retry", "llm_unavailable_for_content_judgment");
+        return; // 自动移出绝不使用 800 字规则兜底
+      }
+      if (!this.serverDecide("call_model", bm.url_raw, { isPrivateBookmark: bm.is_private === 1 }).allowed) {
+        this.setCandidateState(cand, "cancelled", "privacy_call_model_denied");
         return;
       }
-      await this.crawlOne(id); // article 候选：服务端补抓正文 → ≥200 字显性化 + 摘要 + 分类
-    } catch (err) {
-      console.error("[inbox-scan] failed:", String(err));
+      if (text.length < MATERIAL_ARTICLE_MIN_TEXT) {
+        const crawled = await this.crawlOne(id, { skipMaterialize: true, skipSummary: true, expected: cand });
+        if (!crawled.ok) {
+          if (this.store.materialCandidateMatches(cand)) {
+            this.setCandidateState(cand, "retry", crawled.detail ?? crawled.reason ?? "crawl_failed");
+          } else this.setCandidateState(cand, "cancelled", "stale_url_revision_or_policy");
+          return;
+        }
+        text = crawled.text ?? "";
+      }
+      if (!this.store.materialCandidateMatches(cand)) {
+        this.setCandidateState(cand, "cancelled", "stale_url_revision_or_policy");
+        return;
+      }
+      if (text.length < MATERIAL_ARTICLE_MIN_TEXT) {
+        this.setCandidateState(cand, "done", "content_too_thin");
+        return;
+      }
+      const out = await llm.chatJson<{ results?: Array<{ index: number; material: boolean }> }>([
+        { role: "system", content: CONTENT_PAGE_PROMPT },
+        { role: "user", content: JSON.stringify([{ index: 0, title: bm.title, url: bm.url_canonical, excerpt: text.slice(0, 400) }]) },
+      ]);
+      if (!this.store.materialCandidateMatches(cand)) {
+        this.setCandidateState(cand, "cancelled", "stale_url_revision_or_policy");
+        return;
+      }
+      const verdict = out.results?.find((r) => r.index === 0)?.material;
+      if (typeof verdict !== "boolean") {
+        this.setCandidateState(cand, "retry", "invalid_content_verdict");
+        return;
+      }
+      if (!verdict) {
+        this.setCandidateState(cand, "done", "not_content_page");
+        return;
+      }
     }
+    // 短事务内再次校验并同时写资料+证据+隐藏+版本；任何失败无半转换。
+    const db = this.store.db;
+    db.exec("SAVEPOINT mf_material_evidence");
+    try {
+      if (!this.store.materialCandidateMatches(cand)) {
+        db.exec("RELEASE mf_material_evidence");
+        return;
+      }
+      if (this.store.getMaterialByBookmark(id) && !this.store.getActiveMaterialByBookmark(id)) {
+        this.setCandidateState(cand, "cancelled", "material_dismissed");
+        db.exec("RELEASE mf_material_evidence");
+        return;
+      }
+      this.store.upsertMaterial({ bookmarkId: id, type: cls.kind, signals: cls.signals,
+        meta: text ? { textLen: text.length } : {} });
+      this.setCandidateState(cand, "ready", null, cls.kind);
+      this.commitMaterialConversions([id]);
+      db.exec("RELEASE mf_material_evidence");
+    } catch (err) {
+      db.exec("ROLLBACK TO mf_material_evidence");
+      db.exec("RELEASE mf_material_evidence");
+      throw err;
+    }
+    // 装饰/摘要迟到不影响转换；仍在同一个全局串行任务中限流，失败留 cache/candidate 痕迹。
+    if (cls.kind === "image") {
+      try {
+        await this.fetchCover(id, bm.url_raw);
+        if (!this.store.getMaterial(this.store.getActiveMaterialByBookmark(id)!.id)?.has_cover) {
+          this.setCandidateState(cand, "done", "cover_unavailable");
+        }
+      } catch (err) {
+        this.setCandidateState(cand, "done", `cover_failed:${String(err).slice(0, 120)}`);
+      }
+    }
+    await this.maybeSummarize(id, true);
   }
 
   /** F2.3 AI 摘要：有 LLM 且有正文时生成 L1；syncAi 模式供测试确定性 */
-  async maybeSummarize(bookmarkId: string): Promise<boolean> {
+  async maybeSummarize(bookmarkId: string, awaitRun = false): Promise<boolean> {
     const cache = this.store.getCache(bookmarkId);
     const l2 = (cache?.l2_text as string | null) ?? "";
     const llm = this.llmFor("summarize");
@@ -679,7 +827,7 @@ export class Pipeline {
       }
     };
 
-    if (this.opts.syncAi) return await run();
+    if (this.opts.syncAi || awaitRun) return await run();
     void run();
     return false;
   }
@@ -777,6 +925,9 @@ export class Pipeline {
     const bm = this.store.getBookmark(bookmarkId);
     const st = this.store.getInboxState(bookmarkId);
     if (!bm || !st || st.state !== "placed" || st.reviewed_at) return "skipped";
+    if (bm.materialized_at) return "skipped"; // D91：已转资料（书签面实体），不再参与目录复核
+    const candidate = this.store.getMaterialCandidate(bookmarkId);
+    if (candidate && ["pending", "retry", "ready"].includes(candidate.state)) return "skipped";
     const inbox = this.store.inboxFolder();
     if (inbox && bm.folder_id === inbox.id) return "skipped"; // 仍在箱内归收纳盒管线
     if (bm.is_private === 1 || this.privacyCheck(bm.url_raw)) {
@@ -834,6 +985,7 @@ export class Pipeline {
         (fresh.content_revision ?? 1) !== revBefore ||
         this.store.privacyRevision() !== rulesRevBefore ||
         fresh.is_private === 1 ||
+        fresh.materialized_at || // D91：等待期间已转资料 → 不再移动
         this.privacyCheck(fresh.url_raw)
       ) {
         db.exec("ROLLBACK");
@@ -904,10 +1056,14 @@ export class Pipeline {
     moved: Array<{ id: string; to: string; source: string }>;
     left: Array<{ id: string; reason: string }>;
     versionId: string | null;
+    /** 异步识别已排队（尚非成功），不能计入 moved 或成功通知。 */
+    queued: string[];
   }> {
     const moved: Array<{ id: string; to: string; source: string }> = [];
     const left: Array<{ id: string; reason: string }> = [];
     const pending: Array<{ id: string; title: string; url: string }> = [];
+    const queued: string[] = [];
+    const mediaJobs: Array<{ id: string }> = [];
     const db = this.store.db;
 
     // ---------- 阶段一：规则移动（单短事务，含镜像 + 版本） ----------
@@ -917,7 +1073,7 @@ export class Pipeline {
     try {
       for (const id of bookmarkIds) {
         const bm = this.store.getBookmark(id);
-        if (!bm || bm.folder_id !== inboxFolderId) {
+        if (!bm || bm.materialized_at || bm.folder_id !== inboxFolderId) {
           left.push({ id, reason: "not_in_inbox" });
           continue;
         }
@@ -927,6 +1083,16 @@ export class Pipeline {
           this.store.upsertInboxState(id, "privacy_hold", null, "privacy_domain", 0);
           continue;
         }
+        const candidate = this.store.getMaterialCandidate(id);
+        if (candidate && ["pending", "retry", "ready"].includes(candidate.state)) {
+          queued.push(id);
+          const kind = classifyMaterialKind(bm.url_canonical)?.kind;
+          if (kind === "video" || kind === "image") {
+            mediaJobs.push({ id });
+            this.store.upsertInboxState(id, "classifying", null, "material_pending", 0);
+            continue; // 媒体不先建普通目录，也不等待普通目录 LLM 分类。
+          }
+        }
         const parsed = canonicalizeUrl(bm.url_canonical);
         const rule = parsed
           ? classifyByRules(parsed.registrableDomain, bm.title)
@@ -935,6 +1101,7 @@ export class Pipeline {
         if (rule.source === "domain_map" && rule.confidence >= AUTO_MOVE_CONFIDENCE) {
           const target = this.ensureCategoryFolder(rule.category);
           const before = this.store.moveBookmark(id, target.id);
+          if (before) this.store.rebaseMaterialCandidate(id, before.content_revision ?? 1);
           this.store.bumpDomain(parsed!.registrableDomain, rule.category);
           if (before) {
             versionActionsA.push({
@@ -966,6 +1133,7 @@ export class Pipeline {
       throw err;
     }
 
+    this.enqueueInboxScan(mediaJobs);
     const llm = this.llmFor("organize");
     // 无 LLM：pending 项明确标注原因留在收件箱（永不丢书签）；重试计数 +1，超限转人工（ambiguous）
     if (!llm) {
@@ -973,15 +1141,12 @@ export class Pipeline {
         left.push({ id: p.id, reason: "no_llm" });
         this.bumpRetryState(p.id, "no_llm");
       }
-      // D81 修复（fixture 隔离暴露的既有 bug）：无 LLM 早退不得跳过 D70 资料分流——
-      // 视频/图片物化是纯 URL 规则，与 LLM 无关；规则归位的视频也须入资料库
-      this.enqueueInboxScan(this.buildScanJobs(moved, new Set()));
-      return { moved, left, versionId: firstVersionId };
+      this.enqueueInboxScan(queued.map((id) => ({ id })));
+      return { moved, left, versionId: firstVersionId, queued };
     }
 
     // ---------- 阶段二：LLM 批量精修（事务外计算；仅尚未被移走/改动的项） ----------
     let secondVersionId: string | null = null;
-    const materialIds = new Set<string>(); // D70：LLM 判定为内容型的条目（归位后自动补抓入资料）
     const createdThisBatch = new Set<string>(); // D71：本批新建的目录（后续同类目视作已知，不重复过门槛）
     if (pending.length > 0) {
       const rulesRevBefore = this.store.privacyRevision();
@@ -999,7 +1164,7 @@ export class Pipeline {
               '你是书签分类助手。现有目录（格式「路径：代表书签」——按代表书签归纳各目录的实际收录范围，不要仅凭目录名字面猜测；category 填目录名，即路径最后一段）：\n' +
               folderContext +
               (prefs.length > 0 ? `\n用户常用目录（优先参考）：${JSON.stringify(prefs)}` : "") +
-              '\n为每条书签选择最合适的目录：优先使用现有目录；仅当确实没有合适目录时才建议新目录，且新目录名必须通用宽泛（如「视频」「开发」，禁止具体项目名/一次性词语）。同时判断该网页是否值得作为「资料」收藏（文章/教程/报告/文档等内容型页面 material=true；工具首页/导航站/登录页/应用商店等内容壳 material=false）。只返回 JSON：{"results":[{"index":0,"category":"...","confidence":0.0,"material":true}]}，confidence∈[0,1]。',
+              '\n为每条书签选择最合适的目录：优先使用现有目录；仅当确实没有合适目录时才建议新目录，且新目录名必须通用宽泛（如「视频」「开发」，禁止具体项目名/一次性词语）。只返回 JSON：{"results":[{"index":0,"category":"...","confidence":0.0}]}，confidence∈[0,1]。',
           },
           {
             role: "user",
@@ -1049,6 +1214,7 @@ export class Pipeline {
             createdThisBatch.add(r.category); // D71：登记本批新目录
             const before = this.store.moveBookmark(item.id, target.id);
             if (before) {
+              this.store.rebaseMaterialCandidate(item.id, before.content_revision ?? 1);
               versionActionsB.push({
                 type: "move",
                 bookmarkId: item.id,
@@ -1059,7 +1225,6 @@ export class Pipeline {
               });
               enqueueMirrorMoves(this.store, item.id, target.id, opts.deviceId);
               movedB.push({ id: item.id, to: target.name, source: "llm" });
-              if (r.material === true) materialIds.add(item.id); // D70：LLM 判定值得入资料库
             }
           }
           secondVersionId =
@@ -1085,13 +1250,10 @@ export class Pipeline {
       }
     }
 
-    // ---------- D70 资料自动分流（异步涓流，不阻塞归位响应） ----------
-    // video/image：URL 规则即判，直接物化（不抓取）；article：仅 LLM 判定 material=true 时补抓正文。
-    // 规则归位（stage-1）未过 LLM——article 保守不入资料（需要内容时走扩展捕获或手动补抓）。
-    this.enqueueInboxScan(this.buildScanJobs(moved, materialIds));
+    // 新入口均识别实际正文（包括规则归位的文章），不以 title/URL 的 material 布尔作为移出证据。
+    this.enqueueInboxScan(queued.map((id) => ({ id })));
 
-    // 返回阶段一的版本（一次回滚 = 还原规则移动；LLM 版本独立可回滚）
-    return { moved, left, versionId: firstVersionId ?? secondVersionId };
+    return { moved, left, versionId: firstVersionId ?? secondVersionId, queued };
   }
 
   /** 重试状态：attempts+1；达到 5 次（原型 06「第 n/5 次」）转人工 = ambiguous 滞留 */

@@ -29,7 +29,7 @@ beforeAll(async () => {
   const bm = (await (await env.app.request("/api/v1/bookmarks", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ url: "https://mcp.example/blog/react-hooks", title: "React Hooks 深度指南" }),
+    body: JSON.stringify({ url: "https://mcp.example/blog/react-hooks", title: "React Hooks 深度指南", folderId: env.store.ensurePath(["MCP存量"]).id }),
   })).json()) as { id: string };
   await env.app.request("/api/v1/content/capture", {
     method: "POST",
@@ -48,7 +48,7 @@ beforeAll(async () => {
   await env.app.request("/api/v1/bookmarks", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ url: "https://www.bilibili.com/video/BV1mcpdemo1", title: "一个 MCP 测试视频" }),
+    body: JSON.stringify({ url: "https://www.bilibili.com/video/BV1mcpdemo1", title: "一个 MCP 测试视频", folderId: env.store.ensurePath(["MCP存量"]).id }),
   });
 });
 

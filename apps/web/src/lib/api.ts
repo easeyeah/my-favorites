@@ -375,7 +375,8 @@ export interface BookmarkDetail extends Bookmark {
   cache: CacheInfo | null;
 }
 
-/** D54 收纳盒「最近归位」行（去向目录 + 理由 + 可撤销版本） */
+/** D54 收纳盒「最近归位」行（去向目录 + 理由 + 可撤销版本）。
+ *  D91：转资料行 materialized=1，去向显示「资料库」，撤销走 convert_version_id */
 export interface InboxPlaced {
   bookmark_id: string;
   title: string;
@@ -384,6 +385,8 @@ export interface InboxPlaced {
   updated_at: string;
   version_id: string | null;
   folder_name: string | null;
+  materialized?: number;
+  convert_version_id?: string | null;
 }
 
 export interface Stats {
@@ -462,6 +465,11 @@ export interface VersionRow {
   reverted: number;
   created_at: string;
   actionCount: number;
+  /** D91：版本用途标签（'material_convert' = 收纳盒自动转资料批次；'organize_task' = D92 目录整理批次） */
+  label?: string | null;
+  /** D92：所属目录整理任务（这类版本的撤销走任务协调器） */
+  task_id?: string | null;
+  task_batch?: number | null;
 }
 
 export interface ProposalAction {
@@ -482,6 +490,116 @@ export interface OrganizeResponse {
   versionId?: string;
   applied?: number;
   conflicts?: Array<{ bookmarkId: string; reason: string }>;
+}
+
+// ---------- D92 目录整理任务（《书签目录自动整理重设计》） ----------
+
+export type OrganizeTaskStatus =
+  | "queued"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "completed"
+  | "completed_with_issues"
+  | "failed";
+
+/** 一次目录整理任务的快照（REST 是事实源；SSE 只做「有变化」门铃） */
+export interface OrganizeTask {
+  id: string;
+  folder_id: string;
+  folder_name: string;
+  status: OrganizeTaskStatus;
+  /** scope | plan | commit | done */
+  phase: string;
+  phase_note: string | null;
+  /** ai | rule_only（规则检查结束 ≠ AI 整理成功） */
+  mode: string;
+  /** total = moved + converted + unchanged + skipped + failed + remaining */
+  total: number;
+  checked: number;
+  remaining: number;
+  planned: number;
+  moved: number;
+  /** D94：已移动条目中归入来源目录之外的条数（跨根复用 / 新建顶级目录）；明细已裁剪的历史任务不带 */
+  moved_outside?: number;
+  converted: number;
+  new_materials: number;
+  reused_materials: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  protected_count: number;
+  excluded_archived: number;
+  planned_new_folders: number;
+  created_folders: number;
+  reused_folders: number;
+  planned_categories: number;
+  new_categories: number;
+  reused_categories: number;
+  topics: string[];
+  error: string | null;
+  /** 单调递增：轮询/门铃据此判断有无变化 */
+  revision: number;
+  can_continue: boolean;
+  continue_expires_at: string | null;
+  /** none | pending | running | completed | partial | failed */
+  undo_status: string;
+  undo_restored: number;
+  undo_kept: number;
+  undo_categories: number;
+  undo_folders: number;
+  created_at: string;
+  started_at: string | null;
+  phase_at: string | null;
+  finished_at: string | null;
+  /** 终态说明（服务端按计数生成）；进行中为 null */
+  summary: string | null;
+}
+
+/** remaining（未形成结果）| moved | converted | keep | skip | fail */
+export type OrganizeItemDecision = "remaining" | "moved" | "converted" | "keep" | "skip" | "fail";
+export interface OrganizeTaskItem {
+  id: string;
+  bookmark_id: string;
+  title: string | null;
+  decision: OrganizeItemDecision;
+  reason: string | null;
+  retryable: boolean;
+  from_path: string | null;
+  to_path: string | null;
+  category_path: string | null;
+  batch: number | null;
+  updated_at: string;
+}
+export interface OrganizeTaskFolder {
+  key: string;
+  path: string;
+  /** planned | created | reused | unapplied */
+  state: string;
+  folder_id: string | null;
+  planned_count: number;
+  actual_count: number;
+  /** D94：落点在来源目录之外（复用了库内其他目录，或新建的顶级目录） */
+  outside: boolean;
+}
+export interface OrganizeTaskCategory {
+  path: string;
+  /** planned | new | reused | unapplied */
+  state: string;
+  planned_count: number;
+  actual_count: number;
+}
+export interface OrganizeTaskList {
+  tasks: OrganizeTask[];
+  total: number;
+  active: { id: string } | null;
+}
+export interface OrganizeTaskItemsPage {
+  items: OrganizeTaskItem[];
+  /** 可展示明细数（分页按它计算） */
+  total: number;
+  /** 本筛选下仅聚合、不返回明细的受保护条目数 */
+  protectedCount: number;
 }
 
 export interface NavSite {
@@ -553,6 +671,8 @@ export interface MaterialRow {
   signals: string[];
   meta: Record<string, unknown>;
   created_at: string;
+  /** D91：服务端统一返回 numeric 0/1；1 = 书签已转资料，0 = 书签与资料并存。 */
+  materialized: 0 | 1;
 }
 
 export interface MaterialDetail extends MaterialRow {
@@ -567,11 +687,60 @@ export interface MaterialCounts {
   image: number;
 }
 
+export interface MaterialListResponse {
+  items: MaterialRow[];
+  /** 全库类型计数，不随当前筛选与页码变化。 */
+  counts: MaterialCounts;
+  /** 当前筛选匹配的总条数（分页前），不可用 counts.total 代替。 */
+  total: number;
+}
+
 /** D65 资料库分面统计（左侧面板）：AI 分类树计数 + AI 标签频次榜；未分类 = total − Σcategories */
 export interface MaterialFacets {
   categories: Array<{ category: string; count: number }>;
   tags: Array<{ tag: string; count: number }>;
 }
+
+/** 资料写操作也校验业务结果：mock 的 {error} 或 {ok:false} 不得被当作成功。 */
+async function mutateMaterial(cfg: AdminConfig, path: string, method: "DELETE" | "POST"): Promise<{ ok: true }> {
+  const result = await api<{ ok?: boolean; error?: string }>(cfg, path, { method, headers: privateHeaders() });
+  if (result.ok !== true || result.error) {
+    throw new ApiError(result.error === "not_found" ? 404 : 409, path, result.error ?? "资料操作未成功");
+  }
+  return { ok: true };
+}
+
+/**
+ * 整理任务请求：演示模式以 {error: 代码} 表达业务失败（真实模式是非 2xx + {error, hint}），
+ * 这里统一成 ApiError——不让 {error} 被当成成功（任务未创建却打开空详情）。
+ */
+async function taskRequest<T>(cfg: AdminConfig, path: string, init?: RequestInit): Promise<T> {
+  const r = await api<T>(cfg, path, init);
+  const code = (r as { error?: unknown } | null | undefined)?.error;
+  if (typeof code === "string") {
+    const status =
+      code === "folder_not_found" || code === "task_not_found" || code === "version_not_in_task"
+        ? 404
+        : code === "empty_scope" || code === "request_id_required" || code === "version_not_found_or_reverted"
+          ? 400
+          : 409;
+    throw new ApiError(status, path, TASK_ERROR_HINT[code] ?? code);
+  }
+  return r;
+}
+const TASK_ERROR_HINT: Record<string, string> = {
+  folder_not_found: "目录不存在或不能整理",
+  task_not_found: "整理任务不存在",
+  empty_scope: "目录内没有可整理的书签",
+  request_id_required: "缺少请求标识",
+  task_active: "任务仍在进行中",
+  task_undo_started: "这次整理已开始撤销，不能再沿原方案继续；需要时请基于最新状态重新整理",
+  task_snapshot_expired: "原整理快照已过期，不能继续；请基于最新状态重新整理",
+  nothing_to_continue: "没有未完成的条目",
+  nothing_to_undo: "这次整理没有已生效的调整",
+  version_not_in_task: "该版本不属于这次整理",
+  version_not_found_or_reverted: "该版本已撤销",
+};
 
 // ---------- 常用便捷封装 ----------
 
@@ -603,8 +772,14 @@ export const fetchers = {
   },
   bookmarkDetail: (cfg: AdminConfig, id: string, signal?: AbortSignal) =>
     api<BookmarkDetail>(cfg, `/bookmarks/${id}`, { signal }),
-  inboxItems: (cfg: AdminConfig, signal?: AbortSignal) =>
-    api<{ items: unknown[]; placed: InboxPlaced[]; ambiguousCount: number }>(cfg, "/inbox/items", { signal }),
+  inboxItems: (cfg: AdminConfig, signal?: AbortSignal, options?: { placedLimit?: number; placedOffset?: number }) => {
+    const p = new URLSearchParams();
+    if (options?.placedLimit !== undefined) p.set("placedLimit", String(options.placedLimit));
+    if (options?.placedOffset !== undefined) p.set("placedOffset", String(options.placedOffset));
+    return api<{ items: unknown[]; placed: InboxPlaced[]; placedTotal: number; ambiguousCount: number }>(
+      cfg, `/inbox/items${p.size ? `?${p}` : ""}`, { signal },
+    );
+  },
   snapshots: (cfg: AdminConfig, bookmarkId: string) =>
     api<{ snapshots: Array<{ id: string; created_at: string; size: number; via: string }> }>(
       cfg,
@@ -653,6 +828,7 @@ export const fetchers = {
   materials: (
     cfg: AdminConfig,
     q: { type?: string; q?: string; category?: string; uncategorized?: boolean; limit?: number; offset?: number } = {},
+    signal?: AbortSignal,
   ) => {
     const p = new URLSearchParams();
     if (q.type) p.set("type", q.type);
@@ -661,8 +837,9 @@ export const fetchers = {
     if (q.uncategorized) p.set("uncategorized", "1");
     if (q.limit !== undefined) p.set("limit", String(q.limit));
     if (q.offset !== undefined) p.set("offset", String(q.offset));
-    return api<{ items: MaterialRow[]; counts: MaterialCounts }>(cfg, `/materials?${p}`, {
+    return api<MaterialListResponse>(cfg, `/materials?${p}`, {
       headers: privateHeaders(),
+      signal,
     });
   },
   materialFacets: (cfg: AdminConfig) =>
@@ -672,5 +849,46 @@ export const fetchers = {
   materialCover: (cfg: AdminConfig, id: string) => apiDownload(cfg, `/materials/${id}/cover`),
   materialExport: (cfg: AdminConfig, id: string) => apiDownload(cfg, `/materials/${id}/export`),
   materialDismiss: (cfg: AdminConfig, id: string) =>
-    api<{ ok: boolean }>(cfg, `/materials/${id}`, { method: "DELETE" }),
+    mutateMaterial(cfg, `/materials/${encodeURIComponent(id)}`, "DELETE"),
+  /** D91：转资料条目恢复为书签（资料保留；浏览器节点经同步重建） */
+  materialRestore: (cfg: AdminConfig, id: string) =>
+    mutateMaterial(cfg, `/materials/${encodeURIComponent(id)}/restore`, "POST"),
+  // ---------- D92 目录整理任务 ----------
+  organizeTaskCreate: (cfg: AdminConfig, folderId: string, requestId: string) =>
+    taskRequest<{ task: OrganizeTask; created: boolean; existing: boolean }>(cfg, "/organize/tasks", {
+      method: "POST",
+      body: JSON.stringify({ folderId, requestId }),
+    }),
+  organizeTasks: (cfg: AdminConfig, offset = 0, signal?: AbortSignal) =>
+    taskRequest<OrganizeTaskList>(cfg, `/organize/tasks?limit=10&offset=${offset}`, { signal }),
+  organizeTask: (cfg: AdminConfig, id: string, signal?: AbortSignal) =>
+    taskRequest<{ task: OrganizeTask }>(cfg, `/organize/tasks/${encodeURIComponent(id)}`, { signal }),
+  organizeTaskItems: (
+    cfg: AdminConfig,
+    id: string,
+    opts: { result?: string; offset?: number } = {},
+    signal?: AbortSignal,
+  ) => {
+    const p = new URLSearchParams({ limit: "10", offset: String(opts.offset ?? 0) });
+    if (opts.result) p.set("result", opts.result);
+    return taskRequest<OrganizeTaskItemsPage>(cfg, `/organize/tasks/${encodeURIComponent(id)}/items?${p}`, { signal });
+  },
+  organizeTaskFolders: (cfg: AdminConfig, id: string, signal?: AbortSignal) =>
+    taskRequest<{ folders: OrganizeTaskFolder[]; total: number }>(cfg, `/organize/tasks/${encodeURIComponent(id)}/folders?limit=50`, { signal }),
+  organizeTaskCategories: (cfg: AdminConfig, id: string, signal?: AbortSignal) =>
+    taskRequest<{ categories: OrganizeTaskCategory[]; total: number }>(cfg, `/organize/tasks/${encodeURIComponent(id)}/material-categories?limit=50`, { signal }),
+  /** 收起 ≠ 停止；只有显式停止才让运行器在下一个提交屏障停下 */
+  organizeTaskStop: (cfg: AdminConfig, id: string) =>
+    taskRequest<{ task: OrganizeTask }>(cfg, `/organize/tasks/${encodeURIComponent(id)}/stop`, { method: "POST", body: "{}" }),
+  organizeTaskContinue: (cfg: AdminConfig, id: string, mode: "remaining" | "failed") =>
+    taskRequest<{ task: OrganizeTask; reopened: number }>(cfg, `/organize/tasks/${encodeURIComponent(id)}/continue`, {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }),
+  /** 撤销本次整理：先停止并排空在途提交，再按批次逆序逆放；恢复书签，资料保留 */
+  organizeTaskUndo: (cfg: AdminConfig, id: string) =>
+    taskRequest<{ task: OrganizeTask; pending: boolean }>(cfg, `/organize/tasks/${encodeURIComponent(id)}/undo`, {
+      method: "POST",
+      body: "{}",
+    }),
 };

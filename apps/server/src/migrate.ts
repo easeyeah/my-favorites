@@ -590,6 +590,164 @@ export const MIGRATION_V16_FOLDER_REVISION: Migration = {
   },
 };
 
+/**
+ * v17（D91 收纳盒自动转资料）：
+ *  - bookmarks.materialized_at：书签软移出标记。隐藏行以唯一系统收纳盒作内部 FK 锚点，
+ *    materialized_from_folder_id（无 FK）保留原目录；materialize change 与真实 delete 明确区分。
+ *  - generation + version_id：转换/恢复的 CAS 与版本归属，旧撤销不得作用于新的转换。
+ *  - material_conversion_candidate：仅新收纳盒入口登记的持久候选；URL/修订/隐私修订绑定，
+ *    授权正文与当轮成功证据、失败原因、重试时间持久化。迁移不登记任何存量。
+ *  - organize_version.label：版本用途标签（'material_convert' = 转资料批次），首页/popup 文案区分。
+ *  - inbox_state.convert_version_id：本条转资料所属版本（收纳盒去向行「撤销」直达转换版本）。
+ */
+export const MIGRATION_V17_MATERIAL_CONVERT: Migration = {
+  version: 17,
+  name: "material_convert",
+  up: (db) => {
+    const bookmarkCols = db.prepare("PRAGMA table_info(bookmarks)").all() as Array<{ name: string }>;
+    for (const [column, declaration] of [
+      ["materialized_at", "TEXT"],
+      ["materialized_from_folder_id", "TEXT"],
+      ["materialized_generation", "INTEGER NOT NULL DEFAULT 0"],
+      ["materialized_version_id", "TEXT"],
+    ]) {
+      if (!bookmarkCols.some((c) => c.name === column)) {
+        db.prepare(`ALTER TABLE bookmarks ADD COLUMN ${column} ${declaration}`).run();
+      }
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS material_conversion_candidate (
+        bookmark_id TEXT PRIMARY KEY REFERENCES bookmarks(id) ON DELETE CASCADE,
+        entry_id TEXT NOT NULL,
+        url_raw TEXT NOT NULL,
+        content_revision INTEGER NOT NULL,
+        privacy_revision INTEGER NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending',
+        authorized_text TEXT,
+        evidence_kind TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        fail_reason TEXT,
+        next_attempt_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_conversion_candidate_pending
+        ON material_conversion_candidate(state, next_attempt_at);
+    `);
+    const versionCols = db.prepare("PRAGMA table_info(organize_version)").all() as Array<{ name: string }>;
+    if (!versionCols.some((c) => c.name === "label")) {
+      db.prepare("ALTER TABLE organize_version ADD COLUMN label TEXT").run();
+    }
+    const inboxCols = db.prepare("PRAGMA table_info(inbox_state)").all() as Array<{ name: string }>;
+    if (!inboxCols.some((c) => c.name === "convert_version_id")) {
+      db.prepare("ALTER TABLE inbox_state ADD COLUMN convert_version_id TEXT").run();
+    }
+  },
+};
+
+/**
+ * v18（D92 目录整理任务，《书签目录自动整理重设计》）：
+ *  - organize_task：用户显式发起的一次目录整理——固定范围总数、moved/converted/unchanged/skipped/failed 计数、
+ *    状态/阶段/执行方式、运行租约、共用主题树与目录图（key→真实目录 ID）、撤销游标与回执。
+ *  - organize_task_item：任务内一条来源收藏一行——await 前基线（原目录/修订/隐私修订）、逐条判断与原因、
+ *    批次与版本回执；受保护条目不落行（只计入 protected_count，不留标题/URL）。
+ *  - material.category_revision / category_source：资料分类写入的 CAS 与来源（auto / organize_task），
+ *    迟到的摘要与回填不得覆盖显式整理任务的分类。
+ *  - organize_version.task_id / task_batch：一次任务的多批版本可聚合展示与整次撤销。
+ */
+export const MIGRATION_V18_ORGANIZE_TASK: Migration = {
+  version: 18,
+  name: "organize_task",
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS organize_task (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        folder_id TEXT NOT NULL,
+        folder_name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        phase TEXT NOT NULL DEFAULT 'scope',
+        phase_note TEXT,
+        mode TEXT NOT NULL DEFAULT 'ai',
+        total INTEGER NOT NULL DEFAULT 0,
+        moved INTEGER NOT NULL DEFAULT 0,
+        converted INTEGER NOT NULL DEFAULT 0,
+        new_materials INTEGER NOT NULL DEFAULT 0,
+        reused_materials INTEGER NOT NULL DEFAULT 0,
+        unchanged INTEGER NOT NULL DEFAULT 0,
+        skipped INTEGER NOT NULL DEFAULT 0,
+        failed INTEGER NOT NULL DEFAULT 0,
+        protected_count INTEGER NOT NULL DEFAULT 0,
+        excluded_archived INTEGER NOT NULL DEFAULT 0,
+        planned_new_folders INTEGER NOT NULL DEFAULT 0,
+        created_folders INTEGER NOT NULL DEFAULT 0,
+        reused_folders INTEGER NOT NULL DEFAULT 0,
+        planned_categories INTEGER NOT NULL DEFAULT 0,
+        new_categories INTEGER NOT NULL DEFAULT 0,
+        reused_categories INTEGER NOT NULL DEFAULT 0,
+        plan_json TEXT,
+        error TEXT,
+        lease TEXT,
+        lease_at TEXT,
+        revision INTEGER NOT NULL DEFAULT 0,
+        can_continue INTEGER NOT NULL DEFAULT 1,
+        continue_expires_at TEXT,
+        undo_status TEXT NOT NULL DEFAULT 'none',
+        undo_cursor INTEGER NOT NULL DEFAULT 0,
+        undo_restored INTEGER NOT NULL DEFAULT 0,
+        undo_kept INTEGER NOT NULL DEFAULT 0,
+        undo_categories INTEGER NOT NULL DEFAULT 0,
+        undo_folders INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        phase_at TEXT,
+        finished_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_organize_task_status ON organize_task(status, created_at);
+      CREATE TABLE IF NOT EXISTS organize_task_item (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES organize_task(id) ON DELETE CASCADE,
+        bookmark_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        title TEXT,
+        base_folder_id TEXT NOT NULL,
+        base_revision INTEGER NOT NULL,
+        privacy_revision INTEGER NOT NULL,
+        kind TEXT,
+        material_type TEXT,
+        evidence_ref TEXT,
+        decision TEXT NOT NULL DEFAULT 'remaining',
+        reason TEXT,
+        plan_decision TEXT,
+        plan_target_key TEXT,
+        plan_category TEXT,
+        plan_material_type TEXT,
+        plan_reason TEXT,
+        from_path TEXT,
+        to_path TEXT,
+        category_before TEXT,
+        material_before TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        batch INTEGER,
+        version_id TEXT,
+        retryable INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        UNIQUE(task_id, bookmark_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_organize_task_item_task ON organize_task_item(task_id, seq);
+    `);
+    const addColumn = (table: string, column: string, declaration: string): void => {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === column)) {
+        db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`).run();
+      }
+    };
+    addColumn("material", "category_revision", "INTEGER NOT NULL DEFAULT 0");
+    addColumn("material", "category_source", "TEXT");
+    addColumn("organize_version", "task_id", "TEXT");
+    addColumn("organize_version", "task_batch", "INTEGER");
+  },
+};
+
 /** 全部迁移按版本升序注册（只追加） */
 export const MIGRATIONS: Migration[] = [
   BASELINE_MIGRATION,
@@ -608,6 +766,8 @@ export const MIGRATIONS: Migration[] = [
   MIGRATION_V14_PLACEMENT_REVIEW,
   MIGRATION_V15_SYNC_PROTOCOL,
   MIGRATION_V16_FOLDER_REVISION,
+  MIGRATION_V17_MATERIAL_CONVERT,
+  MIGRATION_V18_ORGANIZE_TASK,
 ];
 
 export function appliedVersions(db: DatabaseSync): Set<number> {

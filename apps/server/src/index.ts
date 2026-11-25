@@ -7,8 +7,9 @@ import { Registry } from "./registry";
 import { UserDbManager, currentUserId, runAsUser } from "./tenancy";
 import { Pipeline } from "./pipeline";
 import { OrganizeService } from "./organize";
+import { OrganizeTaskService } from "./organize-task";
 import { SemanticService } from "./semantic";
-import { MaintenanceService, startScheduler, startRetentionPrune, startSummaryBackfill, startCategoryBackfill, startClassificationReview } from "./maintenance";
+import { MaintenanceService, startScheduler, startRetentionPrune, startSummaryBackfill, startCategoryBackfill, startClassificationReview, startMaterialConversionSweep } from "./maintenance";
 import { backfillMaterials, sweepOrphanCovers } from "./materials";
 import { LlmClient, llmFromEnv } from "@mf/ai/llm-client";
 
@@ -50,12 +51,17 @@ const pipeline = new Pipeline(store, llmFor, {
   dataDir, // D61：资料库封面落盘需要 dataDir
 });
 
+const organize = new OrganizeService(store, llmFor);
+// D92：目录整理任务——持久任务 + 分批提交 + 整次撤销；后台恢复按注册用户逐库执行
+const organizeTasks = new OrganizeTaskService(store, llmFor, pipeline, organize, () => registry.listUserIds());
+
 const app = buildApp({
   store,
   llmFor,
   dataDir,
   pipeline,
-  organize: new OrganizeService(store, llmFor),
+  organize,
+  organizeTasks,
   semantic: new SemanticService(store, llmFor("embedding"), process.env.LLM_EMBEDDING_MODEL ?? null),
   maintenance: new MaintenanceService(store),
   adminPassword: process.env.ADMIN_PASSWORD,
@@ -63,11 +69,14 @@ const app = buildApp({
   userDbs,
 });
 
+// D92：启动即恢复中断的整理任务/撤销（任务真相在库里，进程重启不丢），之后每分钟巡检失联 worker
+organizeTasks.startResumer();
+
 startScheduler(
   store,
   new MaintenanceService(store),
   // 每小时收纳盒清扫兜底（原型 06）：离线堆积批量处理 + 全设备镜像入队
-  new Pipeline(store, llmFor, { syncAi: process.env.MF_SYNC_AI === "1" }),
+  pipeline,
   registry,
 );
 
@@ -78,6 +87,7 @@ startRetentionPrune(store, registry);
 startSummaryBackfill(pipeline, registry);
 startCategoryBackfill(pipeline, registry); // D65：资料分类回灌（涓流常驻，无 LLM 零开销）
 startClassificationReview(pipeline, registry); // D77：分类自检 patrol（自动归位一次性复核，无 LLM 零开销）
+startMaterialConversionSweep(pipeline, registry); // D91：新收纳盒入口持久候选，启动恢复+每分钟补扫
 
 // D61 资料库：存量一次性回灌（纯本地分类，零网络）+ 孤儿封面清理（书签删除走 FK 级联，文件无钩子）
 // D67：云端逐用户库回灌
