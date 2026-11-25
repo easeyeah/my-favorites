@@ -4,6 +4,9 @@
  *  - AI 双路整理：内容驱动的新目录（两层）、旧目录按稳定 ID 复用、内容页转资料入独立分类；
  *  - 计数口径 total = moved + converted + unchanged + skipped + failed + remaining；
  *  - 隐私前置：私密/隐私域条目不进模型、不落明细；模型输入不含私密标题；
+ *  - D95 粒度：新目录直接承接不足 3 条不建（两层各自成组）；小主题并入更宽主题；
+ *    来源目录里自动整理建的小目录不作复用候选；模型明确回答「不复用」时不被同名兜底覆盖；
+ *    与来源无关且同类太少的书签归入最接近的大类，不留在放错的目录里；
  *  - 失败不伪装成功：模型故障如实计失败；规划失败整任务失败且零变更，恢复后可继续；
  *  - 等待期间的用户修改/外部转换 → 跳过不覆盖；停止/继续/整次撤销/单批撤销/明细过期；
  *  - 重启恢复（过期租约被接管，旧 worker 无权再写）；多用户隔离；SSE 任务门铃。
@@ -44,7 +47,11 @@ interface Script {
   map?: (
     nodes: Array<{ key: string; name: string; count: number; samples: string[] }>,
     folders: Array<{ id: string; path: string; samples: string[] }>,
-  ) => Array<{ key: string; reuseId: string | null }>;
+  ) => Array<{ key: string; reuseId: string | null; place?: "inside" | "top"; fallbackId?: string | null }>;
+  /** 合并阶段的脚本：把小主题并入更宽的主题（canonical）；不写 = 各主题保持原名 */
+  consolidate?: (topics: Array<{ name: string }>) => {
+    topics: Array<{ name: string; canonical: string; subtopics?: Array<{ name: string; canonical: string }> }>;
+  };
   /** 每次模型调用前的钩子：注入并发修改 / 阻塞 */
   before?: (kind: Kind, messages: ChatMessage[]) => Promise<void> | void;
 }
@@ -93,7 +100,9 @@ function scriptedLlm(script: Script = {}): { client: LlmClient; calls: Call[] } 
         };
       }
       if (kind === "consolidate") {
-        const { topics } = JSON.parse(user) as { topics: Array<{ name: string; subtopics?: Array<{ name: string }> }> };
+        // 合并阶段的输入是主题数组本身（不是 { topics } 包裹）——此前这里解析错形状、一直抛错被「合并失败不致命」吞掉
+        const topics = JSON.parse(user) as Array<{ name: string; subtopics?: Array<{ name: string }> }>;
+        if (script.consolidate) return script.consolidate(topics);
         return {
           topics: topics.map((t) => ({
             name: t.name,
@@ -109,11 +118,12 @@ function scriptedLlm(script: Script = {}): { client: LlmClient; calls: Call[] } 
           folders: Array<{ id: string; path: string; samples: string[] }>;
         };
         if (script.map) return { nodes: script.map(nodes, folders) };
-        // 默认映射：主题名与某个现有目录名完全一致（且唯一）才复用，否则新建
+        // 默认映射：主题名与某个现有目录名完全一致（且唯一）才复用，否则建在来源目录之下（place=inside）
         return {
           nodes: nodes.map((n) => {
             const hits = folders.filter((f) => f.path.split(" / ").pop() === n.name);
-            return { key: n.key, reuseId: hits.length === 1 ? hits[0]!.id : null };
+            const reuseId = hits.length === 1 ? hits[0]!.id : null;
+            return n.key.startsWith("t:") ? { key: n.key, reuseId, place: reuseId ? undefined : "inside" } : { key: n.key, reuseId };
           }),
         };
       }
@@ -181,6 +191,7 @@ interface TaskView {
   planned_new_folders: number;
   created_folders: number;
   reused_folders: number;
+  moved_outside?: number;
   planned_categories: number;
   new_categories: number;
   reused_categories: number;
@@ -258,6 +269,10 @@ const folderByName = (rows: FolderRow[], name: string, parent?: string): FolderR
   if (!hit) throw new Error(`folder not found: ${name}`);
   return hit;
 };
+/** 目录内直接承接的书签数 */
+const itemsIn = (folderId: string): number =>
+  (env.store.db.prepare("SELECT COUNT(*) AS c FROM bookmarks WHERE folder_id = ?").get(folderId) as { c: number }).c;
+
 const byTitle = (rows: Bm[], title: string): Bm => {
   const hit = rows.find((b) => cleanTitle(b.title) === title);
   if (!hit) throw new Error(`bookmark not found: ${title}`);
@@ -338,8 +353,13 @@ describe("D92 AI 双路整理", () => {
     await ingest([
       { url: "https://rustdesk92.example.com/", title: "[site:远程控制] RustDesk 官网", folderPath: ["常用收藏"] },
       { url: "https://sill92.example.com/", title: "[site:远程控制] Sill 远程控制", folderPath: ["常用收藏", "常用"] },
+      { url: "https://todesk92.example.com/", title: "[site:远程控制] ToDesk 官网", folderPath: ["常用收藏", "其他"] },
       { url: "https://react92.example.com/", title: "[site:开发/前端开发] React 文档", folderPath: ["常用收藏", "工具"] },
       { url: "https://vue92.example.com/", title: "[site:开发/前端开发] Vue 指南", folderPath: ["常用收藏", "其他"] },
+      { url: "https://angular92.example.com/", title: "[site:开发/前端开发] Angular 文档", folderPath: ["常用收藏", "常用"] },
+      { url: "https://juejin92.example.com/", title: "[site:开发] 掘金", folderPath: ["常用收藏", "其他"] },
+      { url: "https://oschina92.example.com/", title: "[site:开发] 开源中国", folderPath: ["常用收藏", "工具"] },
+      { url: "https://csdn92.example.com/", title: "[site:开发] CSDN", folderPath: ["常用收藏", "常用"] },
       { url: "https://portainer92.example.com/", title: "[site:部署运维] Portainer", folderPath: ["常用收藏"] },
       { url: "https://docker92.example.com/post/1", title: "[content:部署] Docker 部署教程{cat:技术开发/容器部署}", folderPath: ["常用收藏", "工具"] },
       { url: "https://figma92.example.com/blog/x", title: "[content:设计] Figma 自动布局教程{cat:设计/界面设计}", folderPath: ["常用收藏", "其他"] },
@@ -362,10 +382,10 @@ describe("D92 AI 双路整理", () => {
     const t = await runTask(root.id);
     expect(t.status).toBe("completed_with_issues"); // 有 1 条证据不足需要说明，不包装成「全都合适」
     expect(t.mode).toBe("ai");
-    expect(t.total).toBe(9);
-    expect(t.checked).toBe(9);
+    expect(t.total).toBe(14);
+    expect(t.checked).toBe(14);
     expect(t.remaining).toBe(0);
-    expect(t.moved).toBe(5);
+    expect(t.moved).toBe(10);
     expect(t.converted).toBe(2);
     expect(t.unchanged).toBe(2);
     expect(t.skipped).toBe(0);
@@ -376,10 +396,11 @@ describe("D92 AI 双路整理", () => {
     expect(t.new_materials).toBe(2);
     expect(t.planned_categories).toBe(2);
     expect(t.new_categories).toBe(2);
-    expect(t.summary).toContain("书签归位 5 条");
+    expect(t.summary).toContain("书签归位 10 条");
     expect(t.summary).toContain("转入资料 2 条");
 
     // 目录结构：新建「远程控制」「开发」「开发 / 前端开发」挂在被整理目录下；旧「部署运维」被复用、未重复建
+    // （D95：三个新目录各自直接承接 3 条——「开发」一级自己就有 3 条，二级才值得存在）
     const tree = await folders();
     const remote = tree.filter((f) => f.name === "远程控制");
     expect(remote).toHaveLength(1);
@@ -397,6 +418,9 @@ describe("D92 AI 双路整理", () => {
     expect(folderOf("Sill 远程控制")).toBe(remote[0]!.id);
     expect(folderOf("React 文档")).toBe(fe[0]!.id);
     expect(folderOf("Vue 指南")).toBe(fe[0]!.id);
+    expect(folderOf("Angular 文档")).toBe(fe[0]!.id);
+    expect(folderOf("ToDesk 官网")).toBe(remote[0]!.id);
+    for (const name of ["掘金", "开源中国", "CSDN"]) expect(folderOf(name)).toBe(dev[0]!.id);
     expect(folderOf("Portainer")).toBe(deploy.id);
     // 已在合适目录（同一目录 ID）→ 保持，不产生空移动
     expect(folderOf("Portainer 文档中心")).toBe(deploy.id);
@@ -424,7 +448,7 @@ describe("D92 AI 双路整理", () => {
 
     // 明细与结构接口
     const moved = await itemsOf(t.id, "moved");
-    expect(moved.total).toBe(5);
+    expect(moved.total).toBe(10);
     expect(moved.items.find((i) => i.title?.includes("React 文档"))?.to_path).toBe("常用收藏 / 开发 / 前端开发");
     const converted = await itemsOf(t.id, "converted");
     expect(converted.total).toBe(2);
@@ -432,7 +456,9 @@ describe("D92 AI 双路整理", () => {
     expect((await itemsOf(t.id, "unchanged")).total).toBe(2);
     expect((await itemsOf(t.id, "failed")).total).toBe(0);
     const structure = await getJson<{ folders: Array<{ path: string; state: string; actual_count: number }> }>(`/organize/tasks/${t.id}/folders`);
-    expect(structure.folders.find((f) => f.path === "常用收藏 / 开发 / 前端开发")).toMatchObject({ state: "created", actual_count: 2 });
+    expect(structure.folders.find((f) => f.path === "常用收藏 / 开发 / 前端开发")).toMatchObject({ state: "created", actual_count: 3 });
+    expect(structure.folders.find((f) => f.path === "常用收藏 / 开发")).toMatchObject({ state: "created", actual_count: 3 });
+    expect(structure.folders.find((f) => f.path === "常用收藏 / 远程控制")).toMatchObject({ state: "created", actual_count: 3 });
     expect(structure.folders.find((f) => f.path === "常用收藏 / 部署运维")).toMatchObject({ state: "reused", actual_count: 1 });
     const cats = await getJson<{ categories: Array<{ path: string; state: string; actual_count: number }> }>(`/organize/tasks/${t.id}/material-categories`);
     expect(cats.categories.map((c) => c.path).sort()).toEqual(["技术开发/容器部署", "设计/界面设计"]);
@@ -560,6 +586,407 @@ function bookmarksSync(): Bm[] {
   return env.store.db.prepare("SELECT id, title, folder_id FROM bookmarks").all() as Bm[];
 }
 
+describe("D94 落点范围：库内任意目录", () => {
+  /**
+   * 用户实机场景：整理「C 硬件」时，里面混着与硬件无关的购物导购站。
+   * size = 每个主题的书签数（D95 之后新建目录至少 3 条同类，要建目录的用例得显式成组）
+   */
+  const hardwareTopics: Array<[topic: string, sub: string, names: string[]]> = [
+    ["购物导购", "C03 外设", ["辣品导购平台", "什么值得买", "慢慢买"]],
+    ["智能硬件", "C03 外设", ["安克创新官网", "绿联官网", "小米生态链"]],
+    ["NAS 主机", "C01 NAS 主机", ["群晖官网", "威联通官网", "爱快"]],
+  ];
+  const hardwareItems = (size: number) =>
+    hardwareTopics.flatMap(([topic, sub, names], i) =>
+      names.slice(0, size).map((name, k) => ({ url: `https://h94.example.com/${i}-${k}`, title: `[site:${topic}] ${name}`, folderPath: ["C 硬件", sub] })),
+    );
+  async function seedHardware(size = 1): Promise<{ tree: FolderRow[]; ids: Record<string, string> }> {
+    await ingest(hardwareItems(size));
+    const rows = bookmarksSync();
+    const ids: Record<string, string> = {};
+    for (const r of rows) ids[cleanTitle(r.title)] = r.id;
+    return { tree: await folders(), ids };
+  }
+  const structureOf = (id: string) =>
+    getJson<{ folders: Array<{ path: string; state: string; outside: boolean }> }>(`/organize/tasks/${id}/folders`);
+
+  it("与来源目录无关的内容归入库内其他现有目录（跨根），不在来源目录下硬建子目录", async () => {
+    let shoppingId = "";
+    const { client, calls } = scriptedLlm({
+      map: (nodes) =>
+        nodes.map((n) => ({ key: n.key, reuseId: n.name === "购物导购" ? shoppingId : null, place: "inside" as const })),
+    });
+    env = makeEnv(client);
+    await ingest([
+      { url: "https://shop94.example.com/1", title: "什么值得买", folderPath: ["购物"] },
+      { url: "https://lapin94.example.com/", title: "[site:购物导购] 辣品导购平台", folderPath: ["C 硬件", "C03 外设"] },
+      { url: "https://anker94.example.com/", title: "[site:智能硬件] 安克创新官网", folderPath: ["C 硬件", "C03 外设"] },
+      { url: "https://ugreen94.example.com/", title: "[site:智能硬件] 绿联官网", folderPath: ["C 硬件"] },
+      { url: "https://mi94.example.com/", title: "[site:智能硬件] 小米生态链", folderPath: ["C 硬件", "C03 外设"] },
+    ]);
+    shoppingId = folderByName(await folders(), "购物").id;
+    const root = folderByName(await folders(), "C 硬件");
+    const before = bookmarksSync();
+    const t = await runTask(root.id);
+    expect(t.moved).toBe(4); // 辣品 1 条 + 智能硬件 3 条（D95：3 条同类才值得在来源目录下建新目录）
+    expect(t.moved_outside).toBe(1);
+    // 购物导购站离开了硬件目录，归到已有的「购物」根目录；只有一条也照常复用——复用现有目录不受成组门槛限制
+    expect(env.store.getBookmark(byTitle(before, "辣品导购平台").id)?.folder_id).toBe(shoppingId);
+    const moved = await itemsOf(t.id, "moved");
+    expect(moved.items.find((i) => i.title?.includes("辣品"))).toMatchObject({ from_path: "C 硬件 / C03 外设", to_path: "购物" });
+    // 与硬件相关的主题仍建在来源目录之下
+    const after = await folders();
+    expect(after.filter((f) => f.name === "购物导购")).toHaveLength(0);
+    const smart = after.find((f) => f.name === "智能硬件")!;
+    expect(smart.parent_id).toBe(root.id);
+    // 映射时模型看到的是全库目录（含其他根），并被明确告知落点不限于来源目录内部
+    const mapCall = calls.find((c) => c.kind === "map")!;
+    expect(mapCall.system).toContain("不限于「C 硬件」内部");
+    expect(mapCall.user).toContain('"path":"购物"');
+    expect(mapCall.user).toContain('"path":"C 硬件 / C03 外设"');
+    // 目录变化：外部目录标记为来源之外
+    const structure = await structureOf(t.id);
+    expect(structure.folders.find((f) => f.path === "购物")).toMatchObject({ state: "reused", outside: true });
+    expect(structure.folders.find((f) => f.path === "C 硬件 / 智能硬件")).toMatchObject({ state: "created", outside: false, actual_count: 3 });
+  });
+
+  it("库内没有合适目录、且与来源目录无关 → 新建顶级目录（同浏览器根），撤销时回收", async () => {
+    const { client } = scriptedLlm({
+      map: (nodes) => nodes.map((n) => ({ key: n.key, reuseId: null, place: n.name === "购物导购" ? ("top" as const) : ("inside" as const) })),
+    });
+    env = makeEnv(client);
+    // 购物导购 3 条成组（建顶级目录）；另两个主题各 1 条，不足成组
+    await ingest([
+      ...hardwareItems(3).filter((it) => it.title.includes("[site:购物导购]")),
+      { url: "https://anker94.example.com/", title: "[site:智能硬件] 安克创新官网", folderPath: ["C 硬件", "C03 外设"] },
+      { url: "https://nas94.example.com/", title: "[site:NAS 主机] 群晖官网", folderPath: ["C 硬件", "C01 NAS 主机"] },
+    ]);
+    const tree = await folders();
+    const ids: Record<string, string> = {};
+    for (const r of bookmarksSync()) ids[cleanTitle(r.title)] = r.id;
+    const root = folderByName(tree, "C 硬件");
+    const peripheral = folderByName(tree, "C03 外设");
+    const t = await runTask(root.id);
+    expect(t.moved).toBe(3);
+    expect(t.moved_outside).toBe(3); // 3 条购物导购全部归入新建的顶级目录
+    const created = env.store.getFolder((await folders()).find((f) => f.name === "购物导购")!.id)!;
+    expect(created).toBeTruthy();
+    expect(created.parent_id).toBeNull(); // 顶级目录，不是「C 硬件 / 购物导购」
+    expect(created.root).toBe(env.store.getFolder(root.id)!.root ?? "bar"); // 与被整理目录同处一个浏览器根
+    expect(env.store.getBookmark(ids["辣品导购平台"]!)?.folder_id).toBe(created.id);
+    expect((await itemsOf(t.id, "moved")).items.find((i) => i.title?.includes("辣品"))?.to_path).toBe("购物导购");
+    // 整次撤销：书签回原位，新建的顶级目录因已空被回收
+    expect((await post(`/organize/tasks/${t.id}/undo`)).status).toBe(200);
+    await waitIdle();
+    const undone = await view(t.id);
+    expect(undone.undo_status).toBe("completed");
+    expect(undone.undo_restored).toBe(3);
+    expect(undone.undo_folders).toBeGreaterThanOrEqual(1);
+    expect(env.store.getBookmark(ids["辣品导购平台"]!)?.folder_id).toBe(peripheral.id);
+    expect((await folders()).some((f) => f.id === created.id)).toBe(false);
+  });
+
+  it("模型漏答落点时按名称兜底：与来源目录无关的主题建顶级目录，相关的建在其下", async () => {
+    const { client } = scriptedLlm({ map: (nodes) => nodes.map((n) => ({ key: n.key, reuseId: null })) }); // 不带 place
+    env = makeEnv(client);
+    const { tree } = await seedHardware(3);
+    await runTask(folderByName(tree, "C 硬件").id);
+    const after = await folders();
+    const root = folderByName(tree, "C 硬件");
+    // 「购物导购」与「C 硬件 / C03 外设 / C01 NAS 主机」毫无共同词元 → 顶级
+    expect(after.find((f) => f.name === "购物导购")?.parent_id).toBeNull();
+    // 「智能硬件」与「C 硬件」共享「硬件」→ 来源目录之下
+    expect(after.find((f) => f.name === "智能硬件")?.parent_id).toBe(root.id);
+  });
+
+  it("一次整理新建的顶级目录有上限：超出的主题保留原位并说明，不在根级铺一排目录", async () => {
+    const topics = ["航空", "航天", "美食", "旅行", "摄影", "音乐", "电影", "体育", "理财", "育儿"];
+    const { client } = scriptedLlm({ map: (nodes) => nodes.map((n) => ({ key: n.key, reuseId: null, place: "top" as const })) });
+    env = makeEnv(client);
+    // 每个主题 3 条：先成组，再轮到顶级数量闸筛选
+    await ingest(
+      topics.flatMap((name, i) =>
+        Array.from({ length: 3 }, (_, k) => ({ url: `https://t94.example.com/${i}-${k}`, title: `[site:${name}] 条目${i}-${k}`, folderPath: ["C 硬件"] })),
+      ),
+    );
+    const root = folderByName(await folders(), "C 硬件");
+    const t = await runTask(root.id);
+    expect(t.moved).toBe(24); // 8 个主题 × 3 条
+    expect(t.moved_outside).toBe(24);
+    expect(t.unchanged).toBe(6); // 2 个主题 × 3 条
+    const kept = await itemsOf(t.id, "unchanged");
+    expect(kept.total).toBe(6);
+    expect(kept.items.map((i) => i.reason)).toEqual(Array(6).fill("new_roots_capped"));
+    expect((await folders()).filter((f) => !f.parent_id && topics.includes(f.name))).toHaveLength(8);
+  });
+
+  it("「私人收藏」与收纳盒不可作为落点：模型指向它们时忽略，不让普通书签混进敏感目录", async () => {
+    let privateId = "";
+    const { client, calls } = scriptedLlm({
+      map: (nodes) => nodes.map((n) => ({ key: n.key, reuseId: privateId || null, place: "inside" as const })),
+    });
+    env = makeEnv(client);
+    env.store.createFolder("📥 收纳盒", null, "user", true);
+    privateId = env.store.createFolder("私人收藏", null, "ai_created").id;
+    await ingest(hardwareItems(3).filter((it) => it.title.includes("[site:购物导购]"))); // 3 条同类，本该成组移动
+    const root = folderByName(await folders(), "C 硬件");
+    const t = await runTask(root.id);
+    expect(t.moved).toBe(3);
+    expect(t.moved_outside).toBe(0); // 模型选的落点被忽略后，改在来源目录之下建目录
+    for (const name of ["辣品导购平台", "什么值得买", "慢慢买"]) {
+      expect(env.store.getBookmark(byTitle(bookmarksSync(), name).id)?.folder_id).not.toBe(privateId);
+    }
+    // 映射提示词的候选目录里根本不出现这两个目录，模型无从选中
+    const mapCall = calls.find((c) => c.kind === "map")!;
+    expect(mapCall.user).not.toContain("私人收藏");
+    expect(mapCall.user).not.toContain("收纳盒");
+  });
+});
+
+describe("D95 粒度控制：新目录至少 3 条同类", () => {
+  const shoppingOnly = () => [
+    { url: "https://lapin95.example.com/", title: "[site:购物导购] 辣品导购平台", folderPath: ["C 硬件", "C03 外设"] },
+    { url: "https://smzdm95.example.com/", title: "[site:购物导购] 什么值得买", folderPath: ["C 硬件", "C03 外设"] },
+    { url: "https://mmb95.example.com/", title: "[site:购物导购] 慢慢买", folderPath: ["C 硬件"] },
+  ];
+
+  it("一条书签一个目录不再发生：不足 3 条的主题不建目录，书签保留原位并逐条说明", async () => {
+    const { client } = scriptedLlm({
+      map: (nodes) => nodes.map((n) => ({ key: n.key, reuseId: null, place: n.name === "购物导购" ? ("top" as const) : ("inside" as const) })),
+    });
+    env = makeEnv(client);
+    // 用户实机第二次整理的输入：每个主题都只有一条书签，模型也给每个主题单独立了名
+    await ingest([
+      { url: "https://d95.example.com/1", title: "[site:购物导购] 辣品导购平台", folderPath: ["C 硬件", "C03 外设"] },
+      { url: "https://d95.example.com/2", title: "[site:物联网传感] 传感器之家", folderPath: ["C 硬件"] },
+      { url: "https://d95.example.com/3", title: "[site:无人机硬件] 大疆官网", folderPath: ["C 硬件"] },
+      { url: "https://d95.example.com/4", title: "[site:柔性显示技术] 柔宇", folderPath: ["C 硬件"] },
+    ]);
+    const before = await folders();
+    const rows = bookmarksSync();
+    const t = await runTask(folderByName(before, "C 硬件").id);
+    expect(t.status).toBe("completed");
+    expect(t.moved).toBe(0);
+    expect(t.created_folders).toBe(0);
+    expect(t.unchanged).toBe(4);
+    // 一个目录都没多出来——来源目录下没有，根级也没有
+    expect((await folders()).map((f) => f.id).sort()).toEqual(before.map((f) => f.id).sort());
+    const kept = await itemsOf(t.id, "unchanged");
+    expect(kept.items.map((i) => i.reason)).toEqual(Array(4).fill("too_few_to_group"));
+    // 终态说明如实交代：不是「位置都合适」，而是同类太少没建目录
+    expect(t.summary).toBe("已检查 4 条，有 4 条同类太少，未单独建目录，保留原位，本次未调整");
+    expect(env.store.taskVersions(t.id)).toHaveLength(0); // 零变更 = 没有版本
+    for (const r of rows) expect(env.store.getBookmark(r.id)?.folder_id).toBe(r.folder_id);
+  });
+
+  it("来源目录里之前自动整理建的小目录（放错的结果）不再是复用候选：不交给模型、也不作同名兜底，里面的书签重新归位", async () => {
+    let seen: Array<{ id: string; path: string; aiCreated?: boolean }> = [];
+    let remoteId = "";
+    const { client, calls } = scriptedLlm({
+      map: (nodes, folders) => {
+        seen = folders;
+        // 模型明确选中成组的自动整理目录时照常复用；其余不复用
+        return nodes.map((n) => ({ key: n.key, reuseId: n.name === "远程控制" ? remoteId : null, place: "top" as const }));
+      },
+    });
+    env = makeEnv(client);
+    await ingest([
+      ...shoppingOnly(),
+      { url: "https://d95.example.com/life", title: "生活服务", folderPath: ["J 生活", "购物"] },
+      { url: "https://d95.example.com/r0", title: "[site:远程控制] ToDesk 官网", folderPath: ["C 硬件", "C03 外设"] },
+      { url: "https://d95.example.com/r1", title: "[site:远程控制] RustDesk 官网", folderPath: ["C 硬件", "临时"] },
+      { url: "https://d95.example.com/r2", title: "[site:远程控制] Sill 远程控制", folderPath: ["C 硬件", "临时"] },
+      { url: "https://d95.example.com/r3", title: "[site:远程控制] 向日葵", folderPath: ["C 硬件", "临时"] },
+    ]);
+    const tree = await folders();
+    const root = folderByName(tree, "C 硬件");
+    const rows = bookmarksSync();
+    // 上一次自动整理留在硬件目录里的错误落点（用户实机：第二次整理又把辣品原样放了回去）
+    const misplaced = env.store.createFolder("购物导购", root.id, "ai_created");
+    env.store.moveBookmark(byTitle(rows, "辣品导购平台").id, misplaced.id);
+    // 来源目录里自动整理建的成组目录（≥3 条）仍是候选；来源之外的小目录不受影响
+    remoteId = env.store.createFolder("远程控制", root.id, "ai_created").id;
+    for (const name of ["RustDesk 官网", "Sill 远程控制", "向日葵"]) env.store.moveBookmark(byTitle(rows, name).id, remoteId);
+    const outsideSmall = env.store.createFolder("3D建模平台", null, "ai_created");
+    const t = await runTask(root.id);
+    // 辣品离开了那个放错的目录；成组的自动整理目录被照常复用，第四条远控书签归入其中
+    expect(t.moved).toBe(4);
+    expect(t.moved_outside).toBe(3);
+    const created = (await folders()).find((f) => f.name === "购物导购" && !f.parent_id)!;
+    expect(created).toBeTruthy();
+    expect(env.store.getBookmark(byTitle(rows, "辣品导购平台").id)?.folder_id).toBe(created.id);
+    expect(env.store.getFolder(misplaced.id)).toBeTruthy(); // 旧目录不删（删除永不自动执行），只是不再往里放
+    expect(env.store.getBookmark(byTitle(rows, "ToDesk 官网").id)?.folder_id).toBe(remoteId);
+    expect((await itemsOf(t.id, "unchanged")).items.filter((i) => i.reason === "already_placed")).toHaveLength(3);
+    // 映射输入：放错的小目录根本不出现；成组的自动整理目录带 aiCreated 标记；来源之外的小目录照常是候选
+    expect(seen.some((f) => f.id === misplaced.id)).toBe(false);
+    expect(seen.find((f) => f.id === remoteId)).toMatchObject({ path: "C 硬件 / 远程控制", aiCreated: true });
+    expect(seen.find((f) => f.id === outsideSmall.id)).toMatchObject({ path: "3D建模平台", aiCreated: true });
+    expect(seen.find((f) => f.path === "J 生活 / 购物")).not.toHaveProperty("aiCreated");
+    expect(calls.find((c) => c.kind === "map")!.system).toContain("aiCreated:true");
+  });
+
+  it("模型明确回答「不复用」时不被同名兜底覆盖；漏答时才按全库唯一的同名目录兜底", async () => {
+    const run = async (answer: "null" | "omit") => {
+      const { client } = scriptedLlm({
+        map: (nodes) =>
+          nodes.filter((n) => answer === "null" || n.name !== "购物导购").map((n) => ({ key: n.key, reuseId: null, place: "top" as const })),
+      });
+      const prev = env;
+      env = makeEnv(client);
+      prev?.cleanup();
+      await ingest([...shoppingOnly(), { url: "https://d95.example.com/life", title: "生活服务", folderPath: ["J 生活", "购物导购"] }]);
+      const existingId = folderByName(await folders(), "购物导购").id;
+      const t = await runTask(folderByName(await folders(), "C 硬件").id);
+      return { t, to: env.store.getBookmark(byTitle(bookmarksSync(), "辣品导购平台").id)?.folder_id, existingId };
+    };
+    const explicit = await run("null");
+    expect(explicit.to).not.toBe(explicit.existingId); // 听模型的：另建顶级目录
+    expect(explicit.t.moved_outside).toBe(3);
+    const omitted = await run("omit");
+    expect(omitted.to).toBe(omitted.existingId); // 漏答才兜底
+  });
+
+  it("与来源目录无关、同类太少的书签不留在原地：归入模型指定的最接近大类（直接放在它下面，不新建目录）", async () => {
+    let lifeId = "";
+    const { client, calls } = scriptedLlm({
+      map: (nodes) =>
+        nodes.map((n) => ({ key: n.key, reuseId: null, place: "top" as const, fallbackId: n.name === "购物导购" ? lifeId : null })),
+    });
+    env = makeEnv(client);
+    await ingest([
+      ...shoppingOnly().slice(0, 1),
+      { url: "https://d95.example.com/life", title: "[site:生活购物] 什么值得买", folderPath: ["J 生活", "购物"] }, // 不在整理范围内
+    ]);
+    lifeId = folderByName(await folders(), "J 生活").id;
+    const rows = bookmarksSync();
+    const t = await runTask(folderByName(await folders(), "C 硬件").id);
+    expect(t.moved).toBe(1);
+    expect(t.moved_outside).toBe(1);
+    expect(t.created_folders).toBe(0); // 没有为一条书签建目录
+    // 辣品离开了硬件目录，直接落在大类根下（没有被硬塞进大类的某个子目录）
+    expect(env.store.getBookmark(byTitle(rows, "辣品导购平台").id)?.folder_id).toBe(lifeId);
+    const moved = await itemsOf(t.id, "moved");
+    expect(moved.items[0]).toMatchObject({ reason: "fallback_category", from_path: "C 硬件 / C03 外设", to_path: "J 生活" });
+    expect(t.summary).toBe("检查完成：书签归位 1 条"); // 不再说「同类太少，保留原位」
+    const structure = await getJson<{ folders: Array<{ path: string; state: string; outside: boolean }> }>(
+      `/organize/tasks/${t.id}/folders`,
+    );
+    expect(structure.folders).toEqual([expect.objectContaining({ path: "J 生活", state: "reused", outside: true })]);
+    // 提示词要求模型为「与来源无关」的主题给出退路，并禁止把它指回来源目录
+    const system = calls.find((c) => c.kind === "map")!.system;
+    expect(system).toContain("fallbackId");
+    expect(system).toContain("明显放错地方的书签必须离开它现在的目录");
+  });
+
+  it("属于来源目录主题的子方向同类太少时不外流：即使模型给了大类，也保留原位并说明", async () => {
+    let lifeId = "";
+    const { client } = scriptedLlm({
+      map: (nodes) => nodes.map((n) => ({ key: n.key, reuseId: null, place: "inside" as const, fallbackId: lifeId || undefined })),
+    });
+    env = makeEnv(client);
+    await ingest([
+      { url: "https://d95.example.com/h1", title: "[site:无人机硬件] 大疆官网", folderPath: ["C 硬件", "C03 外设"] },
+      { url: "https://d95.example.com/life", title: "[site:生活购物] 什么值得买", folderPath: ["J 生活", "购物"] },
+    ]);
+    lifeId = folderByName(await folders(), "J 生活").id;
+    const rows = bookmarksSync();
+    const t = await runTask(folderByName(await folders(), "C 硬件").id);
+    expect(t.moved).toBe(0);
+    expect(t.moved_outside).toBe(0);
+    expect(env.store.getBookmark(byTitle(rows, "大疆官网").id)?.folder_id).toBe(folderByName(await folders(), "C03 外设").id);
+    expect((await itemsOf(t.id, "unchanged")).items.find((i) => i.title?.includes("大疆"))).toMatchObject({ reason: "too_few_to_group" });
+  });
+
+  it("大类指向来源目录自己、它的子目录或不存在的目录时忽略：宁可保留原位，也不做一次没有意义的移动", async () => {
+    const run = async (pick: (sourceId: string, subId: string) => string) => {
+      const { client } = scriptedLlm({
+        map: (nodes) => nodes.map((n) => ({ key: n.key, reuseId: null, place: "top" as const, fallbackId: pick(sourceId, subId) })),
+      });
+      const prev = env;
+      env = makeEnv(client);
+      prev?.cleanup();
+      await ingest([{ url: "https://lapin95.example.com/", title: "[site:购物导购] 辣品导购平台", folderPath: ["C 硬件", "C03 外设"] }]);
+      const tree = await folders();
+      const sourceId = folderByName(tree, "C 硬件").id;
+      const subId = folderByName(tree, "C03 外设").id;
+      const t = await runTask(sourceId);
+      return { moved: t.moved, outside: t.moved_outside, reasons: (await itemsOf(t.id, "unchanged")).items.map((i) => i.reason) };
+    };
+    const toSource = await run((sourceId) => sourceId);
+    expect(toSource).toEqual({ moved: 0, outside: 0, reasons: ["too_few_to_group"] });
+    const toSub = await run((sourceId, subId) => subId);
+    expect(toSub).toEqual({ moved: 0, outside: 0, reasons: ["too_few_to_group"] });
+    const toMissing = await run(() => "no-such-folder");
+    expect(toMissing).toEqual({ moved: 0, outside: 0, reasons: ["too_few_to_group"] });
+  });
+
+  it("小主题先并入更宽的主题：合并后满 3 条只建一个目录，两个阶段的提示词都带成组门槛", async () => {
+    const { client, calls } = scriptedLlm({
+      consolidate: (topics) => ({ topics: topics.map((t) => ({ name: t.name, canonical: "智能设备" })) }),
+      map: (nodes) => nodes.map((n) => ({ key: n.key, reuseId: null, place: "inside" as const })),
+    });
+    env = makeEnv(client);
+    await ingest([
+      { url: "https://d95.example.com/u1", title: "[site:无人机硬件] 大疆官网", folderPath: ["C 硬件"] },
+      { url: "https://d95.example.com/w1", title: "[site:智能穿戴] 童伴官网", folderPath: ["C 硬件"] },
+      { url: "https://d95.example.com/p1", title: "[site:投影设备] 极米官网", folderPath: ["C 硬件"] },
+    ]);
+    const root = folderByName(await folders(), "C 硬件");
+    const t = await runTask(root.id);
+    expect(t.moved).toBe(3);
+    expect(t.created_folders).toBe(1);
+    const created = (await folders()).find((f) => f.name === "智能设备")!;
+    expect(created.parent_id).toBe(root.id);
+    expect(calls.find((c) => c.kind === "topics")!.system).toContain("至少要有 3 条同类");
+    expect(calls.find((c) => c.kind === "consolidate")!.system).toContain("少于 3 条的小主题");
+  });
+
+  it("两层目录各自成组：一级主题自己不成组、只保住一个子主题时不套两层，由一级主题承接", async () => {
+    env = makeEnv(scriptedLlm().client);
+    await ingest([
+      { url: "https://d95.example.com/f1", title: "[site:开发/前端开发] React 文档", folderPath: ["常用收藏"] },
+      { url: "https://d95.example.com/f2", title: "[site:开发/前端开发] Vue 指南", folderPath: ["常用收藏"] },
+      { url: "https://d95.example.com/f3", title: "[site:开发/前端开发] Angular 文档", folderPath: ["常用收藏"] },
+    ]);
+    const root = folderByName(await folders(), "常用收藏");
+    const t = await runTask(root.id);
+    expect(t.moved).toBe(3);
+    expect(t.created_folders).toBe(1);
+    const tree = await folders();
+    expect(tree.filter((f) => f.name === "前端开发")).toHaveLength(0); // 三条书签不占两层
+    const dev = tree.find((f) => f.name === "开发")!;
+    expect(dev.parent_id).toBe(root.id);
+    expect(itemsIn(dev.id)).toBe(3);
+  });
+
+  it("保住两个成组的子主题时保留归组的一级目录（顶级落点也只占一个根级位置）", async () => {
+    const { client } = scriptedLlm({ map: (nodes) => nodes.map((n) => ({ key: n.key, reuseId: null, place: "top" as const })) });
+    env = makeEnv(client);
+    await ingest([
+      { url: "https://d95.example.com/f1", title: "[site:开发/前端开发] React 文档", folderPath: ["常用收藏"] },
+      { url: "https://d95.example.com/f2", title: "[site:开发/前端开发] Vue 指南", folderPath: ["常用收藏"] },
+      { url: "https://d95.example.com/f3", title: "[site:开发/前端开发] Angular 文档", folderPath: ["常用收藏"] },
+      { url: "https://d95.example.com/b1", title: "[site:开发/后端开发] Spring 指南", folderPath: ["常用收藏"] },
+      { url: "https://d95.example.com/b2", title: "[site:开发/后端开发] Django 文档", folderPath: ["常用收藏"] },
+      { url: "https://d95.example.com/b3", title: "[site:开发/后端开发] Express 文档", folderPath: ["常用收藏"] },
+    ]);
+    const t = await runTask(folderByName(await folders(), "常用收藏").id);
+    expect(t.moved).toBe(6);
+    expect(t.created_folders).toBe(3);
+    expect(t.moved_outside).toBe(6);
+    const tree = await folders();
+    const dev = tree.find((f) => f.name === "开发")!;
+    expect(dev.parent_id).toBeNull(); // 归组目录只占一个根级位置
+    expect(itemsIn(dev.id)).toBe(0);
+    for (const name of ["前端开发", "后端开发"]) {
+      const sub = tree.find((f) => f.name === name)!;
+      expect(sub.parent_id).toBe(dev.id);
+      expect(itemsIn(sub.id)).toBe(3);
+    }
+  });
+});
+
 describe("D92 冲突与失败：不漏不假成功", () => {
   it("等待期间用户修改 → 跳过不覆盖；其余条目照常处理", async () => {
     let mutated = false;
@@ -575,11 +1002,12 @@ describe("D92 冲突与失败：不漏不假成功", () => {
     await ingest([
       { url: "https://race92.example.com/a", title: "[site:竞争主题] 待修改", folderPath: ["并发测试"] },
       { url: "https://race92.example.com/b", title: "[site:竞争主题] 未被修改", folderPath: ["并发测试"] },
+      { url: "https://race92.example.com/e", title: "[site:竞争主题] 第三条", folderPath: ["并发测试"] },
     ]);
     const root = folderByName(await folders(), "并发测试");
     const before = bookmarksSync();
     const t = await runTask(root.id);
-    expect(t.moved).toBe(1);
+    expect(t.moved).toBe(2);
     expect(t.skipped).toBe(1);
     const target = env.store.getBookmark(byTitle(before, "待修改").id)!;
     expect(target.title).toBe("待修改（用户已改名）"); // 用户的新标题未被覆盖
@@ -602,10 +1030,11 @@ describe("D92 冲突与失败：不漏不假成功", () => {
     await ingest([
       { url: "https://race92.example.com/c", title: "[site:竞争主题] 被抢先转换", folderPath: ["并发测试"] },
       { url: "https://race92.example.com/d", title: "[site:竞争主题] 正常条目", folderPath: ["并发测试"] },
+      { url: "https://race92.example.com/f", title: "[site:竞争主题] 另一条", folderPath: ["并发测试"] },
     ]);
     const root = folderByName(await folders(), "并发测试");
     const t = await runTask(root.id);
-    expect(t.moved).toBe(1);
+    expect(t.moved).toBe(2);
     expect(t.converted).toBe(0);
     expect(t.skipped).toBe(1);
     const skipped = await itemsOf(t.id, "skipped");
@@ -630,6 +1059,7 @@ describe("D92 冲突与失败：不漏不假成功", () => {
       { url: "https://not92.example.com/p", title: "[content:部署] 判为非资料", folderPath: ["收藏"] },
       { url: "https://gone92.example.com/p", title: "[content:部署] 已移出资料", folderPath: ["收藏"] },
       { url: "https://low92.example.com/p", title: "[content:部署] 低置信文章", folderPath: ["收藏"] },
+      { url: "https://deploy92.example.com/", title: "[site:部署] 部署工具站", folderPath: ["收藏"] },
     ]);
     const rows = bookmarksSync();
     env.store.upsertCache({ bookmarkId: byTitle(rows, "判为非资料").id, l2Text: longText, fetchedVia: "extension_capture" });
@@ -643,7 +1073,7 @@ describe("D92 冲突与失败：不漏不假成功", () => {
     expect(t.status).toBe("completed_with_issues");
     expect(t.failed).toBe(1); // 抓取失败
     expect(t.converted).toBe(0); // 没有一条被强行转成资料
-    expect(t.moved).toBe(2); // 正文过少 / 判为非资料 → 按书签参与主题归位
+    expect(t.moved).toBe(3); // 正文过少 / 判为非资料 → 按书签参与主题归位（与另一条同类凑满 3 条才建目录）
     expect(t.skipped).toBe(1); // 资料已被用户移出
     expect(t.unchanged).toBe(1); // 低置信保留原位
     expect(t.moved + t.converted + t.unchanged + t.skipped + t.failed + t.remaining).toBe(t.total);
@@ -665,25 +1095,26 @@ describe("D92 冲突与失败：不漏不假成功", () => {
     await ingest([
       { url: "https://fail92.example.com/a", title: "[site:失败主题] 甲", folderPath: ["失败测试"] },
       { url: "https://fail92.example.com/b", title: "[site:失败主题] 乙", folderPath: ["失败测试"] },
+      { url: "https://fail92.example.com/c", title: "[site:失败主题] 丙", folderPath: ["失败测试"] },
     ]);
     const root = folderByName(await folders(), "失败测试");
     const t = await runTask(root.id);
     expect(t.status).toBe("completed_with_issues");
-    expect(t.failed).toBe(2);
+    expect(t.failed).toBe(3);
     expect(t.moved).toBe(0);
     expect(t.remaining).toBe(0);
-    expect(t.summary).toBe("检查完成，有 2 条处理失败"); // 不是「分类一致，无需挪动」
+    expect(t.summary).toBe("检查完成，有 3 条处理失败"); // 不是「分类一致，无需挪动」
     expect((await folders()).filter((f) => f.name === "失败主题")).toHaveLength(0); // 没有目录被建出来
     expect(env.store.taskVersions(t.id)).toHaveLength(0); // 没有版本 = 没有任何变更
 
     script.failTopics = false;
     const cont = await post(`/organize/tasks/${t.id}/continue`, { mode: "failed" });
     expect(cont.status).toBe(200);
-    expect(((await cont.json()) as { reopened: number }).reopened).toBe(2);
+    expect(((await cont.json()) as { reopened: number }).reopened).toBe(3);
     await waitIdle();
     const after = await view(t.id);
     expect(after.status).toBe("completed");
-    expect(after.moved).toBe(2);
+    expect(after.moved).toBe(3);
     expect(after.failed).toBe(0);
     expect((await folders()).filter((f) => f.name === "失败主题")).toHaveLength(1);
   });
@@ -695,12 +1126,13 @@ describe("D92 冲突与失败：不漏不假成功", () => {
     await ingest([
       { url: "https://plan92.example.com/a", title: "[site:规划主题] 甲", folderPath: ["规划测试"] },
       { url: "https://plan92.example.com/b", title: "[site:规划主题] 乙", folderPath: ["规划测试"] },
+      { url: "https://plan92.example.com/c", title: "[site:规划主题] 丙", folderPath: ["规划测试"] },
     ]);
     const root = folderByName(await folders(), "规划测试");
     const t = await runTask(root.id);
     expect(t.status).toBe("failed");
     expect(t.error).toContain("目录方案规划失败");
-    expect(t.remaining).toBe(2);
+    expect(t.remaining).toBe(3);
     expect(t.moved).toBe(0);
     expect((await folders()).filter((f) => f.name === "规划主题")).toHaveLength(0);
     expect(env.store.taskVersions(t.id)).toHaveLength(0);
@@ -710,18 +1142,19 @@ describe("D92 冲突与失败：不漏不假成功", () => {
     await waitIdle();
     const after = await view(t.id);
     expect(after.status).toBe("completed");
-    expect(after.moved).toBe(2);
+    expect(after.moved).toBe(3);
   });
 });
 
-describe("D92 无模型规则降级", () => {
-  it("规则命中且子树内有唯一同名目录才移动；不建新目录、不做资料分流", async () => {
+describe("D92/D94 无模型规则降级", () => {
+  it("规则命中且库内有唯一同名目录才移动（来源目录内优先）；不建新目录、不做资料分流", async () => {
     env = makeEnv(null);
     await ingest([
       { url: "https://github.com/acme/one", title: "甲", folderPath: ["工作"] },
       { url: "https://unknown92.example.com/x", title: "乙", folderPath: ["工作"] },
       { url: "https://github.com/acme/two", title: "丙", folderPath: ["工作", "开发"] },
       { url: "https://github.com/acme/three", title: "丁", folderPath: ["生活"] },
+      { url: "https://figma.com/acme/design", title: "戊", folderPath: ["生活"] },
     ]);
     const tree = await folders();
     const work = folderByName(tree, "工作");
@@ -737,11 +1170,43 @@ describe("D92 无模型规则降级", () => {
     expect((await folders()).length).toBe(tree.length); // 没有新建目录
     expect((await itemsOf(t.id, "unchanged")).items.map((i) => i.reason).sort()).toEqual(["already_placed", "rule_unmatched"]);
 
-    // 规则指向的目录不在子树内：不跨出子树、不凭映射建目录
+    // D94：规则指向的目录是库内任意目录——来源目录里没有「开发」，就归到别处的「开发」（跨根）
     const life = await runTask(folderByName(tree, "生活").id);
-    expect(life.moved).toBe(0);
-    expect((await itemsOf(life.id, "unchanged")).items[0]).toMatchObject({ reason: "rule_target_not_in_scope" });
+    expect(life.moved).toBe(1);
+    expect(life.moved_outside).toBe(1);
+    expect(env.store.getBookmark(byTitle(bookmarksSync(), "丁").id)?.folder_id).toBe(dev.id);
+    expect((await itemsOf(life.id, "moved")).items[0]?.to_path).toBe("工作 / 开发");
+    // 库内没有任何「设计」目录：规则模式不凭映射建目录，如实说明找不到目标
+    expect((await itemsOf(life.id, "unchanged")).items[0]).toMatchObject({ reason: "rule_target_not_found" });
     expect((await folders()).length).toBe(tree.length);
+  });
+
+  it("规则模式同名目录歧义：来源目录内恰有一个时取它，来源内没有且全库不唯一时保留", async () => {
+    env = makeEnv(null);
+    await ingest([
+      { url: "https://github.com/acme/one", title: "待归位", folderPath: ["整理目标", "开发"] },
+      { url: "https://github.com/acme/two", title: "另一处一", folderPath: ["甲", "开发"] },
+      { url: "https://github.com/acme/three", title: "另一处二", folderPath: ["乙", "开发"] },
+    ]);
+    const tree = await folders();
+    // 来源「整理目标」内恰有一个「开发」→ 归到它，不被库外两个同名目录干扰
+    const own = await runTask(folderByName(tree, "整理目标").id);
+    expect(own.moved).toBe(0); // 唯一的书签本来就在「整理目标 / 开发」里
+    expect((await itemsOf(own.id, "unchanged")).items[0]).toMatchObject({ reason: "already_placed" });
+
+    // 再放一条到「整理目标」根下：来源内「开发」唯一 → 归位
+    await ingest([{ url: "https://github.com/acme/four", title: "根下待归位", folderPath: ["整理目标"] }]);
+    const second = await runTask(folderByName(tree, "整理目标").id);
+    expect(second.moved).toBe(1);
+    expect(env.store.getBookmark(byTitle(bookmarksSync(), "根下待归位").id)?.folder_id).toBe(
+      folderByName(tree, "开发", folderByName(tree, "整理目标").id).id,
+    );
+
+    // 来源「甲」内没有同名目标，但「开发」在全库不唯一 → 保留并说明歧义
+    await ingest([{ url: "https://github.com/acme/five", title: "歧义用例", folderPath: ["丙"] }]);
+    const amb = await runTask(folderByName(await folders(), "丙").id);
+    expect(amb.moved).toBe(0);
+    expect((await itemsOf(amb.id, "unchanged")).items[0]).toMatchObject({ reason: "ambiguous_target" });
   });
 
   it("超过 500 条也全范围覆盖：后半段条目同样被处理，计数等式成立", async () => {
@@ -774,6 +1239,7 @@ describe("D92 停止、继续与撤销", () => {
       await ingest([
         { url: "https://stop92.example.com/a", title: "[site:停止主题] 甲", folderPath: ["停止测试"] },
         { url: "https://stop92.example.com/b", title: "[site:停止主题] 乙", folderPath: ["停止测试"] },
+        { url: "https://stop92.example.com/c", title: "[site:停止主题] 丙", folderPath: ["停止测试"] },
       ]);
       const root = folderByName(await folders(), "停止测试");
       const { task } = await createTask(root.id);
@@ -784,7 +1250,7 @@ describe("D92 停止、继续与撤销", () => {
       await waitIdle();
       const t = await view(task.id);
       expect(t.status).toBe("stopped");
-      expect(t.remaining).toBe(2);
+      expect(t.remaining).toBe(3);
       expect(t.moved).toBe(0);
       expect(t.summary).toContain("已停止");
       expect((await folders()).filter((f) => f.name === "停止主题")).toHaveLength(0);
@@ -795,7 +1261,7 @@ describe("D92 停止、继续与撤销", () => {
       await waitIdle();
       const after = await view(task.id);
       expect(after.status).toBe("completed");
-      expect(after.moved).toBe(2);
+      expect(after.moved).toBe(3);
       expect(after.remaining).toBe(0);
     } finally {
       block.release();
@@ -844,6 +1310,7 @@ describe("D92 停止、继续与撤销", () => {
     await ingest([
       { url: "https://u92.example.com/1", title: "[site:远程控制] 远控一", folderPath: ["撤销测试"] },
       { url: "https://u92.example.com/2", title: "[site:远程控制] 远控二", folderPath: ["撤销测试", "旧目录"] },
+      { url: "https://u92.example.com/6", title: "[site:远程控制] 远控三", folderPath: ["撤销测试"] },
       { url: "https://u92.example.com/3", title: "[site:运维] 运维一", folderPath: ["撤销测试"] },
       { url: "https://u92.example.com/4", title: "[content:文章] 一篇文章{cat:技术开发/随笔}", folderPath: ["撤销测试"] },
       { url: "https://u92.example.com/5", title: "[site:运维] 保持原位", folderPath: ["撤销测试", "运维"] },
@@ -860,7 +1327,7 @@ describe("D92 停止、继续与撤销", () => {
 
   it("整次撤销：书签回原位、资料保留、AI 目录回收、被用户改过的目录保留；撤销后不能再继续", async () => {
     const { root, t, ids } = await seedForUndo();
-    expect(t.moved).toBe(3); // 远控一 / 远控二 → 新建「远程控制」；运维一 → 既有「运维」
+    expect(t.moved).toBe(4); // 远控一 / 远控二 / 远控三 → 新建「远程控制」；运维一 → 既有「运维」
     expect(t.converted).toBe(1);
     expect(t.unchanged).toBe(1); // 「保持原位」已在合适目录
     expect(t.created_folders).toBe(1);
@@ -873,7 +1340,7 @@ describe("D92 停止、继续与撤销", () => {
     await waitIdle();
     const after = await view(t.id);
     expect(after.undo_status).toBe("completed");
-    expect(after.undo_restored).toBe(4); // 3 条归位 + 1 条转资料
+    expect(after.undo_restored).toBe(5); // 4 条归位 + 1 条转资料
     expect(after.undo_kept).toBe(0);
     expect(after.undo_folders).toBe(0); // 被用户改名的目录未回收
     // 撤销后旧任务永久不能沿原方案继续
@@ -882,12 +1349,13 @@ describe("D92 停止、继续与撤销", () => {
     expect(((await cont.json()) as { error: string }).error).toBe("task_undo_started");
     // 幂等：重复撤销请求返回当前状态，不重复逆放
     const again = await post(`/organize/tasks/${t.id}/undo`);
-    expect(((await (await again.json()) as { task: TaskView }).task).undo_restored).toBe(4);
+    expect(((await (await again.json()) as { task: TaskView }).task).undo_restored).toBe(5);
 
     const rows = bookmarksSync();
     const folderOf = (title: string): string | undefined => env.store.getBookmark(byTitle(rows, title).id)?.folder_id;
     expect(folderOf("远控一")).toBe(root.id);
     expect(folderOf("远控二")).toBe(folderByName(treeBefore, "旧目录").id);
+    expect(folderOf("远控三")).toBe(root.id);
     expect(folderOf("运维一")).toBe(root.id);
     // 转资料的条目恢复为普通书签，回到原目录；资料与分类保留
     const article = env.store.getBookmark(ids["一篇文章"]!)!;
@@ -900,7 +1368,7 @@ describe("D92 停止、继续与撤销", () => {
     expect(folderByName(treeBefore, "运维").id).toBe(folderByName(treeAfter, "运维").id); // 用户原有目录从未被动
     // 版本历史：任务批次均已标记撤销
     expect(env.store.taskVersions(t.id).every((v) => v.reverted === 1)).toBe(true);
-    expect(after.moved).toBe(3); // 原始整理的计数是历史事实，不被撤销抹掉
+    expect(after.moved).toBe(4); // 原始整理的计数是历史事实，不被撤销抹掉
   });
 
   it("撤销不覆盖整理后的用户修改：被改过的条目保留并计数", async () => {
@@ -912,7 +1380,7 @@ describe("D92 停止、继续与撤销", () => {
     await waitIdle();
     const after = await view(t.id);
     expect(after.undo_status).toBe("partial");
-    expect(after.undo_restored).toBe(3); // 2 条归位 + 1 条转资料
+    expect(after.undo_restored).toBe(4); // 3 条归位 + 1 条转资料
     expect(after.undo_kept).toBe(1);
     expect(env.store.getBookmark(ids["远控一"]!)?.folder_id).toBe(other.id); // 用户的手动移动未被覆盖
   });
@@ -964,7 +1432,7 @@ describe("D92 停止、继续与撤销", () => {
     // 活动任务不裁剪：数量口径下新的任务不受影响
     const after = await view(t.id);
     expect(after.can_continue).toBe(false);
-    expect(after.moved).toBe(3); // 历史计数保留
+    expect(after.moved).toBe(4); // 历史计数保留
     expect((await itemsOf(t.id)).total).toBe(0); // 逐条明细已裁剪
     const cont = await post(`/organize/tasks/${t.id}/continue`, { mode: "remaining" });
     expect(cont.status).toBe(409);
@@ -985,6 +1453,7 @@ describe("D92 恢复与隔离", () => {
       await ingest([
         { url: "https://restart92.example.com/a", title: "[site:恢复主题] 甲", folderPath: ["恢复测试"] },
         { url: "https://restart92.example.com/b", title: "[site:恢复主题] 乙", folderPath: ["恢复测试"] },
+        { url: "https://restart92.example.com/c", title: "[site:恢复主题] 丙", folderPath: ["恢复测试"] },
       ]);
       const root = folderByName(await folders(), "恢复测试");
       const { task } = await createTask(root.id);
@@ -998,14 +1467,14 @@ describe("D92 恢复与隔离", () => {
       await serviceB.idle();
       const done = await view(task.id);
       expect(done.status).toBe("completed");
-      expect(done.moved).toBe(2);
+      expect(done.moved).toBe(3);
       const revision = done.revision;
 
       // 旧 worker 拿到晚到的模型结果：租约已易主，不得写入任何状态或重复移动
       await waitIdle();
       const settled = await view(task.id);
       expect(settled.revision).toBe(revision);
-      expect(settled.moved).toBe(2);
+      expect(settled.moved).toBe(3);
       expect(env.store.taskVersions(task.id)).toHaveLength(1);
     } finally {
       block.release();

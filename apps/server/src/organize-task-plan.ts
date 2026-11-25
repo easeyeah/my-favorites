@@ -3,7 +3,9 @@
  *
  *  ① 先按内容发现主题——首轮不给旧目录名（旧结构是参考不是答案），跨批用已归纳的主题名保持一致；
  *  ② 合并同义主题，生成最多两层的分类树；
- *  ③ 最后才与旧目录做语义映射：语义与粒度都合适才复用（按稳定目录 ID），否则新建；
+ *  ③ 最后才与旧目录做语义映射：语义与粒度都合适才复用（按稳定目录 ID），否则新建——
+ *     候选是**库内任意目录**而不限于来源子树（D94：用户「所有目录都可以是目标」）；与来源目录主题无关、
+ *     库内又没有合适目录的主题新建**顶级**目录，不再硬塞进来源目录；
  *  ④ 内容资料另走一路：用途判定 → 正文取证（已授权缓存 / 受控补抓）→ 内容型判定 → 资料分类；
  *  ⑤ 每条来源收藏恰有一个明确判断：move / convert / keep / fail / skip——不把「模型没给结果」当作「无需调整」。
  *
@@ -12,6 +14,7 @@
  */
 import {
   MATERIAL_ARTICLE_MIN_TEXT,
+  PRIVATE_FOLDER_NAME,
   canonicalizeUrl,
   classifyByRules,
   classifyMaterialKind,
@@ -33,8 +36,16 @@ export const MAX_CATEGORIES = 64;
 const TOPIC_NAME_MAX = 12;
 const CATEGORY_LEVEL_MAX = 20;
 const MAX_TOPIC_SAMPLE = 4;
-/** 映射时附带的现有目录上限（按书签数降序；其余目录走确定性同名匹配兜底） */
+/** 映射时附带的现有目录上限（顶级目录与来源子树优先，其后按书签数降序；其余目录走确定性同名匹配兜底） */
 const MAX_MAPPING_FOLDERS = 200;
+/** D94：单次任务新建顶级目录的数量闸（防一次整理在根级铺出一排目录；超出部分保留原位并说明） */
+export const MAX_NEW_TOP_FOLDERS = 8;
+/**
+ * D95：新目录的最少承接条数——无论建在来源目录下还是顶级。一个目录一条书签等于没整理，
+ * 还把用户的目录树切碎；不足成组的小主题优先并入更宽的主题或复用现有目录，否则保留原位。
+ * 复用现有目录不受此限（把一条书签放进含义相符的现有目录是合理的）。
+ */
+export const MIN_NEW_FOLDER_ITEMS = 3;
 
 const VAGUE_TOPICS = new Set([
   "其他", "杂项", "未分类", "工具", "常用", "收藏", "书签", "分类", "暂定", "misc", "other", "unknown",
@@ -45,12 +56,19 @@ export interface FolderNode {
   /** 任务内稳定 key：t:<主题> / s:<主题>/<子主题> / e:<目录ID>（规则复用） */
   key: string;
   name: string;
-  /** null = 直接挂在被整理目录下 */
+  /** 父节点 key；null = 一级节点。一级新建节点挂在哪里由 placement 决定 */
   parentKey: string | null;
   /** 复用的既有目录 ID（null = 新建） */
   reuseId: string | null;
   /** 实际目录 ID：复用目录即 reuseId；新建目录在首次提交时回填 */
   id: string | null;
+  /**
+   * D94：一级新建节点的落点——inside = 被整理目录之下（主题属于它的子方向）；
+   * top = 顶级目录，继承被整理目录所在的浏览器根（主题与来源目录无关）。复用节点与二级节点不需要。
+   */
+  placement?: "inside" | "top";
+  /** D95：与来源目录无关、但同类太少不值得建目录的主题——改为归入模型指定的最接近的现有大类（节点转为复用） */
+  fallback?: boolean;
 }
 
 export interface TaskPlan {
@@ -216,6 +234,7 @@ function topicSystem(rootName: string, known: string[], userRules: string[]): st
     "判断规则：\n" +
     "1. use：该页面主要价值是「反复访问的网站或工具入口」填 \"site\"；是有实质正文、值得保存下来阅读的文章、教程、文档、报告填 \"content\"；无法判断填 \"unsure\"。\n" +
     `2. topic：按内容主题给一个简短、通用的分类名（不超过 ${TOPIC_NAME_MAX} 个字），例如「前端开发」「部署运维」「远程控制」「设计资源」。不要照抄某条收藏的长标题，不要用「其他」「杂项」「未分类」「工具」这类没有信息量的名称。\n` +
+    `   粒度要粗：按「用户会怎么找这一类东西」分组，不要按品牌、型号或单个网站分。新建目录至少要有 ${MIN_NEW_FOLDER_ITEMS} 条同类才值得，所以只有一两条的小主题不要单独立名，请并入含义更宽的主题。\n` +
     `3. subtopic：仅当该主题下确实存在多个明显不同的子主题时给出更细的一级名称（不超过 ${TOPIC_NAME_MAX} 个字），否则填空字符串。不要为了细分而细分。\n` +
     "4. 同一主题必须始终使用相同名称，不要一会儿叫「前端」一会儿叫「前端开发」。" +
     knownNote +
@@ -230,19 +249,45 @@ function consolidateSystem(): string {
     "下面是分批归纳出的书签主题（含子主题）及条目数。请合并语义相同或高度相近的主题并给出规范名称：canonical 为合并后的名称（不超过 " +
     TOPIC_NAME_MAX +
     " 个字）；语义相同的多个主题必须返回完全相同的 canonical。保留确有区别的主题，不要把不同主题硬并成「其他」。子主题同理；若某子主题与所属主题规范名相同，canonical 填空字符串。\n" +
+    `粒度控制：条目数少于 ${MIN_NEW_FOLDER_ITEMS} 条的小主题，如果能归入某个含义更宽的主题，把它的 canonical 设为那个更宽主题的名称——可以自拟一个更宽的名称，把几个相近的小主题并进去（例如「无人机」「智能手表」「投影仪」并成「智能设备」）；确实独立、无法归并的保留原名。\n` +
     '只返回 JSON：{"topics":[{"name":"原主题名","canonical":"规范名","subtopics":[{"name":"原子主题名","canonical":"规范子主题名"}]}]}，必须覆盖全部主题与子主题。'
   );
 }
 
-function mapSystem(rootName: string): string {
+/**
+ * D94 落点规划提示词：目标是库内任意目录，不限于来源目录内部。
+ * 一级主题要同时回答「复用哪个现有目录」和「不复用时建在哪里」——后者区分「来源目录的子方向」与「与来源无关」。
+ */
+function mapSystem(sourceName: string, sourceSamples: string[]): string {
   return (
-    `你是书签目录规划助手。用户正在整理目录「${rootName}」。已按内容归纳出下面的主题；请判断每个主题是否有「语义和粒度都合适」的现成子目录可以承接：有则 reuseId 填该目录的 id，没有则填 null（将新建目录）。\n` +
+    `你是书签目录规划助手。用户正在整理目录「${sourceName}」（它收录的内容示例：${sourceSamples.join("、") || "（暂无）"}）。` +
+    "已按内容归纳出下面的主题。书签可以归入整个书签库里的任何目录——不限于「" + sourceName + "」内部。\n" +
+    "对每个一级主题（key 以 t: 开头）判断两件事：\n" +
+    "1. reuseId：folders 里是否有「语义和粒度都合适」的现成目录可以承接；有则填该目录的 id，没有填 null。\n" +
+    "2. place：仅当 reuseId 为 null（需要新建目录）时有效——\n" +
+    `   - "inside"：该主题属于「${sourceName}」这个目录的主题范围，是它的一个子方向 → 在「${sourceName}」下新建子目录；\n` +
+    `   - "top"：该主题与「${sourceName}」的主题无关，只是碰巧放在这里 → 新建顶级目录，不要塞进「${sourceName}」。\n` +
+    "3. fallbackId：仅当 place 为 \"top\" 时给出——这个主题的书签如果太少、不值得单独建目录，应该归入库内哪个**顶级大类**（folders 里 path 只有一段的那些，书签会直接放在它下面）。按含义选最接近的一个；库里没有合适的大类才填 null。明显放错地方的书签必须离开它现在的目录，不能因为数量少就留在不相关的目录里。\n" +
     "判断要点：\n" +
-    "- 按代表书签理解每个现有目录实际收录的内容，不要只看目录名字面。\n" +
+    "- 按 path 和代表书签理解每个现有目录实际收录的内容，不要只看目录名字面。\n" +
+    `- 与「${sourceName}」主题无关的内容，优先复用库内其他目录；其他目录都不合适时才新建顶级目录（place="top"）。绝不能因为「它现在在${sourceName}里」就归到${sourceName}下面。\n` +
+    "- folders 里标了 aiCreated:true 的目录是之前的自动整理建出来的，本身可能放错。主题与「" + sourceName + "」无关时，不要因为名字对得上就复用「" + sourceName + "」下面的 aiCreated 目录（那是上一次放错的结果）；优先选库里其他根目录下的现成目录，都不合适才新建顶级目录。\n" +
     "- 仅名称相近但内容混杂的宽泛目录（如「工具」「其他」「常用」）不算合适，不要把明确主题并进去。\n" +
-    "- 现有目录内容与主题一致且粒度相当才复用；粒度过粗或过细都不复用。主题正好对应被整理目录本身的，reuseId 填该目录 id。\n" +
-    '只返回 JSON：{"nodes":[{"key":"…","reuseId":"目录id或null"}]}，必须覆盖全部 key。'
+    `- 现有目录内容与主题一致且粒度相当才复用。新建目录至少要承接 ${MIN_NEW_FOLDER_ITEMS} 条才值得建（nodes 里的 count 是该主题的条数）：count 不足 ${MIN_NEW_FOLDER_ITEMS} 的主题，请尽量把 reuseId 指向库内含义更宽的现成目录；确实没有就填 null——系统不会为只有一两条书签的主题新建目录，place="top" 的主题此时会改归 fallbackId 指向的大类，place="inside" 的保留原位。\n` +
+    `- 主题正好对应「${sourceName}」目录本身的，reuseId 填它的 id。\n` +
+    "对每个二级主题（key 以 s: 开头）只需给出 reuseId：库内有合适的现成目录就填其 id，没有填 null（将建在父主题之下）。\n" +
+    '只返回 JSON：{"nodes":[{"key":"…","reuseId":"目录id或null","place":"inside或top","fallbackId":"顶级目录id或null"}]}，必须覆盖全部 key。'
   );
+}
+
+/** 名称的粗粒度词元：中文取相邻两字，英文/数字取长度 ≥2 的词——只用于模型漏答 place 时的兜底判断 */
+function nameTokens(s: string): Set<string> {
+  const out = new Set<string>();
+  const cjk = s.replace(/[^\u4e00-\u9fff]/g, "");
+  if (cjk.length === 1) out.add(cjk);
+  for (let i = 0; i + 1 < cjk.length; i++) out.add(cjk.slice(i, i + 2));
+  for (const word of s.toLowerCase().match(/[a-z0-9]+/g) ?? []) if (word.length >= 2) out.add(word);
+  return out;
 }
 
 function judgeSystem(): string {
@@ -257,18 +302,19 @@ function judgeSystem(): string {
 // ==================== 规则降级（未配置模型） ====================
 
 /**
- * 无模型：只把域名规则命中且「本子树内恰有一个同名目录」的条目归到该目录（按稳定 ID）。
+ * 无模型：只把域名规则命中、且「库内恰有一个同名目录」的条目归到该目录（按稳定 ID）。
+ * D94：目标是库内任意目录——同名目录优先取来源目录内的那个，来源内没有时取全库唯一的那个，仍歧义则保留。
  * 不凭固定域名映射造一棵号称智能的新树，也不做任何资料转换；其余保留并说明规则未命中。
  */
 export function planRuleOnly(host: PlanHost, task: OrganizeTaskRow, items: OrganizeTaskItemRow[]): PlanOutcome {
   const { store } = host;
   const subtree = new Set(store.folderSubtreeIds(task.folder_id));
-  const byName = new Map<string, string>();
-  const counts = new Map<string, number>();
+  const inside = new Map<string, string[]>();
+  const everywhere = new Map<string, string[]>();
   for (const f of store.listFolders()) {
-    if (!subtree.has(f.id) || f.is_system_inbox === 1) continue;
-    counts.set(f.name, (counts.get(f.name) ?? 0) + 1);
-    byName.set(f.name, f.id);
+    if (f.is_system_inbox === 1 || f.name === PRIVATE_FOLDER_NAME) continue;
+    everywhere.set(f.name, [...(everywhere.get(f.name) ?? []), f.id]);
+    if (subtree.has(f.id)) inside.set(f.name, [...(inside.get(f.name) ?? []), f.id]);
   }
   const nodes = new Map<string, FolderNode>();
   const out: ItemPlan[] = [];
@@ -284,16 +330,17 @@ export function planRuleOnly(host: PlanHost, task: OrganizeTaskRow, items: Organ
       out.push(keep(it, "rule_unmatched"));
       continue;
     }
-    const hits = counts.get(rule.category) ?? 0;
-    if (hits === 0) {
-      out.push(keep(it, "rule_target_not_in_scope"));
+    const local = inside.get(rule.category) ?? [];
+    const hits = local.length > 0 ? local : (everywhere.get(rule.category) ?? []);
+    if (hits.length === 0) {
+      out.push(keep(it, "rule_target_not_found"));
       continue;
     }
-    if (hits > 1) {
+    if (hits.length > 1) {
       out.push(keep(it, "ambiguous_target"));
       continue;
     }
-    const targetId = byName.get(rule.category)!;
+    const targetId = hits[0]!;
     if (bm.folder_id === targetId) {
       out.push(keep(it, "already_placed"));
       continue;
@@ -469,21 +516,39 @@ export async function planWithAi(host: PlanHost, task: OrganizeTaskRow, items: O
     v.subKey = v.subtopic ? `s:${v.topic}/${v.subtopic}` : null;
   }
 
-  // ---------- ③ 与旧目录做语义映射：按稳定 ID 复用，或新建（新节点距被整理目录最多两层） ----------
+  // ---------- ③ 与旧目录做语义映射：按稳定 ID 复用库内任意目录，或新建（D94：与来源无关的新建顶级目录） ----------
   await host.checkpoint();
-  host.note("正在对照现有目录，决定复用或新建");
+  host.note("正在对照库内现有目录，决定复用还是新建");
   const subtree = new Set(store.folderSubtreeIds(task.folder_id));
   const samples = store.folderSampleTitles(3);
-  const pool = new Map<string, { name: string; count: number; path: string; samples: string[] }>();
+  // 候选 = 库内全部普通目录；系统收纳盒、「私人收藏」（敏感内容专用目录）及其后代不可作为落点
+  const excluded = new Set<string>();
   for (const f of store.listFolders()) {
-    if (!subtree.has(f.id) || f.is_system_inbox === 1) continue;
+    if (f.is_system_inbox === 1 || f.name === PRIVATE_FOLDER_NAME) {
+      for (const sid of store.folderSubtreeIds(f.id)) excluded.add(sid);
+    }
+  }
+  const pool = new Map<string, { name: string; count: number; path: string; samples: string[]; top: boolean; inSource: boolean; aiCreated: boolean }>();
+  for (const f of store.listFolders()) {
+    if (excluded.has(f.id)) continue;
+    const aiCreated = f.source === "ai_created";
+    const count = store.listBookmarks({ folderId: f.id, limit: 1000 }).length;
+    // D95：来源目录里之前自动整理建的、不足成组门槛的小目录，正是过细整理的产物，里面的书签本次会被重新归位——
+    // 不作为复用候选。否则模型（或同名兜底）一旦选中它，里面的书签就被判成「已在合适位置」，放错的结果原样保留
+    if (aiCreated && subtree.has(f.id) && count < MIN_NEW_FOLDER_ITEMS) continue;
     pool.set(f.id, {
       name: f.name,
-      count: store.listBookmarks({ folderId: f.id, limit: 1000 }).length,
-      path: relPathOf(store, f.id, root.id),
+      count,
+      // 候选是全库目录，路径一律从顶级写起（「工作 / 开发 / 前端」），模型才分得清内外
+      path: relPathOf(store, f.id, ""),
       samples: samples.get(f.id) ?? [],
+      top: !f.parent_id,
+      inSource: subtree.has(f.id),
+      // D95：之前的自动整理建的目录——可能是放错的结果，要让模型知道别盲目复用
+      aiCreated,
     });
   }
+  const sourceSamples = samples.get(root.id) ?? [];
   const toMap: Array<{ key: string; name: string; count: number; samples: string[] }> = [];
   for (const [name, agg] of tree) {
     toMap.push({ key: `t:${name}`, name, count: agg.count, samples: agg.samples });
@@ -492,18 +557,28 @@ export async function planWithAi(host: PlanHost, task: OrganizeTaskRow, items: O
     }
   }
   const reuse = new Map<string, string | null>();
+  /** D94：一级主题不复用现有目录时建在哪里 */
+  const placement = new Map<string, "inside" | "top">();
+  /** D95：一级新建节点的退路——同类太少不值得建目录时，改为归入的这个现有大类（不建目录，书签直接放进去） */
+  const fallback = new Map<string, string | null>();
   if (toMap.length > 0) {
+    // 顶级目录与来源子树优先进入提示词（跨根复用的前提是模型看得到其他根），其后按书签数降序
+    const rank = (f: { top: boolean; inSource: boolean; count: number }): number[] => [f.inSource ? 1 : 0, f.top ? 1 : 0, f.count];
     const foldersForPrompt = [...pool]
-      .sort((a, b) => b[1].count - a[1].count)
+      .sort((a, b) => {
+        const ra = rank(a[1]);
+        const rb = rank(b[1]);
+        return rb[0]! - ra[0]! || rb[1]! - ra[1]! || rb[2]! - ra[2]!;
+      })
       .slice(0, MAX_MAPPING_FOLDERS)
-      .map(([id, f]) => ({ id, path: f.path, samples: f.samples }));
-    let mapped: Map<string, string | null>;
+      .map(([id, f]) => ({ id, path: f.path, samples: f.samples, ...(f.aiCreated ? { aiCreated: true } : {}) }));
+    let mapped: Map<string, { reuseId?: string | null; place?: string; fallbackId?: string | null }>;
     try {
-      const out = await host.callJson<{ nodes?: Array<{ key?: string; reuseId?: string | null }> }>([
-        { role: "system", content: mapSystem(root.name) },
-        { role: "user", content: JSON.stringify({ nodes: toMap, folders: foldersForPrompt }) },
+      const out = await host.callJson<{ nodes?: Array<{ key?: string; reuseId?: string | null; place?: string; fallbackId?: string | null }> }>([
+        { role: "system", content: mapSystem(root.name, sourceSamples) },
+        { role: "user", content: JSON.stringify({ source: root.name, nodes: toMap, folders: foldersForPrompt }) },
       ]);
-      mapped = new Map((out?.nodes ?? []).map((n) => [String(n?.key ?? ""), n?.reuseId ? String(n.reuseId) : null]));
+      mapped = new Map((out?.nodes ?? []).map((n) => [String(n?.key ?? ""), n ?? {}]));
     } catch {
       // 规划是本次整理的前提：模型无响应时明确失败，不静默退化成「全建新目录」再宣称整理成功
       throw new PlanError("plan_mapping_failed", "目录方案规划失败（模型无响应或返回无效），尚未应用任何调整。可稍后重试。");
@@ -513,27 +588,47 @@ export async function planWithAi(host: PlanHost, task: OrganizeTaskRow, items: O
     for (const [id, f] of pool) {
       byNorm.set(norm(f.name), [...(byNorm.get(norm(f.name)) ?? []), id]);
     }
+    // 模型漏答 place 时的兜底：主题名与来源目录（及其现有子目录）名称毫无共同词元 → 视为无关，建顶级目录。
+    // 只看用户自己的目录名——自动整理建过的目录名都是历史主题，算进来会让每个出现过的主题都显得「相关」
+    const sourceTokens = new Set<string>();
+    for (const f of store.listFolders()) {
+      if (!subtree.has(f.id) || f.is_system_inbox === 1 || f.source === "ai_created") continue;
+      for (const t of nameTokens(f.name)) sourceTokens.add(t);
+    }
+    const fallbackPlace = (topic: string): "inside" | "top" =>
+      [...nameTokens(topic)].some((t) => sourceTokens.has(t)) ? "inside" : "top";
     for (const node of toMap) {
-      const picked = mapped.get(node.key);
+      const raw = mapped.get(node.key);
+      // 模型是否对这个 key 明确回答了「复用谁」——答了 null 也是回答，不能被同名兜底覆盖
+      const answered = raw !== undefined && raw.reuseId !== undefined;
+      const picked = raw?.reuseId ? String(raw.reuseId) : null;
+      // 同名兜底只在模型没答这个 key 时启用（来源目录里自动整理建的小目录已在候选筛选里排除）
+      const sameName = byNorm.get(norm(node.name)) ?? [];
       reuse.set(
         node.key,
-        picked && pool.has(picked)
-          ? picked
-          : // 兜底：模型未复用或给出无效 ID 时，名称完全一致且唯一的现有目录直接复用（不建同义副本）
-            (byNorm.get(norm(node.name))?.length === 1 ? byNorm.get(norm(node.name))![0]! : null),
+        picked && pool.has(picked) ? picked : !answered && sameName.length === 1 ? sameName[0]! : null,
       );
+      if (!node.key.startsWith("s:")) {
+        placement.set(node.key, raw?.place === "top" || raw?.place === "inside" ? raw.place : fallbackPlace(node.name));
+        // D95：与来源无关的主题若同类太少不值得建目录，改归模型指定的最接近大类——不能指回来源目录自己或它的子树（那等于没挪）
+        const fbId = typeof raw?.fallbackId === "string" ? raw.fallbackId : "";
+        fallback.set(node.key, fbId && pool.has(fbId) && !subtree.has(fbId) ? fbId : null);
+      }
     }
   }
   const folderNodes: FolderNode[] = [];
   const nodeByKey = new Map<string, FolderNode>();
   const folderName = (id: string): string => store.getFolder(id)?.name ?? "";
+  // 候选节点先全部建出来：成组门槛（D95）与顶级数量闸（D94）都在 ⑤ 按真实承接数筛，筛掉的节点不落任何变更
   for (const [name, agg] of tree) {
     const key = `t:${name}`;
     const reuseId = reuse.get(key) ?? null;
-    const node: FolderNode = { key, name: reuseId ? folderName(reuseId) : name, parentKey: null, reuseId, id: reuseId };
+    const node: FolderNode = reuseId
+      ? { key, name: folderName(reuseId), parentKey: null, reuseId, id: reuseId }
+      : { key, name, parentKey: null, reuseId: null, id: null, placement: placement.get(key) === "top" ? "top" : "inside" };
     folderNodes.push(node);
     nodeByKey.set(key, node);
-    // 新子目录只挂在「新建的一级主题」或「被整理目录自身」之下——新节点距根最多两层
+    // 新的二级目录只挂在「新建的一级主题」或「被整理目录自身」之下——不在别处的现有目录里派生子目录
     const canCreateSub = !reuseId || reuseId === root.id;
     for (const [sname, s] of agg.subs) {
       const sKey = `s:${name}/${sname}`;
@@ -548,20 +643,6 @@ export async function planWithAi(host: PlanHost, task: OrganizeTaskRow, items: O
         nodeByKey.set(sKey, subNode);
       }
       // 不能新建子目录时，该子主题的条目落到所属主题（不越层、不丢条目）
-    }
-  }
-  const newCount = (): number => folderNodes.filter((n) => !n.reuseId).length;
-  if (newCount() > MAX_NEW_FOLDERS) {
-    // 先做一次受限粗化：放弃新建的二级目录，条目归到所属一级主题
-    for (const n of folderNodes.filter((x) => x.parentKey !== null && !x.reuseId)) nodeByKey.delete(n.key);
-    for (let i = folderNodes.length - 1; i >= 0; i--) {
-      if (folderNodes[i]!.parentKey !== null && !folderNodes[i]!.reuseId) folderNodes.splice(i, 1);
-    }
-    if (newCount() > MAX_NEW_FOLDERS) {
-      throw new PlanError(
-        "too_many_folders",
-        `目录方案过细：拟新建 ${newCount()} 个目录，超过单次上限 ${MAX_NEW_FOLDERS}，尚未应用任何调整。`,
-      );
     }
   }
 
@@ -690,6 +771,94 @@ export async function planWithAi(host: PlanHost, task: OrganizeTaskRow, items: O
   }
 
   // ---------- ⑤ 书签分支落点：目标与当前是同一目录 ID 才算「已在合适位置」 ----------
+
+  const movableKeyOf = (v: RawVerdict): string | null => {
+    if (v.use === "unsure" || !(v.confidence >= MOVE_CONFIDENCE)) return null;
+    const key = v.subKey && nodeByKey.has(v.subKey) ? v.subKey : v.topicKey;
+    return nodeByKey.has(key) ? key : null;
+  };
+  /** 各节点本轮真正会搬进去的条数（已在目标目录里的不算） */
+  const inflowOf = (): Map<string, number> => {
+    const inflow = new Map<string, number>();
+    for (const it of usable) {
+      if (plans.has(it.bookmark_id)) continue;
+      const v = verdicts.get(it.bookmark_id);
+      const key = v ? movableKeyOf(v) : null;
+      if (!key) continue;
+      const node = nodeByKey.get(key)!;
+      const bm = store.getBookmark(it.bookmark_id);
+      if (node.id && bm && bm.folder_id === node.id) continue; // 已在目标目录里，不算「搬进去」
+      inflow.set(key, (inflow.get(key) ?? 0) + 1);
+    }
+    return inflow;
+  };
+  const dropNode = (key: string): void => {
+    const node = nodeByKey.get(key);
+    if (!node) return;
+    nodeByKey.delete(key);
+    folderNodes.splice(folderNodes.indexOf(node), 1);
+  };
+  const newCount = (): number => folderNodes.filter((n) => !n.reuseId).length;
+
+  /**
+   * D95 成组门槛：新目录直接承接的条数不足 MIN_NEW_FOLDER_ITEMS 就不建（复用现有目录不受限）。
+   * 在用途与资料判定之后统计，才是「真的会搬进去」的条数。
+   *  - 二级新目录不足 → 撤销，条目回流一级主题；
+   *  - 一级新目录直接承接不足：没有保住的新子目录 → 不建，条目保留原位；只保住一个 → 连它一起撤销
+   *    （空壳归组目录里套一个子目录，同样是三条书签占两层）；保住两个及以上 → 保留（成组的归组目录）。
+   */
+  const inflow = inflowOf();
+  for (const [key, node] of [...nodeByKey]) {
+    if (node.parentKey === null || node.reuseId) continue;
+    if ((inflow.get(key) ?? 0) >= MIN_NEW_FOLDER_ITEMS) continue;
+    inflow.set(node.parentKey!, (inflow.get(node.parentKey!) ?? 0) + (inflow.get(key) ?? 0));
+    dropNode(key);
+  }
+  const tooFew = new Set<string>();
+  for (const [key, node] of [...nodeByKey]) {
+    if (node.parentKey !== null || node.reuseId) continue;
+    const own = inflow.get(key) ?? 0;
+    const subs = folderNodes.filter((n) => n.parentKey === key && !n.reuseId);
+    if (own >= MIN_NEW_FOLDER_ITEMS || subs.length >= 2) continue;
+    if (subs.length === 1) {
+      inflow.set(key, own + (inflow.get(subs[0]!.key) ?? 0));
+      dropNode(subs[0]!.key);
+      continue;
+    }
+    // 与来源目录无关的主题不留在原地：同类太少不值得建目录时，归入模型指定的最接近大类（转为复用节点，不受门槛限制）。
+    // 属于来源目录主题的子方向（inside）本来就属于这里，同类太少就保留原位
+    const fbId = node.placement === "top" ? fallback.get(key) : null;
+    if (fbId && pool.has(fbId) && store.getFolder(fbId)) {
+      node.reuseId = fbId;
+      node.id = fbId;
+      node.name = folderName(fbId);
+      delete node.placement;
+      node.fallback = true;
+      continue;
+    }
+    dropNode(key);
+    tooFew.add(key);
+  }
+  // D94：一次整理不能在根级铺出一排新目录——成组之后拟新建的顶级主题按承接数降序只保留前 N 个，其余条目保留原位并说明
+  const cappedTop = new Set(
+    folderNodes
+      .filter((n) => n.parentKey === null && !n.reuseId && n.placement === "top")
+      .map((n) => n.key)
+      .sort((a, b) => (inflow.get(b) ?? 0) - (inflow.get(a) ?? 0))
+      .slice(MAX_NEW_TOP_FOLDERS),
+  );
+  for (const key of cappedTop) dropNode(key);
+  if (newCount() > MAX_NEW_FOLDERS) {
+    // 先做一次受限粗化：放弃新建的二级目录，条目归到所属一级主题
+    for (const n of folderNodes.filter((x) => x.parentKey !== null && !x.reuseId)) dropNode(n.key);
+    if (newCount() > MAX_NEW_FOLDERS) {
+      throw new PlanError(
+        "too_many_folders",
+        `目录方案过细：拟新建 ${newCount()} 个目录，超过单次上限 ${MAX_NEW_FOLDERS}，尚未应用任何调整。`,
+      );
+    }
+  }
+
   for (const it of usable) {
     if (plans.has(it.bookmark_id)) continue;
     const v = verdicts.get(it.bookmark_id);
@@ -704,7 +873,11 @@ export async function planWithAi(host: PlanHost, task: OrganizeTaskRow, items: O
     const key = v.subKey && nodeByKey.has(v.subKey) ? v.subKey : v.topicKey;
     const node = nodeByKey.get(key) ?? nodeByKey.get(v.topicKey);
     if (!node) {
-      plans.set(it.bookmark_id, keep(it, "insufficient_evidence"));
+      // 一级主题本身没有节点：如实给出原因——新建顶级目录数量到上限，或同类太少不值得单独建目录
+      plans.set(
+        it.bookmark_id,
+        keep(it, cappedTop.has(v.topicKey) ? "new_roots_capped" : tooFew.has(v.topicKey) ? "too_few_to_group" : "insufficient_evidence"),
+      );
       continue;
     }
     const bm = store.getBookmark(it.bookmark_id)!;
@@ -714,7 +887,7 @@ export async function planWithAi(host: PlanHost, task: OrganizeTaskRow, items: O
     }
     plans.set(it.bookmark_id, {
       itemId: it.id, bookmarkId: it.bookmark_id, decision: "move", targetKey: node.key, category: null,
-      materialType: null, reason: v.reason || "topic_match", retryable: 0, kind: "bookmark", evidenceRef: null,
+      materialType: null, reason: node.fallback ? "fallback_category" : v.reason || "topic_match", retryable: 0, kind: "bookmark", evidenceRef: null,
     });
   }
 

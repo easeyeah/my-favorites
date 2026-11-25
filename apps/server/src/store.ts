@@ -2855,6 +2855,15 @@ export class Store {
     ).c;
   }
 
+  /** 已移动条目的落点节点 key（D94：据此统计有多少条移出了来源目录） */
+  organizeTaskMovedTargetKeys(taskId: string): string[] {
+    return (
+      this.db
+        .prepare("SELECT plan_target_key AS k FROM organize_task_item WHERE task_id = ? AND decision = 'moved' AND plan_target_key IS NOT NULL")
+        .all(taskId) as Array<{ k: string }>
+    ).map((r) => r.k);
+  }
+
   /** 任务视图用：已落库的书签目录 / 资料分类承接数（只聚合，不加载明细） */
   organizeTaskTargetCounts(taskId: string): { folders: Map<string, number>; categories: Map<string, number> } {
     const folders = new Map<string, number>();
@@ -2984,6 +2993,8 @@ export class Store {
     remaining: number;
     /** unchanged 中「证据不足」的条目数 */
     insufficient: number;
+    /** D95：unchanged 中「同类太少，未单独建目录」的条目数 */
+    tooFew: number;
   } {
     const rows = this.db
       .prepare(
@@ -2991,7 +3002,7 @@ export class Store {
          WHERE task_id = ? GROUP BY decision, mb`,
       )
       .all(taskId) as Array<{ decision: string; mb: string; c: number }>;
-    const out = { moved: 0, converted: 0, newMaterials: 0, reusedMaterials: 0, unchanged: 0, skipped: 0, failed: 0, remaining: 0, insufficient: 0 };
+    const out = { moved: 0, converted: 0, newMaterials: 0, reusedMaterials: 0, unchanged: 0, skipped: 0, failed: 0, remaining: 0, insufficient: 0, tooFew: 0 };
     for (const r of rows) {
       if (r.decision === "moved") out.moved += r.c;
       else if (r.decision === "converted") {
@@ -3007,6 +3018,12 @@ export class Store {
     out.insufficient = (
       this.db
         .prepare("SELECT COUNT(*) AS c FROM organize_task_item WHERE task_id = ? AND decision = 'keep' AND reason = 'insufficient_evidence'")
+        .get(taskId) as { c: number }
+    ).c;
+    // D95：同类太少、不值得单独建目录而保留原位的条目
+    out.tooFew = (
+      this.db
+        .prepare("SELECT COUNT(*) AS c FROM organize_task_item WHERE task_id = ? AND decision = 'keep' AND reason = 'too_few_to_group'")
         .get(taskId) as { c: number }
     ).c;
     return out;

@@ -25,6 +25,7 @@ import {
   planWithAi,
   relPathOf,
   type ChatMessage,
+  type FolderNode,
   type ItemPlan,
   type PlanHost,
   type PlanOutcome,
@@ -78,6 +79,8 @@ export interface OrganizeTaskFolderView {
   folder_id: string | null;
   planned_count: number;
   actual_count: number;
+  /** D94：落点在来源目录之外（复用了库内其他目录，或新建的顶级目录） */
+  outside: boolean;
 }
 
 export interface OrganizeTaskCategoryView {
@@ -102,6 +105,8 @@ export interface OrganizeTaskView {
   /** 规划阶段：已形成判断的条目数（阶段工作量，不等于已落库） */
   planned: number;
   moved: number;
+  /** D94：已移动条目中落到来源目录之外的条数（跨根复用 / 新建顶级目录）；明细已裁剪的历史任务不带 */
+  moved_outside?: number;
   converted: number;
   new_materials: number;
   reused_materials: number;
@@ -136,7 +141,7 @@ export interface OrganizeTaskView {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-function summarize(t: OrganizeTaskRow & { remaining: number; checked: number; skipped: number; insufficient: number }): string | null {
+function summarize(t: OrganizeTaskRow & { remaining: number; checked: number; skipped: number; insufficient: number; tooFew: number }): string | null {
   if (t.status === "queued" || t.status === "running" || t.status === "stopping") return null;
   if (t.status === "failed") return t.error ?? "任务未能继续";
   if (t.status === "stopped") {
@@ -148,11 +153,19 @@ function summarize(t: OrganizeTaskRow & { remaining: number; checked: number; sk
       ? `已按本地规则归位 ${t.moved} 条；其余 ${t.unchanged} 条规则未命中，保持原位（未配置模型，未做 AI 主题发现与资料分流）`
       : "未配置整理模型，本次仅检查本地规则；规则未命中，没有移动书签";
   }
+  const few = t.tooFew > 0 ? `${t.tooFew} 条同类太少，未单独建目录` : "";
   if (t.moved + t.converted === 0) {
-    const why = t.insufficient > 0 ? `有 ${t.insufficient} 条证据不足，保留原位` : "当前位置均合适";
+    const parts = [
+      t.insufficient > 0 ? `${t.insufficient} 条证据不足` : "",
+      t.insufficient > 0 && t.tooFew > 0 ? "，" : "",
+      few,
+    ].join("");
+    const why = parts ? `有 ${parts}，保留原位` : "当前位置均合适";
     return `已检查 ${t.total} 条，${why}，本次未调整`;
   }
-  const tail = t.insufficient > 0 ? `；另有 ${t.insufficient} 条证据不足，保持原位` : "";
+  const tail =
+    (t.insufficient > 0 ? `；另有 ${t.insufficient} 条证据不足，保持原位` : "") +
+    (t.tooFew > 0 ? `；${t.tooFew} 条同类太少，未单独建目录` : "");
   return `检查完成：书签归位 ${t.moved} 条${t.converted > 0 ? `，转入资料 ${t.converted} 条` : ""}${tail}`;
 }
 
@@ -382,6 +395,7 @@ export class OrganizeTaskService {
           moved: task.moved, converted: task.converted, newMaterials: task.new_materials,
           reusedMaterials: task.reused_materials, unchanged: task.unchanged, skipped: task.skipped, failed: task.failed,
           insufficient: 0,
+          tooFew: 0,
         }
       : live;
     const skipped = c.skipped + task.protected_count;
@@ -406,6 +420,7 @@ export class OrganizeTaskService {
       id: task.id, folder_id: task.folder_id, folder_name: task.folder_name, status: task.status, phase: task.phase,
       phase_note: task.phase_note, mode: task.mode, total: task.total, checked, remaining,
       planned: pruned ? 0 : this.store.countOrganizeTaskPlanned(task.id),
+      ...(pruned ? {} : { moved_outside: this.countMovedOutside(task, plan ?? undefined) }),
       moved: c.moved, converted: c.converted, new_materials: c.newMaterials, reused_materials: c.reusedMaterials,
       unchanged: c.unchanged, skipped, failed: c.failed, protected_count: task.protected_count,
       excluded_archived: task.excluded_archived, ...(pruned ? history : structure),
@@ -416,6 +431,19 @@ export class OrganizeTaskService {
       finished_at: task.finished_at,
       summary: summarize({ ...task, ...c, skipped, checked, remaining }),
     };
+  }
+
+  /** D94：已移动条目里落到来源目录之外的数量——按规划节点判定，不依赖条目当前是否又被用户移动 */
+  private countMovedOutside(task: OrganizeTaskRow, plan: TaskPlan | undefined): number {
+    if (!plan) return 0;
+    const subtree = new Set(this.store.folderSubtreeIds(plan.rootFolderId));
+    const byKey = new Map(plan.folderNodes.map((n) => [n.key, n]));
+    let count = 0;
+    for (const key of this.store.organizeTaskMovedTargetKeys(task.id)) {
+      const node = byKey.get(key);
+      if (node?.id && !subtree.has(node.id)) count += 1;
+    }
+    return count;
   }
 
   itemView(it: OrganizeTaskItemRow): OrganizeTaskItemView {
@@ -446,16 +474,23 @@ export class OrganizeTaskService {
     }
     const terminal = !ACTIVE_STATUSES.includes(task.status);
     const rootName = root?.name ?? task.folder_name;
-    const nameOf = (key: string | null): string | null => plan.folderNodes.find((n) => n.key === key)?.name ?? null;
+    // D94：落点可能在来源目录之外（复用其他目录 / 新建顶级目录）——未创建的节点按规划推算完整路径
+    const plannedPath = (n: FolderNode): string => {
+      if (!n.parentKey) return n.placement === "top" ? n.name : [rootName, n.name].join(" / ");
+      const parent = plan.folderNodes.find((x) => x.key === n.parentKey);
+      return parent ? `${plannedPath(parent)} / ${n.name}` : n.name;
+    };
+    const subtree = new Set(this.store.folderSubtreeIds(plan.rootFolderId));
+    const outsideOf = (n: FolderNode): boolean =>
+      n.id ? !subtree.has(n.id) : n.placement === "top" || (n.parentKey ? outsideOf(plan.folderNodes.find((x) => x.key === n.parentKey)!) : false);
     return plan.folderNodes.map((n) => ({
       key: n.key,
-      path: n.id && root
-        ? relPathOf(this.store, n.id, root.id)
-        : [rootName, nameOf(n.parentKey), n.name].filter(Boolean).join(" / "),
+      path: n.id && root ? relPathOf(this.store, n.id, root.id) : plannedPath(n),
       state: n.reuseId ? "reused" : n.id ? "created" : terminal ? "unapplied" : "planned",
       folder_id: n.id,
       planned_count: planned.get(n.key) ?? 0,
       actual_count: actual.get(n.key) ?? 0,
+      outside: outsideOf(n),
     }));
   }
 
@@ -814,23 +849,34 @@ export class OrganizeTaskService {
     }
   }
 
-  /** 新建目录按需创建（父先子后，同事务）；已删除的本任务目录不按同名复建 */
+  /**
+   * 新建目录按需创建（父先子后，同事务）；已删除的本任务目录不按同名复建。
+   * D94：一级新建节点按 placement 落点——inside 挂被整理目录之下；top 建为顶级目录并继承被整理目录所在的浏览器根。
+   */
   private ensureNode(plan: TaskPlan, key: string | null, versionActions: unknown[]): FolderRow | undefined {
     if (!key) return undefined;
     const node = plan.folderNodes.find((n) => n.key === key);
     if (!node) return undefined;
     if (node.id) return this.store.getFolder(node.id);
-    const parent = node.parentKey ? this.ensureNode(plan, node.parentKey, versionActions) : this.store.getFolder(plan.rootFolderId);
-    if (!parent) return undefined;
-    if (this.store.folderDepth(parent.id) + 1 > MAX_DEPTH) return undefined;
-    // 等待期间用户已建出同父同名目录：复用它，不建重复副本
-    const existing = this.store.findFolderUnder(node.name, parent.id, parent.root === "other" ? "other" : "bar");
+    const source = this.store.getFolder(plan.rootFolderId);
+    if (!source) return undefined;
+    const browserRootOf = (f: FolderRow): "bar" | "other" => (f.root === "other" ? "other" : "bar");
+    const top = !node.parentKey && node.placement === "top";
+    const parent = node.parentKey ? this.ensureNode(plan, node.parentKey, versionActions) : top ? undefined : source;
+    if (!top && !parent) return undefined;
+    const parentId = top || !parent ? null : parent.id;
+    const browserRoot = top || !parent ? browserRootOf(source) : browserRootOf(parent);
+    if (parentId && this.store.folderDepth(parentId) + 1 > MAX_DEPTH) return undefined;
+    // 等待期间用户已建出同父同名目录（顶级目录则限同一浏览器根内）：复用它，不建重复副本
+    const existing = parentId
+      ? this.store.findFolderUnder(node.name, parentId, browserRoot)
+      : this.store.findFolderUnder(node.name, null, browserRoot);
     if (existing) {
       node.id = existing.id;
       node.reuseId = existing.id;
       return existing;
     }
-    const created = this.store.createFolder(node.name, parent.id, "ai_created", false, parent.root === "other" ? "other" : "bar");
+    const created = this.store.createFolder(node.name, parentId, "ai_created", false, browserRoot);
     node.id = created.id;
     versionActions.push({
       type: "createFolder", folderId: created.id, name: created.name,
