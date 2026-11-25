@@ -180,3 +180,33 @@ test("全库重分类（仍是旧同步流程）：结果与撤销按真实回�
 
   await browser.close();
 });
+
+test("落点不限于来源目录（D94）：来源里没有对应目录时归到库内其他目录，并标明移到了目录之外", async () => {
+  // 「设计」目录只在别处存在——来源目录「跨根来源」里没有
+  await ingest([
+    { url: "https://figma.com/acme/d94-seed", title: "设计种子", folderPath: ["跨根目标", "设计"] },
+    { url: "https://figma.com/acme/d94-design", title: "跨根待归位", folderPath: ["跨根来源"] },
+  ]);
+  const browser = await chromium.launch({ channel: "msedge", headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await page.goto(`${BASE}/#bookmarks`);
+  await openFolder(page, "跨根来源");
+  await page.locator("[data-organize-start]").click();
+  const dialog = page.locator("[data-organize-task]");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText(/已按本地规则归位 1 条/)).toBeVisible({ timeout: 15_000 });
+  // 明细写出完整去向；状态块单独说明有条目移到了这个目录之外
+  await expect(dialog.getByText("跨根来源 → 跨根目标 / 设计")).toBeVisible();
+  await expect(dialog.locator("[data-task-moved-outside]")).toHaveText(/其中 1 条归入了这个目录之外/);
+  // 目录变化里，外部目录带完整路径与「目录外」标记（限定在目录变化行内，避免与结果明细里的去向文字重复匹配）
+  await dialog.getByRole("button", { name: /目录变化/ }).click();
+  const outsideRow = dialog.locator("li").filter({ hasText: "目录外" });
+  await expect(outsideRow).toHaveCount(1);
+  await expect(outsideRow).toContainText("跨根目标 / 设计");
+  // 服务端真相：书签确实落在别处的「设计」目录，来源目录下没有新建
+  const target = (await folders()).find((f) => f.name === "设计")!;
+  expect((await bookmarks()).find((b) => b.title === "跨根待归位")!.folder_id).toBe(target.id);
+  expect((await folders()).some((f) => f.name === "设计" && f.parent_id !== target.parent_id)).toBe(false);
+
+  await browser.close();
+});
